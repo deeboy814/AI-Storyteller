@@ -1,0 +1,10 @@
+# Your own stories, pictures, settings and API keys live in data/ and must never be committed
+data/
+.venv/
+__pycache__/
+*.pyc
+*.part
+.claude/
+release/
+# Local test files
+*.log
