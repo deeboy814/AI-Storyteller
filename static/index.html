@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Storyteller</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="home" class="home hidden"></div>
+<div id="app">
+  <header>
+    <div class="titles">
+      <div id="title" class="title">AI Storyteller</div>
+      <div id="subtitle" class="subtitle"></div>
+    </div>
+    <div class="tools">
+      <select id="modelSelect" title="Model"></select>
+      <button class="icon" id="btnSide" title="Status panel">ℹ</button>
+      <button class="icon" id="btnHome" title="Home: all your stories">🏠</button>
+      <button class="icon" id="btnCast" title="Cast, portraits &amp; gallery">🎭</button>
+      <button class="icon hidden" id="btnEndings" title="Possible endings (spoilers)">🏁</button>
+      <button class="icon" id="btnMemory" title="Memory: summary, pinned facts, backups">🧠</button>
+      <button class="icon" id="btnSearch" title="Search the story and bookmarks">🔍</button>
+      <button class="icon" id="btnPlayer" title="Player: avatar & user notes">👤</button>
+      <button class="icon" id="btnEdit" title="Edit story prompt">✎</button>
+      <button class="icon" id="btnExport" title="Export as text">⭳</button>
+      <button class="icon" id="btnSettings" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="narrative"></section>
+    <aside id="sidebar"></aside>
+  </main>
+
+  <footer>
+    <div id="artBanner" class="artbanner hidden"></div>
+    <div id="cacheNote" class="cachenote"></div>
+    <div id="budgetNote" class="budgetnote hidden"></div>
+    <div id="genStatus" class="genstatus hidden"></div>
+    <div id="quickBar" class="quickbar hidden"></div>
+    <div id="replyOpts" class="replyopts hidden"></div>
+    <div id="chips"></div>
+    <div class="inputrow">
+      <button class="icon" id="btnUndo" title="Undo last turn">↶</button>
+      <button class="icon" id="btnRetry" title="Retry last turn">↻</button>
+      <button class="icon" id="btnCompare" title="Compare two AIs on your next move">⚖</button>
+      <button class="icon" id="btnQuick" title="Quick instructions for the narrator">⚡</button>
+      <button class="icon" id="btnReplies" title="Suggest three replies based on what just happened">💡</button>
+      <button class="icon" id="btnIllustrate" title="Illustrate the latest reply">🎨</button>
+      <textarea id="input" rows="1" placeholder="What do you do?"></textarea>
+      <button class="primary" id="btnSend">Send</button>
+    </div>
+  </footer>
+</div>
+
+<div id="modal" class="hidden"><div class="card" id="modalCard"></div></div>
+<script src="/static/theme.js"></script>
+<script src="/static/models.js"></script>
+<script src="/static/panel.js"></script>
+<script src="/static/creator.js"></script>
+<script src="/static/usage.js"></script>
+<script src="/static/memory.js"></script>
+<script src="/static/tools.js"></script>
+<script src="/static/avatars.js"></script>
+<script src="/static/home.js"></script>
+<script src="/static/images.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
