@@ -24,6 +24,7 @@ End EVERY reply with a machine-readable state block on its own, exactly like thi
 """
 
 SCENE_RE = re.compile(r"<scene>(.*?)(?:</scene>|\Z)", re.DOTALL | re.IGNORECASE)
+NEWCHAR_RE = re.compile(r"<newchar>(.*?)(?:</newchar>|\Z)", re.DOTALL | re.IGNORECASE)
 STATE_RE = re.compile(r"<state>(.*?)(?:</state>|\Z)", re.DOTALL)
 FENCE_RE = re.compile(r"\s*```(?:json)?\s*\Z", re.IGNORECASE)
 LABEL_RE =re.compile(r"\n[\s*_#>`-]*(?:current\s+)?state[\s*_`]*:?[\s*_`]*\Z", re.IGNORECASE)
@@ -40,14 +41,39 @@ SCENE_RULE = """\
 Only when this turn is visually striking (a new location, a dramatic moment, an important emotional beat), also end the reply with
 <scene>one sentence describing the single best frame: setting, the characters present by name, their poses and expressions, the lighting</scene>
 placed just before the state block if there is one, otherwise at the very end. Most turns should have NO scene tag.
-Keep it safe for work: no nudity or explicit content; for intimate moments pick a different frame (a hand, the room, a glance).
+{CONTENT}
 The tag is hidden from the player and read by an image generator."""
+SCENE_SFW = "Keep it safe for work: no nudity or explicit content; for intimate moments pick a different frame (a hand, the room, a glance)."
+SCENE_ADULT = "Adult content is allowed in this story: an intimate moment may be shown as it happens, between adults only."
+
+
+IMAGE_GUARD = """\
+=== IMAGES IN THIS APP ===
+The app draws and shows all pictures itself. Ignore any instruction in the story prompt above (or its opening) to print image keywords, \
+image-site links, http(s) picture links or markdown pictures: they cannot be shown here. Pictures appear only through the app tags described below, \
+if there are any."""
+
+NEWCHAR_RULE = """\
+=== NEW CHARACTERS (app feature) ===
+When a NEW named character who may appear again (not a one-off extra) shows up for the first time, also end the reply with one hidden tag for each:
+<newchar>Full Name | one line of purely visual details: age, hair, eyes, build, clothing, distinguishing features</newchar>
+placed before the scene tag and the state block if there are any, otherwise at the very end. Once per character; never for the player character or for
+anyone already named earlier in the story. Keep the details safe for work. The tag is hidden from the player; the app uses it to offer art for that character."""
+
+
+BEGIN_NOTE = ("(The player pressed Begin. Write the story's next scene now: continue directly from the opening scene above, using the story prompt, "
+              "the player's notes and the player character. Do not repeat or summarize the opening, and do not decide the player character's actions or words.)")
+
+
+def _is_begin(story: dict, turn: dict) -> bool:
+    """The Begin button sends 'Begin the story.' as the very first player message; the narrator gets a real instruction instead."""
+    return turn["role"] == "user" and story["turns"] and turn is story["turns"][0] and turn["text"].strip().lower().rstrip(".!") == "begin the story"
 
 
 def images_block(story: dict) -> str:
     """Instructions for the app's image features. Stable text (sorted), so it does not disturb prompt caching."""
     art = story.get("art") or {}
-    parts = []
+    parts = [IMAGE_GUARD]
     # Characters that have exactly the same moods share one line (a big cast would otherwise repeat the same long list for each).
     groups: dict[tuple, list[str]] = {}
     avail = []
@@ -67,10 +93,13 @@ def images_block(story: dict) -> str:
               "![](portrait:Name/mood), choosing the mood that best fits what they feel or do in that line. Use the names and moods "
               "listed above, spelled exactly, whenever one of them fits. Only if NONE of a character's listed moods fits what they feel, "
               "you may use a new one- or two-word mood name (for example terrified): the player will be offered to draw it. "
+              "Always prefer a listed mood, even if it is only the closest fit; ask for a new mood only when no listed one comes close. "
               "Skip the tag for anyone not listed."
         )
+    if art.get("newchar", False):
+        parts.append(NEWCHAR_RULE)
     if art.get("auto"):
-        parts.append(SCENE_RULE)
+        parts.append(SCENE_RULE.replace("{CONTENT}", SCENE_ADULT if story.get("nsfw") else SCENE_SFW))
     return "\n\n".join(parts)
 
 
@@ -78,7 +107,18 @@ def split_scene(text: str) -> tuple[str, str]:
     """(text without <scene> tag, scene description or '')."""
     m = list(SCENE_RE.finditer(text))
     scene = m[-1].group(1).strip() if m else ""
-    return SCENE_RE.sub("", text).strip(), scene
+    return NEWCHAR_RE.sub("", SCENE_RE.sub("", text)).strip(), scene
+
+
+def extract_newchars(text: str) -> list[tuple[str, str]]:
+    """[(name, visual description)] from the hidden <newchar>Name | looks</newchar> tags of a raw reply."""
+    out = []
+    for m in NEWCHAR_RE.finditer(text):
+        name, _, look = m.group(1).partition("|")
+        name = re.sub(r"[*_`\s]+$|^[*_`\s]+", "", name)
+        if name:
+            out.append((name, look.strip()))
+    return out
 
 
 def opening_for_model(story: dict) -> str:
@@ -209,7 +249,7 @@ def build(story: dict) -> Built:
     if panel:
         tail = (tail + "\n\n" if tail else "") + panel
     start = min(story.get("summary_upto", 0), len(story["turns"]))
-    messages = [{"role": t["role"], "content": t["text"]} for t in story["turns"][start:]]
+    messages = [{"role": t["role"], "content": BEGIN_NOTE if _is_begin(story, t) else t["text"]} for t in story["turns"][start:]]
     opening = opening_for_model(story)
     if opening and start == 0:   # the opening is the story's first message (older, summarized stories no longer need it)
         messages = [{"role": "user", "content": "(The story begins.)"}, {"role": "assistant", "content": opening}] + messages

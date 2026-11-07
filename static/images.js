@@ -154,10 +154,54 @@ function showImportPortraits() {
   };
 }
 
+// ---------- art style dropdown on AI & story (under Pictures) ----------
+// Offers the styles that make sense for what the app found: your local checkpoint(s) and any online picture service with a key.
+function mountArtStyle(el, picker, current) {
+  let value = current || "";
+  const render = () => {
+    const o = picker.opts(); if (!o) { el.innerHTML = ""; return; }
+    const ch = picker.choice("images"), imgs = o.images || [];
+    const online = imgs.some((p) => !p.local && p.has_key), local = imgs.filter((p) => p.local && p.models.length);
+    const cur = ch && imgs.find((p) => p.id === ch.provider), fam = cur && cur.local ? modelFamily(ch.model) : "";
+    let styles = ART_STYLES;
+    if (!online && local.length) {   // only local checkpoints: show styles those can do
+      const fams = new Set(local.flatMap((p) => p.models.map((m) => modelFamily(m.id) || "any")));
+      styles = fams.has("any") ? ART_STYLES : ART_STYLES.filter((s) => s.family === "any" || fams.has(s.family));
+    }
+    const match = ART_STYLES.find((s) => s.direction === value);
+    const star = (s) => (fam && s.family === fam ? " ★" : "");
+    const none = !online && !local.length;
+    el.innerHTML = `<div class="field"><label>Art style <small class="muted">for ${story ? "this story's" : "new stories'"} pictures</small></label>
+      <select id="sArtStyle" ${none ? "disabled" : ""}><option value="">${value && !match ? "Keep my own style" : "No style chosen"}</option>${styles.map((s) => `<option value="${esc(s.id)}" ${match && match.id === s.id ? "selected" : ""}>${esc(s.label)}${star(s)}</option>`).join("")}</select>
+      <div class="hint">${none ? "Add an API key for Gemini, Grok or OpenAI, or start ComfyUI with a checkpoint, and styles that suit them appear here."
+        : `Styles for ${[online ? "your online picture services" : "", local.length ? "your local checkpoint" + (local[0].models.length > 1 ? "s" : "") : ""].filter(Boolean).join(" and ")}${fam ? ". ★ = suits the selected checkpoint" : ""}. You can still write your own in the story's Art tab.`}</div></div>`;
+    const sel = el.querySelector("#sArtStyle");
+    sel.onchange = () => { const st = ART_STYLES.find((x) => x.id === sel.value); if (st) value = st.direction; else if (!sel.value && !match) { /* keep own */ } else value = ""; };
+  };
+  return { render, get: () => value };
+}
+
+// ---------- art style presets ----------
+let ART_STYLES = [];
+fetch("/api/art-styles").then((r) => r.json()).then((l) => { ART_STYLES = l; }).catch(() => {});
+// A dropdown that fills the art direction box (id `target`) with a ready-made style. The box stays editable.
+function styleSelectHtml(target, hint = "") {
+  return `<div class="field"><label>Art style${hint ? ` <small class="muted">${hint}</small>` : ""}</label>
+    <select class="stylepick" data-target="${target}"><option value="">Choose a style…</option>${ART_STYLES.map((s) => `<option value="${esc(s.id)}">${esc(s.label)}</option>`).join("")}<option value="custom">My own (type below)</option></select></div>`;
+}
+document.addEventListener("change", (e) => {
+  const sel = e.target.closest && e.target.closest("select.stylepick");
+  if (!sel) return;
+  const box = document.getElementById(sel.dataset.target), st = ART_STYLES.find((s) => s.id === sel.value);
+  if (box && st) { box.value = st.direction; box.dispatchEvent(new Event("input", { bubbles: true })); }
+  else if (box && sel.value === "custom") { box.focus(); }
+});
+
 // ---------- Art tab (inside the Player panel) ----------
 function artTabHtml() {
   const a = (story && story.art) || {};
   return `<div id="tabArt" class="hidden">
+    ${styleSelectHtml("artDir", (a.direction || "").trim() ? "" : "pick one before drawing any characters, so every picture matches")}
     <label>Art direction: added to every image prompt, so it sets the look of your whole story</label>
     <textarea class="short" id="artDir" rows="4" placeholder="e.g. anime light-novel illustration, soft cel shading, muted autumn palette, cinematic lighting">${esc(a.direction || "")}</textarea>
     <label>Setting: the world your characters belong to. Every generated character (portraits, candidates, your avatar) is dressed and styled to fit it</label>
@@ -171,6 +215,7 @@ function artTabHtml() {
     <div class="grid2" style="grid-template-columns:1fr 2fr"><div><label>Shape of newly drawn portraits</label><select id="artPshape"><option value="landscape">Landscape card (3:2)</option><option value="portrait">Portrait (2:3)</option><option value="square">Square</option></select></div><div></div></div>
     <label class="chk"><input type="checkbox" id="artAuto" ${a.auto ? "checked" : ""}> Auto-illustrate: the narrator flags visually striking turns and a picture is drawn for them (uses image credits)</label>
     <label class="chk"><input type="checkbox" id="artSuggest" ${a.suggest !== false ? "checked" : ""}> Offer to create art for named characters that have none (you can always skip or say never)</label>
+    <label class="chk"><input type="checkbox" id="artNewchar" ${a.newchar ? "checked" : ""}> Let the narrator flag new named characters as they appear, so the app can offer to draw them (off by default; works with the offer above)</label>
     <label class="chk"><input type="checkbox" id="artPort" ${a.portraits !== false ? "checked" : ""}> Show character mood portraits above their lines (set them up in 🎭 Cast)</label>
     <p class="hint">Both switches add a short instruction for the narrator. Changing them makes the next Claude turn rewrite the prompt cache once.</p>
   </div>`;
@@ -179,7 +224,7 @@ function artTabInit() { const a = (story && story.art) || {};
   $("artSettingGen").onclick = async (e) => { e.target.disabled = true; $("artSettingNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/art/setting`, { method: "POST" }); $("artSetting").value = r.art.setting; $("artSettingNote").textContent = "Done. Edit if you like, then Save."; } catch (err) { $("artSettingNote").textContent = err.message; } e.target.disabled = false; }; $("artSize").value = a.size || "portrait"; $("artPsize").value = a.portrait_size || "medium"; $("artPshape").value = a.portrait_shape || "landscape"; }
 async function artTabSave() {
   story = await api(`/stories/${story.id}/art`, { method: "PUT", body: {
-    direction: $("artDir").value, setting: $("artSetting").value, negative: $("artNeg").value, size: $("artSize").value, portrait_size: $("artPsize").value, portrait_shape: $("artPshape").value, auto: $("artAuto").checked, suggest: $("artSuggest").checked, portraits: $("artPort").checked } });
+    direction: $("artDir").value, setting: $("artSetting").value, negative: $("artNeg").value, size: $("artSize").value, portrait_size: $("artPsize").value, portrait_shape: $("artPshape").value, auto: $("artAuto").checked, suggest: $("artSuggest").checked, newchar: $("artNewchar").checked, portraits: $("artPort").checked } });
 }
 
 // ---------- Cast: character cards, and a character view with Bio / Key events / Images ----------
@@ -475,9 +520,11 @@ function showCharacter(slug, tab = "Bio") {
 // ---------- image provider settings (inside Settings) ----------
 function imgProvCard(p, i) {
   const comfy = p.type === "comfyui", oa = p.type === "openai";
-  return `<div class="iprov" data-i="${i}"><label><b>${esc(p.name)}</b> <small>(${p.type})</small></label>
+  const nice = { gemini: "Gemini", xai: "Grok (xAI)", openai: "OpenAI", comfyui: "Local (ComfyUI)" }[p.id] || p.name;
+  return `<details class="fold iprov" data-i="${i}" data-pid="${esc(p.id)}"><summary><b>${esc(nice)}</b> <small class="ipstat">${comfy ? "checking…" : p.has_key ? "key saved" : "needs a key"}</small></summary>
     <div class="grid2" style="grid-template-columns:2fr 1fr"><div><label>Address</label><input data-f="base_url" value="${esc(p.base_url || "")}"></div>
-      <div><label>${comfy ? "Checkpoint file" : "Model"}</label><input data-f="model" value="${esc(p.model || "")}" placeholder="${comfy ? "e.g. illustriousXL.safetensors" : ""}"></div></div>
+      <div class="imodel"><label>${comfy ? "Checkpoint file" : "Model"}</label><input data-f="model" value="${esc(p.model || "")}" placeholder="${comfy ? "e.g. illustriousXL.safetensors" : ""}"></div></div>
+    <div class="hint imnote"></div>
     <label>Prompt style</label><select data-f="prompt_style">
       <option value="natural" ${(p.prompt_style || (comfy ? "tags" : "natural")) === "natural" ? "selected" : ""}>Sentences (Gemini, OpenAI, xAI, most new models)</option>
       <option value="tags" ${(p.prompt_style || (comfy ? "tags" : "natural")) === "tags" ? "selected" : ""}>Tags (anime SDXL models: Animagine, Illustrious, NoobAI)</option></select>
@@ -493,7 +540,7 @@ function imgProvCard(p, i) {
       <label>Workflow used when reference pictures are available: matches faces to a character's portrait (needs {{ref1}} in a LoadImage node)</label>
       <textarea class="short" data-f="workflow_ref" rows="5">${esc(p.workflow_ref || "")}</textarea>
       <button class="starterface" type="button">Insert face-matching (IPAdapter) workflow</button>` : ""}
-    <div class="actions" style="margin-top:8px"><button class="itest" type="button">Test: draw a small picture</button></div><div class="itestout"></div></div>`;
+    <div class="actions" style="margin-top:8px"><button class="itest" type="button">Test: draw a small picture</button></div><div class="itestout"></div></details>`;
 }
 function imageSettingsHtml(cfg) {
   const provs = cfg.image_providers || [];
@@ -501,14 +548,59 @@ function imageSettingsHtml(cfg) {
     <div class="hint">Which AI draws pictures is chosen under <b>AI &amp; story</b>. Online services need their own API key and bill separately from Claude; ComfyUI runs on your own computer for free.</div>
     <div class="grid2"><div class="field"><label>Reference pictures per scene</label><input id="imgRefs" type="number" min="0" max="8" value="${cfg.image_max_refs ?? 3}"><div class="hint">Saved portraits sent along so faces stay consistent.</div></div><div></div><div></div></div>
     <h3>Pictures drawn for a new character</h3>
-    <div class="hint">After you pick a face for a new character, the app can draw more pictures of them from these lists (one mood per line). Only moods that work for one person are used: normal, smile, shy, surprise, sulky, fear, sad, angry, scorn, despair, combat, cute, dead, zombie.</div>
-    <div class="grid2" style="grid-template-columns:1fr 1fr"><div class="field"><label>Basic set</label><textarea class="short" id="msBasic" rows="6">${esc(((cfg.mood_sets || {}).basic || []).join("\n"))}</textarea></div>
-      <div class="field"><label>Extended set</label><textarea class="short" id="msExt" rows="6">${esc(((cfg.mood_sets || {}).extended || []).join("\n"))}</textarea></div></div>
+    <div class="hint">After you pick a face for a new character, the app can draw more pictures of them from these lists, one picture type per line. Add your own anywhere: type a name (<code>blushing</code>) or a name with what to draw (<code>blushing: embarrassed, red cheeks, hand over mouth</code>). The narrator is told to use the pictures in these sets before asking for anything new; if it does ask for a new one and you draw it, it is added to the end of the Extended set automatically. Built-in types: normal, smile, shy, surprise, sulky, fear, sad, angry, scorn, despair, combat, cute, dead, zombie. Numbers (<code>smile 2</code>) make a second version.</div>
+    <div class="grid2" style="grid-template-columns:1fr 1fr"><div class="field"><label>Basic set</label><textarea class="short" id="msBasic" rows="6">${esc(((cfg.mood_sets || {}).basic || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>
+      <div class="field"><label>Extended set</label><textarea class="short" id="msExt" rows="6">${esc(((cfg.mood_sets || {}).extended || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div></div>
     <h3>Picture services</h3>
-    <div class="hint">Model names change often: if one stops working, check the service's docs and edit its Model field, then use Test.</div>
-    <details class="fold"><summary>Show settings for each picture service (address, model, ComfyUI workflow…)</summary><div id="iprovs">${provs.map(imgProvCard).join("")}</div></details>`;
+    <div class="hint">Click a service to open its settings. The model you pick here is the same one chosen under <b>AI &amp; story</b> (changing either changes both). Model names change often: if one stops working, pick another from the list, then use Test.</div>
+    <div id="iprovs">${[...provs.keys()].sort((x, y) => { const o = ["gemini", "xai", "openai", "comfyui"], f = (k) => { const n = o.indexOf(provs[k].id); return n < 0 ? 9 : n; }; return f(x) - f(y); }).map((i) => imgProvCard(provs[i], i)).join("")}</div>`;
 }
-function bindImageSettings(cfg) {
+// Family of a checkpoint / model by its name: "anime", "real" or "" (unknown). Used to suggest art styles and the prompt style.
+function modelFamily(id) {
+  const n = (id || "").toLowerCase();
+  if (/anim|illustri|noob|pony|waifu|anything|counterfeit|meina|hassaku|danbooru|cartoon|toon/.test(n)) return "anime";
+  if (/real|photo|juggernaut|epic|cyber|lifelike|raw|dreamshaper|sdxl_base|flux/.test(n)) return "real";
+  return "";
+}
+function bindImageSettings(cfg, picker) {
+  const cardOf = (pid) => document.querySelector(`.iprov[data-pid="${pid}"]`);
+  // Fill each card's model box with the models that service really offers, and keep it equal to the AI & story choice.
+  const sync = () => {
+    const o = picker && picker.opts(); if (!o) return;
+    const ch = picker.choice("images");
+    for (const q of o.images) {
+      const card = cardOf(q.id); if (!card) continue;
+      const p = cfg.image_providers[+card.dataset.i];
+      const box = card.querySelector(".imodel"), cur = box.querySelector("[data-f=model]");
+      let want = ch && ch.provider === q.id && ch.model ? ch.model : (cur ? cur.value : p.model || "");
+      if (q.models.length) {
+        if (!q.models.some((m) => m.id === want)) want = p.model && q.models.some((m) => m.id === p.model) ? p.model : q.models[0].id;
+        const ids = q.models.map((m) => m.id);
+        if (cur && cur.tagName !== "SELECT") {
+          const sel = document.createElement("select"); sel.dataset.f = "model";
+          cur.replaceWith(sel);
+          sel.onchange = () => {
+            picker.setModel("images", q.id, sel.value); card.querySelector(".imnote").textContent = noteFor(q, sel.value);
+            const f = q.local ? modelFamily(sel.value) : "", ps = card.querySelector('[data-f="prompt_style"]');
+            if (ps && f) ps.value = f === "anime" ? "tags" : "natural";   // the prompt style that suits this kind of checkpoint
+          };
+        }
+        const sel = box.querySelector("[data-f=model]");
+        if (sel.dataset.filled !== ids.join("|")) { sel.innerHTML = ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join(""); sel.dataset.filled = ids.join("|"); }
+        sel.value = want;
+      } else if (cur && ch && ch.provider === q.id && ch.model) cur.value = ch.model;
+      card.querySelector(".ipstat").textContent = q.local ? (q.models.length ? (q.ready ? `running · ${q.models.length} checkpoint${q.models.length > 1 ? "s" : ""}` : "found, but " + (q.error || "not usable")) : "not running") : q.has_key ? (q.models.length ? "key saved" : "key saved, no models found") : "needs a key";
+      card.querySelector(".imnote").textContent = noteFor(q, box.querySelector("[data-f=model]").value);
+      const key = card.querySelector('[data-f="api_key"]');
+      if (key && q.has_key) key.placeholder = "••••••••";
+    }
+  };
+  const noteFor = (q, model) => {
+    if (!q.local) return "";
+    const f = modelFamily(model);
+    return f === "anime" ? "Anime-style checkpoint: tag-style prompts work best." : f === "real" ? "Realistic checkpoint: sentence-style prompts work best." : "";
+  };
+  if (picker) picker.ready.then(sync);
   document.querySelectorAll(".iprov").forEach((card) => {
     const p = cfg.image_providers[+card.dataset.i];
     const st = card.querySelector(".starter");
@@ -524,10 +616,18 @@ function bindImageSettings(cfg) {
       btn.disabled = false;
     };
   });
+  return sync;
 }
 function collectImageSettings(cfg) {
-  const lines = (id) => $(id).value.split("\n").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const looks = {};
+  const lines = (id) => $(id).value.split("\n").map((x) => x.trim()).filter(Boolean).map((x) => {
+    const i = x.indexOf(":");   // "name: what to draw"
+    const name = (i < 0 ? x : x.slice(0, i)).trim().toLowerCase();
+    if (i >= 0 && x.slice(i + 1).trim()) looks[name.replace(/\s*\d+$/, "")] = x.slice(i + 1).trim();
+    return name;
+  }).filter(Boolean);
   cfg.mood_sets = { basic: lines("msBasic"), extended: lines("msExt") };
+  cfg.mood_looks = looks;
   cfg.image_max_refs = +$("imgRefs").value || 0;
   document.querySelectorAll(".iprov").forEach((card) => {
     const p = cfg.image_providers[+card.dataset.i];
@@ -589,8 +689,16 @@ async function showArtDialog(opts = {}) {
     <div class="aStatus hint"></div><div class="aResult"></div></div>`;
   modal(`<h2>${opts.only ? `Pictures for ${esc(opts.only)}` : "Art for new characters"}</h2>
     <p class="hint">Edit the description to match what you have in mind, add notes, and the app draws four options to choose from. Not what you wanted? Change the text and draw again. Nothing is saved to the character until you pick one.</p>
+    ${(story.art || {}).direction ? "" : styleSelectHtml("artDlgDir", "no art style is set for this story yet: pick one so every character matches") + '<textarea class="short" id="artDlgDir" rows="2" placeholder="Art direction (filled in when you pick a style)"></textarea><div class="actions" style="justify-content:flex-start"><button id="artDlgSave">Use this style</button><span class="hint" id="artDlgNote"></span></div>'}
     <div id="artCards">${items.map(card).join("") || '<p class="hint">Every named character already has art.</p>'}</div>
     <div class="actions"><button id="mClose">Close</button></div>`);
+  const sv = document.getElementById("artDlgSave");
+  if (sv) sv.onclick = async () => {
+    const v = document.getElementById("artDlgDir").value.trim();
+    if (!v) { document.getElementById("artDlgNote").textContent = "Pick a style or type one first."; return; }
+    story = await api(`/stories/${story.id}/art`, { method: "PUT", body: { ...story.art, direction: v, setting: story.art.setting || null } });
+    document.getElementById("artDlgNote").textContent = "✔ Saved. Every picture of this story now follows it.";
+  };
   document.getElementById("mClose").onclick = () => { refreshArtSuggestions(); if (opts.onClose) opts.onClose(); else closeModal(); };
   const cands = {};   // name -> candidate urls drawn so far
 

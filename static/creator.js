@@ -11,7 +11,7 @@ async function showStoryForm(s) {
     prologue: s ? s.prologue || "" : "", opening: s ? s.opening || "" : "", opening_in_context: !s || s.opening_in_context !== false,
     opening_options: s ? [...(s.opening_options || [])] : [], endings: s ? (s.endings || []).map((e) => ({ ...e })) : [],
     sidebar: s ? JSON.parse(JSON.stringify(s.sidebar || {})) : { mode: (config && config.sidebar_default_mode) || "prompt", fields: TRACKER_FIELDS.map((f) => f.id), schema: null, custom: [] },
-    art: { direction: s && s.art ? s.art.direction || "" : "", setting: s && s.art ? s.art.setting || "" : "" },
+    art: { direction: s && s.art ? s.art.direction || "" : (config.default_art_direction || ""), setting: s && s.art ? s.art.setting || "" : "" },
     use_state_block: !s || s.use_state_block !== false, auto_replies: !!(s && s.auto_replies), nsfw: false,
     cast: [], cover: null, intro: [], backdrop: null, models: null,
   };
@@ -67,6 +67,7 @@ async function showStoryForm(s) {
       <div id="sfCustom" class="hidden"></div>
       <div id="sfAi" class="hidden">${D.sidebar.schema && D.sidebar.schema.length ? `<ul class="sbl">${D.sidebar.schema.map((f) => `<li><b>${esc(f.label)}</b> <small>${esc(f.id)} · ${esc(f.kind)}</small></li>`).join("")}</ul>` : '<div class="hint">Nothing chosen yet.</div>'}${aiBtn("aiTrack", "Let the AI suggest trackers from the prompt")}<span class="hint" id="trackNote"></span></div>
       <h3>Art style <small class="muted">(optional)</small></h3>
+      ${styleSelectHtml("sfArtDir", "players of a story with no pre-made characters pick the look here; if your characters already have pictures, describe their style instead")}
       <div class="field"><label>Art direction</label><textarea class="short" id="sfArtDir" rows="2" placeholder="e.g. anime light-novel illustration, muted palette">${esc(D.art.direction)}</textarea></div>
       <div class="field"><label>Setting <small class="muted">(the world characters belong to; written automatically if left empty)</small></label><textarea class="short" id="sfArtSet" rows="2">${esc(D.art.setting)}</textarea></div>
       <h3>Possible endings <small class="muted">(optional, spoilers)</small></h3><div class="hint">Hidden notes for the narrator: it may steer toward one when the player's choices lead there, and never reveals them. Players can also ask the story to work toward one (🏁 Endings).</div>
@@ -81,7 +82,7 @@ async function showStoryForm(s) {
     "Options": () => `<h3>Options</h3>
       ${chk("fState", D.use_state_block, "Let the app track the story state", "Fills the sidebar from a hidden block. Turn off if your prompt prints its own status panel.")}
       ${chk("fAutoRep", D.auto_replies, "Suggest three replies after every narrator reply", "Otherwise use the 💡 button. Costs one small call each time.")}
-      ${isNew ? chk("fNsfw", D.nsfw, "Adult (NSFW) content", "Allows explicit content between adult characters. Off by default; change it later in Settings.") : ""}
+      ${isNew ? chk("fNsfw", D.nsfw, "Adult (NSFW) content", "Allows explicit content between adult characters, in the text and in scene pictures. Off by default; change it later in Settings.") : ""}
       ${isNew ? '<h3>Which AI should run this story?</h3><div id="aiPick"></div><div class="hint">A one-time choice for this story. You can change it later in Settings.</div>' : ""}`,
   };
 

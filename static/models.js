@@ -7,8 +7,9 @@ const AI_ROLES = [
 ];
 const FIT_LABEL = { fits: "fits in video memory", partial: "slower: spills into RAM", cpu: "CPU only: slow", too_big: "too big for this computer" };
 
-function mountAIChooser(el, { initial = {} } = {}) {
+function mountAIChooser(el, { initial = {}, onChange = null } = {}) {
   const st = { opts: null, choice: {}, keyOpen: {} };
+  const notify = () => { if (onChange && st.opts) onChange(); };   // lets other parts of the Settings window follow the choices
   const list = (kind) => (kind === "image" ? st.opts.images : st.opts.text);
   const prov = (kind, id) => list(kind).find((p) => p.id === id);
   const label = (p) => p.name + (p.local ? (p.ready ? "" : " (not available)") : p.has_key ? "" : " (needs a key)");
@@ -60,7 +61,7 @@ function mountAIChooser(el, { initial = {} } = {}) {
         const p = prov(r.kind, e.target.value), m = p.models.find((x) => x.tier === "balanced") || p.models[0];
         st.choice[r.key] = { provider: p.id, model: m ? m.id : (p.default_model || "") }; render();
       };
-      box.querySelector('[data-sel="model"]').onchange = (e) => { st.choice[r.key].model = e.target.value; };
+      box.querySelector('[data-sel="model"]').onchange = (e) => { st.choice[r.key].model = e.target.value; notify(); };
       const sk = box.querySelector("[data-savekey]");
       if (sk) sk.onclick = async () => {
         const v = box.querySelector("[data-key]").value.trim(); if (!v) return;
@@ -72,6 +73,7 @@ function mountAIChooser(el, { initial = {} } = {}) {
       if (ur) ur.onclick = () => { const x = st.opts.recommended[ur.dataset.usedrec]; st.choice[ur.dataset.usedrec] = { provider: x.provider, model: x.model }; render(); };
     });
     el.querySelector("[data-rescan]").onclick = () => load(true, true);
+    notify();
   }
   async function load(keepChoice, refresh) {
     el.innerHTML = '<div class="hint">Looking at your computer and the AI services you can use…</div>';
@@ -80,5 +82,12 @@ function mountAIChooser(el, { initial = {} } = {}) {
     fill(); render();
   }
   const ready = load(false);
-  return { ready, get: () => Object.fromEntries(Object.entries(st.choice).filter(([, v]) => v)) };
+  return {
+    ready,
+    get: () => Object.fromEntries(Object.entries(st.choice).filter(([, v]) => v)),
+    opts: () => st.opts,
+    choice: (role) => st.choice[role] || null,
+    // another part of the window changed a model: keep the chooser in step (only if that provider is the chosen one)
+    setModel: (role, provider, model) => { const c = st.choice[role]; if (c && c.provider === provider && c.model !== model) { c.model = model; render(); } },
+  };
 }
