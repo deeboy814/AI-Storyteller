@@ -44,7 +44,7 @@ function md(text) {
     return `<pre class="note">${esc(body.replace(/\n+$/, ""))}</pre>`;
   }).join("");
 }
-function stripState(t) { const cut = ["<state", "<scene"].map((k) => t.indexOf(k)).filter((i) => i >= 0); return cut.length ? t.slice(0, Math.min(...cut)) : t; }
+function stripState(t) { const cut = ["<state", "<scene", "<newchar"].map((k) => t.indexOf(k)).filter((i) => i >= 0); return cut.length ? t.slice(0, Math.min(...cut)) : t; }
 
 // Token readout under the latest reply. Claude reports cached vs new prompt tokens. Ollama reports the prompt size and
 // how long it took to read: a fast read on a long prompt means its cached copy was reused.
@@ -75,6 +75,9 @@ setInterval(refreshCache, 30000);
 function renderHeader() {
   const eb = $("btnEndings"); if (eb) eb.classList.toggle("hidden", !(story && (story.endings || []).length));
   $("title").textContent = story ? story.title : "AI Storyteller";
+  const te = $("titleEdit");
+  te.classList.toggle("hidden", !story);
+  te.onclick = () => editTitleInline($("title"), story.id, story.title, (nt) => { story.title = nt; renderHeader(); });
   $("subtitle").textContent = story ? (story.subtitle || "") + (story.nsfw ? "  ·  🔞 adult content on" : "") : "";
 }
 function renderNarrative(streamText = null, scroll = "bottom") {   // scroll: "bottom" (open a story), "keep" (stay where the reader is), "anchor" (start of your newest move)
@@ -133,6 +136,8 @@ function renderSidebar() {
   if (story && story.summary) h += "<h4>Memory</h4><div class='side-empty'>Older events summarized (" + story.summary.length + " chars)</div>";
   el.innerHTML = h || '<div class="side-empty">The sheet fills in as the story is played.</div>';
   el.querySelectorAll(".pname[data-slug]").forEach((n) => n.onclick = () => showCharacter(n.dataset.slug));
+  el.querySelectorAll(".artneed[data-art]").forEach((b) => b.onclick = () => showArtDialog({ only: b.dataset.art, onClose: () => { closeModal(); renderAll(); } }));
+  bindPanel(el);
 }
 function renderChips() {
   const c = $("chips");
@@ -226,14 +231,20 @@ async function send(text, override, forceBudget = false) {
     }
   } catch (e) { failed = e.message; }
   if (failed) {
-    story = await api("/stories/" + story.id);  // drop the unsaved optimistic turn
-    renderAll();
-    $("narrative").insertAdjacentHTML("beforeend", `<div class="err">${esc(failed.replace(/^BUDGET: /, ""))}</div>`);
-    $("narrative").scrollTop = $("narrative").scrollHeight;
+    try { failed = JSON.parse(failed).detail || failed; } catch (e) { /* plain text */ }
+    try { story = await api("/stories/" + story.id); }  // drop the unsaved optimistic turn
+    catch (e) {                                          // the story is gone from the server: never leave the page stuck on "Writing…"
+      story.turns.pop();
+      failed = /not found/i.test(e.message) ? "This story no longer exists on this computer (it may have been deleted, or the app is using a different data folder). Go Home and open or create it again." : e.message;
+    }
     $("input").value = text; genStatus(null);
   }
   const words = failed ? 0 : stripState(acc).split(/\s+/).filter(Boolean).length;
-  setBusy(false); renderAll(true); refreshCache(); refreshArtSuggestions();
+  setBusy(false); renderAll(failed ? false : true); refreshCache(); refreshArtSuggestions();
+  if (failed) {   // after the final redraw, or it would wipe the message
+    $("narrative").insertAdjacentHTML("beforeend", `<div class="err">${esc(failed.replace(/^BUDGET: /, ""))}</div>`);
+    $("narrative").scrollTop = $("narrative").scrollHeight;
+  }
   if (!failed) { genStatus("done", words); refreshTracker(); wasAtBottom = false; if (narrativeAtBottom() && $("narrative").scrollHeight <= $("narrative").clientHeight + 40) maybeShowReplies(); }
   const lastT = story.turns[story.turns.length - 1];
   if (!failed && story.art && story.art.auto && lastT && lastT.role === "assistant" && lastT.scene && !(lastT.images || []).length) illustrate(story.turns.length - 1);
@@ -426,12 +437,13 @@ async function showSettings(tab = "AI") {
     <div class="stpane" data-p="AI">
       <h3>Which AI does what${story ? ` in “${esc(story.title)}”` : ""}</h3>
       <div id="aiPick"></div>
+      <div id="artStyleBox"></div>
       <div class="hint">${story ? "Saved for this story, and used as the starting choice for new stories." : "Used as the starting choice for new stories (open a story to change it for that story)."}</div>
-      ${story ? `<h3>Content</h3><label class="chk top"><input type="checkbox" id="sNsfw" ${story.nsfw ? "checked" : ""}><span><b>Adult (NSFW) content</b><span class="hint">Allows explicit content between adult characters in the narration. Off by default and set per story. Pictures always stay safe for work, and your AI provider's own rules still apply.</span></span></label>` : ""}
+      ${story ? `<h3>Content</h3><label class="chk top"><input type="checkbox" id="sNsfw" ${story.nsfw ? "checked" : ""}><span><b>Adult (NSFW) content</b><span class="hint">Allows explicit content between adult characters in the narration. Off by default and set per story. It also lets scene pictures and portraits show adult content between adults (covers and backdrops stay safe for work). Online picture services (Gemini, OpenAI, Grok) usually refuse explicit images; a local model in ComfyUI is what allows them. Your AI provider's own rules still apply.</span></span></label>` : ""}
       <h3>Side panel</h3>
       ${story ? `<div class="field"><label>What the side panel shows in “${esc(story.title)}”</label><select id="sbMode"><option value="prompt">Leave it to the prompt author</option><option value="player">I choose the fields</option><option value="ai">Let the AI decide</option></select><div class="hint" id="sbHint"></div></div>
         <div id="sbFields"></div><div id="sbCustom"></div><div id="sbAi"></div>
-        <div class="actions" style="justify-content:flex-start;margin-top:4px"><button id="sbBuild" title="Rebuild the side panel from the story so far">Fill from the story so far</button><span class="hint" id="sbNote"></span></div>` : '<div class="hint">Open a story to set its side panel.</div>'}
+        <div class="actions" style="justify-content:flex-start;margin-top:4px"><button id="sbBuild" title="Forget the panel's values and read them again from the whole story (corrects a panel that went wrong)">Re-read the story and rebuild</button><span class="hint" id="sbNote"></span></div>` : '<div class="hint">Open a story to set its side panel.</div>'}
       <div class="field"><label>Default for new stories</label><select id="sbDefault"><option value="prompt">Leave it to the prompt author</option><option value="player">I choose the fields</option><option value="ai">Let the AI decide</option></select></div>
       <h3>Key events</h3>
       ${field("Key events log", '<select id="sEvents"><option value="every">Update after every reply</option><option value="off">Off (only what you write)</option></select>', "Writes each character's important moments (Cast → character → Key events) with one small background call per reply, using the recaps &amp; helpers AI above.")}
@@ -480,10 +492,11 @@ async function showSettings(tab = "AI") {
       <label class="chk top"><input type="checkbox" id="sRtText" ${config.rt_text ? "checked" : ""}><span><b>Manage local text models automatically</b><span class="hint">When you open a story (or change its AI), its local model is loaded and ready, and local models no story is using are unloaded to free video memory. Turn off to leave Ollama alone.</span></span></label>
       <div class="grid2">${field("Unload an idle model after", `<input id="sKeep" value="${esc(config.keep_alive || "30m")}">`, "e.g. 10m, 30m, 2h. Ollama frees the model itself after this much time without a turn; it reloads automatically at your next turn.")}<div></div><div></div></div>
       <h3>Picture generator (ComfyUI)</h3>
+      <div class="hint">Its address and which checkpoint to use are under the <b>Pictures</b> tab (and the picture choice on <b>AI &amp; story</b>); this section only controls starting and stopping it.</div>
       <label class="chk top"><input type="checkbox" id="sRtComfy" ${config.rt_comfy ? "checked" : ""}><span><b>Start and stop ComfyUI automatically</b><span class="hint">ComfyUI starts when you open a story that draws pictures locally (or when a picture is asked for), and shuts down after it has been idle for the time below. Starting takes about 15 to 30 seconds.</span></span></label>
       <div class="grid2">${field("Idle time before it stops", `<input id="sRtIdle" type="number" min="1" step="1" value="${config.rt_comfy_idle_min ?? 15}">`, "minutes without drawing. Pictures are drawn in bursts, so a longer time than for text suits it.")}
         ${field("When idle", `<select id="sRtMode"><option value="stop">Stop ComfyUI completely</option><option value="free">Keep it running, free its video memory</option></select>`, "Stopping frees the most; keeping it running restarts faster.")}<div></div></div>
-      ${field("How to start ComfyUI", `<input id="sRtCmd" value="${esc(config.rt_comfy_cmd || "")}" placeholder="~/ComfyUI/start.sh (default)">`, "A command or script path on this computer. Leave empty for the default.")}
+      ${field("How to start ComfyUI", `<input id="sRtCmd" value="${esc(config.rt_comfy_cmd || "")}" placeholder="~/ComfyUI/start.sh, or start.bat on Windows (default)">`, "A command or script path on this computer. Leave empty for the default.")}
       <label class="chk top"><input type="checkbox" id="sRtSwap" ${config.rt_swap !== false ? "checked" : ""}><span><b>Make room for pictures</b><span class="hint">If video memory is short when a local picture is about to be drawn, the local text model is unloaded first (it reloads at your next turn). Helpful on 12 GB cards that can't hold both.</span></span></label>
     </div>
 
@@ -523,7 +536,6 @@ async function showSettings(tab = "AI") {
   showTab(tab);
   document.querySelectorAll(".prov").forEach((el, i) => el.querySelector('[data-f="type"]').value = config.providers[i].type);
   $("sTtl").value = config.cache_ttl || "5m";
-  bindImageSettings(config);
   $("sUsage").onclick = () => showUsage();
   $("sbDefault").value = config.sidebar_default_mode || "prompt";
   if (story) {
@@ -532,7 +544,9 @@ async function showSettings(tab = "AI") {
     $("sbMode").value = sb.mode;
     const draw = () => {
       const m = $("sbMode").value; $("sbHint").textContent = SBH[m];
-      $("sbFields").classList.toggle("hidden", m !== "player"); $("sbCustom").classList.toggle("hidden", m !== "player"); $("sbAi").classList.toggle("hidden", m !== "ai");
+      const own = m === "player" || (m === "prompt" && sbTrk && sbTrk.get().length);   // a story that has its own trackers keeps showing them in "prompt" mode
+      if (m === "prompt" && own) $("sbHint").textContent += " This story has its own trackers, so they still show and the AI keeps them updated.";
+      $("sbFields").classList.toggle("hidden", !own); $("sbCustom").classList.toggle("hidden", !own); $("sbAi").classList.toggle("hidden", m !== "ai");
     };
     $("sbFields").innerHTML = groups.map(([g, t]) => `<div class="sbgroup"><b>${t}</b>${TRACKER_FIELDS.filter((f) => f.id.startsWith(g + ".")).map((f) => `<label class="chk"><input type="checkbox" data-f="${f.id}" ${(sb.fields || []).includes(f.id) ? "checked" : ""}> ${esc(f.label)}</label>`).join("")}</div>`).join("");
     const aiList = () => `${(sb.schema || []).length ? '<div class="hint">The AI decided to track:</div><ul class="sbl">' + sb.schema.map((f) => `<li><b>${esc(f.label)}</b> <small>${esc(f.id)} · ${esc(f.kind)}${f.options ? " · " + esc(f.options.join("/")) : ""}${f.kind === "slider" ? ` · ${f.min}–${f.max}` : ""}</small></li>`).join("") + "</ul>" : '<div class="hint">The AI will decide when you save.</div>'}<div class="actions" style="justify-content:flex-start"><button id="sbRedo">Let the AI decide again</button></div>`;
@@ -540,7 +554,7 @@ async function showSettings(tab = "AI") {
     if ($("sbRedo")) $("sbRedo").onclick = async (e) => { e.target.disabled = true; $("sbNote").textContent = "Reading your story prompt…"; try { story = await api(`/stories/${story.id}/sidebar/schema`, { method: "POST" }); sb.schema = story.sidebar.schema; $("sbMode").value = "ai"; $("sbAi").innerHTML = aiList(); $("sbRedo").onclick = null; $("sbNote").textContent = "Decided."; renderSidebar(); } catch (err) { $("sbNote").textContent = err.message; } e.target.disabled = false; };
     sbTrk = trackerEditor($("sbCustom"), sb.custom || [], () => ({ storyId: story.id }));
     $("sbMode").onchange = draw; draw();
-    $("sbBuild").onclick = async (e) => { e.target.disabled = true; $("sbNote").textContent = "Building…"; try { story = await api(`/stories/${story.id}/sidebar/build`, { method: "POST" }); renderSidebar(); $("sbNote").textContent = "Done."; } catch (err) { $("sbNote").textContent = err.message; } e.target.disabled = false; };
+    $("sbBuild").onclick = async (e) => { e.target.disabled = true; $("sbNote").textContent = "Building…"; try { story = await api(`/stories/${story.id}/sidebar/build?fresh=true`, { method: "POST" }); renderSidebar(); $("sbNote").textContent = "Done."; } catch (err) { $("sbNote").textContent = err.message; } e.target.disabled = false; };
   }
   const themeDraft = bindAppearance(config);
   onModalClose = () => { applyTheme(config); onModalClose = null; };   // Cancel / click-away undoes the colour preview
@@ -570,7 +584,11 @@ async function showSettings(tab = "AI") {
   };
   $("rtRefresh").onclick = rtRefresh; rtRefresh();
   $("rtFree").onclick = async (e) => { e.target.disabled = true; await api("/runtime/free", { method: "POST" }); await rtRefresh(); e.target.disabled = false; };
-  const picker = mountAIChooser($("aiPick"), { initial: currentChoices() });
+  let imgSync = null, styleBox = null;
+  const picker = mountAIChooser($("aiPick"), { initial: currentChoices(), onChange: () => { if (imgSync) imgSync(); if (styleBox) styleBox.render(); } });
+  imgSync = bindImageSettings(config, picker);
+  styleBox = mountArtStyle($("artStyleBox"), picker, story ? (story.art || {}).direction || "" : config.default_art_direction || "");
+  picker.ready.then(() => styleBox.render());
   $("sThink").value = config.claude_thinking ? "on" : "off";
   $("sEffort").value = config.claude_effort || "low";
   $("sEvents").value = config.events_mode || "every";
@@ -599,6 +617,8 @@ async function showSettings(tab = "AI") {
     config.budget_daily = +$("sBudD").value || 0; config.budget_monthly = +$("sBudM").value || 0; config.budget_action = $("sBudAct").value;
     config.backup_auto_days = +$("bkDays").value || 0; config.backup_keep = +$("bkKeep").value || 5; config.backup_dir = $("bkDir").value.trim();
     config.sidebar_default_mode = $("sbDefault").value;
+    const styleDir = styleBox.get(), styleChanged = styleDir !== (story ? (story.art || {}).direction || "" : config.default_art_direction || "");
+    if (styleChanged || styleDir) config.default_art_direction = styleDir;   // new stories start with it
     config.rt_text = $("sRtText").checked; config.rt_comfy = $("sRtComfy").checked; config.rt_comfy_idle_min = +$("sRtIdle").value || 15; config.rt_comfy_mode = $("sRtMode").value; config.rt_comfy_cmd = $("sRtCmd").value.trim(); config.rt_swap = $("sRtSwap").checked;
     config.avatar_library = $("sAvLib").checked; config.reuse_art = $("sReuse").checked;
     config.keep_warm = $("sWarm").checked; config.keep_warm_hours = +$("sWarmH").value || 2;
@@ -615,6 +635,7 @@ async function showSettings(tab = "AI") {
       const custom = sbTrk ? sbTrk.get() : (old.custom || []), strip = (l) => JSON.stringify((l || []).map((f) => [f.label, f.scope || f.id.split(".")[0], f.kind, f.min ?? null, f.max ?? null, String(Array.isArray(f.options) ? f.options.join(",") : f.options || ""), f.unit || "", f.note || ""]));
       if (mode !== old.mode || JSON.stringify(fields) !== JSON.stringify(old.fields || []) || strip(custom) !== strip(old.custom)) story = await api(`/stories/${story.id}/sidebar`, { method: "PUT", body: { mode, fields, custom } });
     }
+    if (story && styleChanged) story = await api(`/stories/${story.id}/art`, { method: "PUT", body: { ...story.art, direction: styleDir, setting: (story.art || {}).setting ?? null } });
     if (story && $("sNsfw")) { const on = $("sNsfw").checked; if (on !== !!story.nsfw) story = await api(`/stories/${story.id}/nsfw?on=${on}`, { method: "PUT" }); }
     closeModal(); await loadModels(); renderAll(); runtimeSelect(); refreshBudget();
     if (!$("home").classList.contains("hidden")) showHome();

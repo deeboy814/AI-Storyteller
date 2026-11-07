@@ -152,6 +152,10 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
     except ValueError as e:
         raise ImageError(f"The ComfyUI workflow in Settings is not valid JSON: {e}")
     w, h = SHAPES[shape]
+    if (p.get("extra_positive") or "").strip():     # optional player tweaks for this model (data/config.json), added to every picture
+        prompt = f"{prompt}, {p['extra_positive'].strip()}"
+    if (p.get("extra_negative") or "").strip():
+        negative = f"{negative}, {p['extra_negative'].strip()}" if negative else p["extra_negative"].strip()
     values = {"prompt": prompt, "negative": negative, "seed": seed if seed is not None else random.randint(0, 2**32 - 1),
               "width": w, "height": h, "model": p.get("model", "")}
     try:
@@ -223,9 +227,29 @@ def plain(text: str) -> str:
 
 
 SAFE_LINE = "Safe for work: no nudity or explicit content."
+ADULT_LINE = ("Adult content is allowed. Every character shown is an adult (18 or older) with clearly adult features and proportions; "
+              "never depict anyone who looks like a minor.")
 
 
-def scene_prompt(art: dict, scene: str, chars: list[dict], max_refs_used: int) -> str:
+def content_line(nsfw: bool) -> str:
+    """What the picture prompt says about content: follows the story's adult-content switch (adults only, always)."""
+    return ADULT_LINE if nsfw else SAFE_LINE
+
+STYLE_PRESETS = [   # id, label, art direction (added to every picture prompt of the story)
+    {"id": "anime", "family": "anime", "label": "Anime (clean cel shading)", "direction": "anime illustration, clean line art, soft cel shading, vibrant colors, detailed eyes"},
+    {"id": "lightnovel", "family": "anime", "label": "Light-novel illustration", "direction": "anime light-novel illustration, soft cel shading, muted pastel palette, delicate lighting, detailed background"},
+    {"id": "manga", "family": "anime", "label": "Manga (black and white)", "direction": "black and white manga art, screentone shading, bold ink lines, expressive faces"},
+    {"id": "semireal", "family": "real", "label": "Semi-realistic digital painting", "direction": "semi-realistic digital painting, soft painterly shading, natural proportions, cinematic lighting"},
+    {"id": "realistic", "family": "real", "label": "Realistic (photographic)", "direction": "photorealistic portrait photography, natural skin texture, realistic lighting, shallow depth of field"},
+    {"id": "comic", "family": "any", "label": "Western comic book", "direction": "western comic book art, bold inks, dynamic shading, saturated colors, halftone texture"},
+    {"id": "watercolor", "family": "any", "label": "Watercolor storybook", "direction": "soft watercolor illustration, gentle washes, visible paper texture, warm storybook palette"},
+    {"id": "painterly", "family": "any", "label": "Painterly fantasy (oil)", "direction": "painterly fantasy oil painting, rich colors, dramatic lighting, visible brush strokes"},
+    {"id": "chibi", "family": "anime", "label": "Cute chibi", "direction": "cute chibi illustration, big heads, simple shapes, bright colors, clean outlines"},
+]
+STYLE_MATCH = "Draw in exactly the same art style as the reference pictures (their style, line work and colors take priority over any style words above)."
+
+
+def scene_prompt(art: dict, scene: str, chars: list[dict], max_refs_used: int, nsfw: bool = False) -> str:
     """Scene prompt: art direction + the scene + who is in it. `chars` items: {"name", "appearance", "ref": bool}."""
     lines = [plain(art.get("direction") or "").strip(), f"Scene: {scene.strip()}"]
     if chars:
@@ -236,12 +260,17 @@ def scene_prompt(art: dict, scene: str, chars: list[dict], max_refs_used: int) -
             lines.append(f"- {c['name']}: {c.get('appearance', '').strip()}" + (f" (reference image {n})" if n else ""))
         if refd:
             lines.append("Reference images are attached. For each character, copy the face, hair and clothing from their reference "
-                         "image. Do NOT copy the reference's background, pose, camera angle or lighting: those come from the scene above.")
-    lines.append(SAFE_LINE)
+                         "image. Do NOT copy the reference's background, pose, camera angle or lighting: those come from the scene above. " + STYLE_MATCH)
+    lines.append(content_line(nsfw))
     return "\n\n".join(x for x in lines if x)
 
 
-def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has_ref: bool, ext_only: bool = False) -> str:
+MOOD_EMPHASIS = ("The mood must be unmistakable at a glance: show it strongly in the face (eyes, eyebrows, mouth) AND in the body language (head tilt, "
+                 "shoulders, posture, arms and hands). Exaggerate it a little rather than understate it, and do not let a neutral reference expression carry over. "
+                 "Frame from the waist up so the hands and posture are visible.")
+
+
+def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has_ref: bool, ext_only: bool = False, nsfw: bool = False) -> str:
     head = plain(art.get("direction") or "").strip()
     if ext_only:   # the only references come from ANOTHER story, drawn in a different style and outfit
         body = (f"Same character as the reference images ({name}: {appearance}). Keep their face, hair and identity. The references come from a different story with a different "
@@ -249,9 +278,11 @@ def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has
                 + (f"Expression: {mood}. " if mood else "Neutral expression. ") + "Upper body, facing the viewer, simple soft background.")
     elif mood and has_ref:
         body = (f"Same character as the reference images ({name}: {appearance}). Copy the face, hair and clothing exactly from the "
-                f"references; do NOT copy their backgrounds or lighting. New expression/mood: {mood}. Upper body, facing the viewer, simple soft background.")
+                f"references; do NOT copy their backgrounds or lighting. New expression/mood: {mood}. Upper body, facing the viewer, simple soft background. " + STYLE_MATCH)
     else:
         body = f"Character portrait of {name}: {appearance}. Upper body, facing the viewer, " + (f"expression: {mood}." if mood else "neutral expression.") + " Simple soft background."
+    if mood and mood.split()[0].lower() not in ("normal", "default", "neutral"):
+        body += " " + MOOD_EMPHASIS
     setting = plain(art.get("setting") or "").strip()
     fit = f"The character belongs to this world; dress and style them to fit it: {setting}" if setting and (ext_only or not (mood and has_ref)) else ""
-    return "\n\n".join(x for x in (head, body, fit, SAFE_LINE) if x)
+    return "\n\n".join(x for x in (head, body, fit, content_line(nsfw)) if x)

@@ -4,14 +4,42 @@ A private, browser-based game where an AI plays the narrator. You write (or impo
 
 Everything runs on your own computer. Your stories, pictures and settings are stored in the `data` folder next to the app. The only things that leave your computer are the text sent to the AI service you choose (Claude, ChatGPT, Gemini or Grok), if you use one. Local models (Ollama, ComfyUI) send nothing anywhere.
 
-**Contents:** [Download and install](#download-and-install) · [What you need](#what-you-need) · [Starting and stopping](#starting-and-stopping) · [Before your first story: settings to check](#before-your-first-story-settings-to-check) · [Quick start](#quick-start-five-minutes) · [Using the app](#using-the-app) · [Settings reference](#settings-reference) · [Troubleshooting](#troubleshooting) · [Technical notes](#technical-notes)
+**Contents:** [What it is and isn't](#what-this-app-is-and-what-it-is-not) · [Download and install](#download-and-install) · [What you need](#what-you-need) · [Starting and stopping](#starting-and-stopping) · [Before your first story: settings to check](#before-your-first-story-settings-to-check) · [Quick start](#quick-start-five-minutes) · [Using the app](#using-the-app) · [Settings reference](#settings-reference) · [Troubleshooting](#troubleshooting) · [Technical notes](#technical-notes)
+
+---
+
+## What this app is, and what it is not
+
+**It is** a program you run on your own computer. It gives you the play screen, memory, side panel, cast and picture tools, and connects to an AI that you choose to write the story. You open it in your web browser, but nothing is hosted online: stories, pictures and settings stay in the `data` folder next to the app.
+
+**It does not:**
+- **Include an AI.** The writing comes from an AI you connect yourself (an online service with its own account and billing, or a free local one you install). Without one, the app cannot write anything.
+- **Include stories, characters or pictures of its own.** It ships with only two small example prompts. You write, paste or import your own story prompt.
+- **Cost anything itself.** The app is free. Online AIs and online picture services charge you directly, per use.
+- **Decide what content is allowed.** Your chosen AI service has its own rules and may refuse or filter some content. The app's adult setting only lets the narrator try; it can't override a provider's rules. Content involving anyone under 18 is never written.
+- **Work as a multiplayer or online game.** It is for one player. You can open it from your phone or tablet on your home network, but it is not a website for others.
+- **Run on macOS or phones.** It runs on **Linux (Ubuntu, well tested)** and **Windows 10/11 (new, not yet tested on a real Windows machine)**. The computer has to stay on while you play.
+- **Guarantee quality.** Story quality, how well rules and stats are followed, and picture quality depend on the AI and picture model you pick. Small local models are noticeably weaker than the big online ones.
+- **Back up for you automatically** unless you turn it on (Settings → Backup).
+
+**Before you can properly start, you need:**
+
+| You need | Required? | Notes |
+|---|---|---|
+| A **Linux (Ubuntu) or Windows 10/11** computer with **Python 3.10+** and a web browser | Yes | The installer checks Python for you. On Windows, install Python from python.org first and tick *Add python.exe to PATH*. |
+| **One AI to narrate**: an online AI (account, payment method, API key) **or** a local AI through Ollama | Yes | Online: a few cents per turn, billed separately from any chat subscription. Local: free, but needs a capable graphics card (about 12 GB of video memory for a good one). |
+| **A story prompt** | Yes | Paste the example in `examples/`, or write or import your own. |
+| A spending limit set in Settings | Strongly advised | Prevents a surprise bill with online AIs. |
+| **A picture maker** (online service, or ComfyUI on your own graphics card) | No | Only for drawn portraits and scene pictures. Stories play fine without it. |
+| Portraits, trackers, quests, voices | No | Optional extras, all off or empty until you set them up. |
 
 ---
 
 ## Download and install
 
 1. **Download:** on the project's GitHub page press the green **Code** button → **Download ZIP**, then unzip it. (Or run `git clone https://github.com/deeboy814/AI-Storyteller.git`.)
-2. **Open a terminal in the unzipped folder** (right-click inside it → *Open in Terminal*) and run:
+   **On Windows, do this instead of steps 2 and 3:** open the folder and double-click **`install.bat`** (needs [Python 3.10+](https://www.python.org/downloads/) installed with *Add python.exe to PATH* ticked). It installs the libraries into the folder (nothing system-wide) and puts an **AI Storyteller** shortcut on your Desktop and Start menu. Then double-click that shortcut (or `launch.bat`). If Windows SmartScreen warns about the scripts, choose *More info → Run anyway*. The rest of this README works the same on Windows; where it shows `./something.sh`, use the matching `.bat` file instead.
+2. **Linux: open a terminal in the unzipped folder** (right-click inside it → *Open in Terminal*) and run:
 
    ```bash
    ./install.sh
@@ -21,13 +49,13 @@ Everything runs on your own computer. Your stories, pictures and settings are st
 3. **Start the app:** double-click **AI Storyteller** (or run `./launch.sh`). Your browser opens the app at `http://127.0.0.1:8000`. Everything stays on your computer.
 4. Open **⚙ Settings** and follow [Before your first story](#before-your-first-story-settings-to-check).
 
-It runs on Linux (tested on Ubuntu). It needs **Python 3.10 or newer**. To remove the desktop icon later run `./uninstall.sh` (your stories are not touched).
+It runs on Linux (tested on Ubuntu) and Windows 10/11 (the Windows scripts have not yet been tried on a real Windows machine; if something fails, see Troubleshooting and please report it). It needs **Python 3.10 or newer**. To remove the desktop icon later run `./uninstall.sh` (Windows: `uninstall.bat`); your stories are not touched.
 
 Want something to try? Paste `examples/the-lighthouse-keepers.md` (a small original story prompt) into **New story**; `examples/story-prompt-template.md` explains how to write your own.
 
 ## What you need
 
-- A computer running **Ubuntu Linux** (the instructions below are for Ubuntu).
+- A computer running **Ubuntu Linux** or **Windows 10/11** (both are covered below).
 - **At least one AI to narrate**, either:
   - an **online AI** (Claude, ChatGPT, Gemini or Grok): you create an account with the company, add a payment method and get an *API key* (a long password for apps). Online AIs are the easiest and write the best stories, but they cost money per use (typically a few cents per turn). They bill separately from any chat subscription you may have. Where to get a key:
     - Claude: console.anthropic.com → API Keys
@@ -39,9 +67,11 @@ Want something to try? Paste `examples/the-lighthouse-keepers.md` (a small origi
 
 ## Starting and stopping
 
-Double-click **AI Storyteller** on your Desktop (also in the application menu). It starts the app in the background if needed and opens it in your browser. Right-click the icon for **Stop AI Storyteller**. Without the icon: `./launch.sh` starts it and opens the browser, `./run.sh` starts it in a terminal, `./stop.sh` stops it. If something goes wrong, the log is `data/server.log`.
+Double-click **AI Storyteller** on your Desktop (also in the application menu). It starts the app in the background if needed and opens it in your browser. To close it, press **⏻ Quit** on the Home screen (🏠 from inside a story) and confirm; your stories are saved as you play. The right-click menu on the icon also offers **Stop AI Storyteller**. Without the icon: `./launch.sh` starts it and opens the browser, `./run.sh` starts it in a terminal, `./stop.sh` stops it. If something goes wrong, the log is `data/server.log`.
 
-**Optional local models** (if you skipped them in the installer):
+**Windows:** use the Desktop shortcut (or `launch.bat`) to start, **⏻ Quit** or `stop.bat` to close, `run.bat` to run in a window, `run-lan.bat` for phones. The log is `data\server.log`. For local models on Windows, install Ollama from ollama.com/download and run `ollama pull mistral-nemo` in a Command Prompt.
+
+**Optional local models on Linux** (if you skipped them in the installer):
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
@@ -57,7 +87,7 @@ Open **⚙ Settings** (from the Home screen or inside a story). These are the se
 | 1 | **AI & story** | **Which AI does what.** Pick the AI for the three jobs (narrator, recaps & helpers, pictures). Paste your API key if it says "needs a key". Click "Use it" on the recommendation if you are unsure. | Nothing works until a narrator is chosen. The app reads your hardware and recommends something sensible. |
 | 2 | **Memory & cost → Spending limit** | Set a **per-day** (and/or per-month) dollar limit, and choose *Just warn me* or *Ask before every paid call*. | Online AIs bill by use. A limit stops a surprise bill. |
 | 3 | **Memory & cost → Claude prompt caching** | Leave **caching on**. If you play in long sittings, pick the **1 hour** lifetime; if you take long breaks, tick **Keep warm**. | Caching makes long stories much cheaper with Claude. (Other services cache automatically.) |
-| 4 | **AI & story → Content** | **Adult (NSFW) content** is **off** by default and is set per story. | Decides whether the narrator may write explicit scenes. Your AI provider's own rules still apply. |
+| 4 | **AI & story → Content** | **Adult (NSFW) content** is **off** by default and is set per story. | Decides whether the narrator may write explicit scenes **and** whether scene pictures and portraits may show adult content (adults only; covers and backdrops always stay safe for work). Online picture services (Gemini, OpenAI, Grok) usually refuse explicit images, so for those pictures use a local ComfyUI model. Every provider's own rules still apply. |
 | 5 | **Pictures** | Check which picture service you use and press **Test: draw a small picture** on it. Choose how many reference pictures to send (default 3). | Confirms pictures work before you need them. |
 | 6 | **Backup** | Turn on **automatic backups** (e.g. every 3 days) and point the backup folder at **another drive** if you can. | Protects your stories if the disk fails. |
 | 7 | **Local models** (only if you use Ollama or ComfyUI) | Decide whether the app should **load and unload local models automatically**, and after how many idle minutes ComfyUI should stop. | Frees graphics memory when nothing is using it. Off by default. |
@@ -128,7 +158,7 @@ The ✨ buttons use the *recaps & helpers* AI. Nothing is saved until you press 
 
 **While a reply is written,** the page stays where your move starts, so you can read at your own pace; a bar above the input shows "Writing…" and then "✓ Finished writing" with a *Jump to the end* button.
 
-**Hover over any turn** for its tools: 🔊 read aloud (uses your browser's own voices; set them under 🎭 Cast → Cast tools → Voices), ☆ bookmark, ✎ edit the text, ⑂ **branch** (copy the story up to your move so you can try a different choice), ↻▾ retry the last reply with a different AI, and … continue a reply that was cut off.
+**Hover over any turn** for its tools: 🔊 read aloud (uses your browser's own voices, so quality depends on what is installed: on Linux the default engine, espeak-ng, is robotic but clear; set voices under 🎭 Cast → Cast tools → Voices), ☆ bookmark, ✎ edit the text, ⑂ **branch** (copy the story up to your move so you can try a different choice), ↻▾ retry the last reply with a different AI, and … continue a reply that was cut off.
 
 **🔍 Search** finds text in the story and lists your bookmarks.
 
@@ -141,9 +171,13 @@ You choose how it decides what to show (**Settings → AI & story → Side panel
 - **Leave it to the prompt author:** shows what the story prompt's own status panel provides.
 - **I choose the fields:** only the fields you tick (day, time, place, situation; your status, alignment, bonds, stats; each character's status, affection, bonds, location, thought).
   - **Your own trackers:** under the ticked fields, press **＋ Add a tracker**. Type a name (say *Hunger* or *Gold*), choose where it lives (**You**, **Scene**, or **Each character**) and how it looks: a **slider** (a gauge with a from/to range), a **number** (with an optional unit), a **status** (one label from a list you write) or plain **text**. A short note on what it means helps the AI. Not sure which type fits? Press ✨ and the helper AI suggests the type, range and meaning from the name. There is nothing to configure afterwards: after each reply the helper AI updates your trackers, fixes any value that doesn't fit (for example words in a number), and a tracker added mid-story is filled in from what has already happened. Your trackers travel with the story when you export it.
+
+  **Quest log (optional, any story):** choose the type **Quest log (tab)** for a tracker and the side panel gains a **Quests** tab. Each quest is one line with its progress; click it to open its objectives, reward and status. When the story completes a quest it stays, marked completed with its reward, for one turn, then clears. Tell the narrator in your story prompt to announce the completion and hand over the rewards in that reply.
+
+  **Panel tabs:** when the panel has more than one kind of content it shows tabs (**Info**, **Characters**, **Quests**). The ▾ button minimizes the panel to just the tab strip; click it again, or any tab, to open it. The panel scrolls when the content is long.
 - **Let the AI decide:** the AI reads the story prompt, picks what is worth tracking (shown in settings), and updates it after each reply.
 
-*Fill from the story so far* rebuilds the panel for an existing story.
+*Re-read the story and rebuild* (Settings → AI & story → Side panel) forgets the panel's values for the story's own trackers and reads them again from the whole story, which corrects a panel that went wrong.
 
 ### Memory
 
@@ -220,7 +254,7 @@ Settings has eight tabs. The Home screen and every story open the same window.
 
 | Problem | Try |
 |---|---|
-| The icon does nothing | Run `./launch.sh` in a terminal and read the message; check `data/server.log`. The first-time setup (`.venv`) must be done. |
+| The icon does nothing | Run `./launch.sh` (Windows: `launch.bat`) in a terminal and read the message; check `data/server.log`. The first-time setup (`.venv`) must be done. |
 | "needs a key" / no models listed | Paste the API key in Settings → AI & story, press **Save key** next to it, then *Re-scan*. Check the key belongs to that company. |
 | A reply is cut off | Raise **Settings → Advanced → Longest reply**, or press **…** (continue) on the reply. With Claude, set *Effort* to Low so hidden thinking doesn't use the budget. |
 | Pictures don't appear next to dialogue | The narrator must write portrait tags. Make sure the story prompt's *Images* section tells it to (see Technical notes), and that the character has pictures in 🎭 Cast. |
@@ -236,6 +270,8 @@ Settings has eight tabs. The Home screen and every story open the same window.
 
 *(For people who want to look under the hood. You do not need these to play.)*
 
+**Browser safety.** The app only answers pages opened as `localhost` or `127.0.0.1`, and a request that changes something must come from the app's own page, so other websites open in your browser cannot use it (for example to press Quit or read your stories). Tools such as `curl` are unaffected.
+
 **Where things are.** `app/` is the server (Python, FastAPI); `static/` is the browser app; `examples/` holds a sample story prompt and a template; `workflows/` holds ComfyUI workflows; `data/` holds everything of yours (stories, pictures, avatars, settings, usage log, backups). Back up `data/` or use Settings → Backup. API keys you enter are stored in `data/config.json` in plain text: keep that folder private and never share or commit it.
 
 **How a turn is built.** Each request is laid out so its start never changes: story prompt, your avatar, the author's cast notes and endings, the picture list and engine rules; then your notes, the prologue and the memory summary; then the history (append-only); and last, the live side-panel data attached to your newest message. This is what makes caching work: Claude marks cache breakpoints after the stable blocks and after the last reply (cached reads cost about 10% of normal; writes cost 25% more for the 5-minute lifetime, 100% more for 1 hour), Ollama reuses its own copy when the prompt start is identical, and other online services cache matching prefixes automatically. Changing the story prompt, cast notes, pictures list or content setting makes the next Claude turn rewrite the cache once. **Keep warm** sends a 1-token request shortly before the cache would expire. The line under each reply shows cached versus new tokens.
@@ -244,7 +280,15 @@ Settings has eight tabs. The Home screen and every story open the same window.
 
 **Status panels.** If the story prompt makes the narrator print a status panel (a fenced `Info` block with a `Characters──` section of rows like `Name:👤/❤️95(+1)/Location/"thought"`), the side panel can read it. Otherwise the state block or the AI fills the panel.
 
+**ComfyUI on Windows.** For *Start and stop ComfyUI automatically*, set *How to start ComfyUI* to a `.bat` file that starts it (the portable ComfyUI download includes `run_nvidia_gpu.bat`; a path with spaces needs quotes). The default on Windows is `ComfyUI\start.bat` in your user folder.
+
 **ComfyUI (local pictures).** Install ComfyUI from github.com/comfyanonymous/ComfyUI, put an SDXL-class checkpoint in `models/checkpoints`, start it (it should listen on `127.0.0.1:8188`), and select it under Settings → Pictures. The built-in starter workflow is plain text-to-image. For consistent faces the project includes `workflows/comfyui-ipadapter-face.json`, a workflow with an IPAdapter face node that takes up to three reference pictures; it needs the IPAdapter custom node and its models installed in ComfyUI. Workflows use placeholders: `{{prompt}} {{negative}} {{seed}} {{width}} {{height}} {{model}}` and `{{ref1}}…{{ref3}}` for reference pictures. Anime SDXL models follow short tag-style prompts best, so each picture service has a *Prompt style* (Tags or Sentences). Scene descriptions are kept safe for work.
+
+**Automatic image rules.** Every turn the app adds a short *Images in this app* note, so prompts written for other sites (image keywords, outside picture links) can't make the narrator print pictures that can't be shown. You don't edit your prompt for this. **New-character art (opt-in).** In the story's Art tab, tick *Let the narrator flag new named characters*: the narrator then ends a reply with a hidden `<newchar>Name | looks</newchar>` tag when someone new appears, the character joins the cast with that description, and the 🎨 banner offers to draw them. Once they have pictures, portrait tags are used automatically. It's off by default.
+
+**Picture services in Settings.** The *Pictures* tab shows one collapsed card each for Gemini, Grok (xAI), OpenAI and Local (ComfyUI), with a short status (key saved, running…). Open one only when you need its settings. Its model box lists what that service really offers and is the same choice as the Pictures line on *AI & story*: change either and the other follows. On *AI & story*, an **Art style** dropdown under Pictures lists styles that suit your detected local checkpoint(s) and any online service with a key; it sets the open story's art style and is the starting style for new stories.
+
+**Picture types and art style.** Settings → Pictures has a *Basic set* and an *Extended set* of picture types (moods) drawn for each new character. Add your own to either list, one per line: just a name (`blushing`) or a name with what to draw (`blushing: embarrassed, red cheeks`). The narrator is told to use a character's existing pictures before asking for a new one; if it asks for one and you draw it, that type is added to the end of the Extended set automatically. **Art style:** every picture follows the story's *art direction*. Pick a ready-made style (anime, light-novel, manga, semi-realistic, realistic, comic, watercolor, painterly, chibi) or write your own: in the creator's trackers/art section, the story's Art tab, or at the top of the *Art for new characters* window, which asks for one when a story has none. When a character already has pictures, new pictures are told to match the style of those pictures first.
 
 **Portrait packs.** 🎭 Cast → *Import portraits…* reads a folder with one sub-folder per character and pictures named for moods (`Mara/Angry 1.webp`). It shows a preview first, copies (never moves) files, and skips pictures already imported. Folders named like `Sub-NPCS` or `Extras` become one-picture characters; folders like `Intro` or `Gallery` are skipped.
 

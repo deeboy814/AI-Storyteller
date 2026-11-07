@@ -24,6 +24,24 @@ def _run(cmd: list[str], timeout: int = 4) -> str:
         return ""
 
 
+def _windows_ram() -> float:
+    """Total memory in GB on Windows (0.0 elsewhere or on failure)."""
+    try:
+        import ctypes
+
+        class MEM(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong), ("avail", ctypes.c_ulonglong),
+                        ("tpage", ctypes.c_ulonglong), ("apage", ctypes.c_ulonglong), ("tvirt", ctypes.c_ulonglong), ("avirt", ctypes.c_ulonglong),
+                        ("ext", ctypes.c_ulonglong)]
+        m = MEM()
+        m.length = ctypes.sizeof(MEM)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+            return round(m.total / 1024**3, 1)
+    except Exception:
+        pass
+    return 0.0
+
+
 def detect(data_dir: Path | str = ".") -> dict:
     gpus = []
     for line in _run(["nvidia-smi", "--query-gpu=name,memory.total,memory.used", "--format=csv,noheader,nounits"]).splitlines():
@@ -42,7 +60,7 @@ def detect(data_dir: Path | str = ".") -> dict:
         try:
             ram = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1024**3, 1)
         except (ValueError, OSError, AttributeError):
-            ram = 0.0
+            ram = _windows_ram()
     cpu = platform.processor() or ""
     try:
         for line in Path("/proc/cpuinfo").read_text().splitlines():

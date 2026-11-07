@@ -118,3 +118,16 @@ def vocabulary_from_cast(story: dict, exclude_slug: str | None = None) -> list[s
 
 def drawable(moods: list[str]) -> list[str]:
     return [m for m in moods if mood_base(m) in DRAWABLE]
+
+
+def add_to_extended(cfg: dict, mood: str) -> bool:
+    """A mood the narrator asked for and the player had drawn joins the extended set (unless a set already has it). True if added."""
+    mood = mood.strip().lower()
+    if not mood or mood == "default":
+        return False
+    sets = cfg.setdefault("mood_sets", {k: list(v) for k, v in DEFAULT_SETS.items()})
+    have = {mood_base(m) for k in ("basic", "extended") for m in sets.get(k, [])} | {m.lower() for k in ("basic", "extended") for m in sets.get(k, [])}
+    if mood in have or mood_base(mood) in have:
+        return False
+    sets.setdefault("extended", []).append(mood)
+    return True

@@ -25,6 +25,10 @@ spelled exactly as listed in the PORTRAITS section the app adds.
 ## Dialogue format   (only if you use portraits or a specific layout)
 An example of one exchange, including the portrait tag lines.
 
+## Quests   (optional)
+Tell the narrator to invent quests as the story goes, with objectives and a reward scaled to difficulty, to announce them in the story,
+and to grant the reward in the same reply the quest is completed. Pair it with a *Quest log* tracker (creator → Trackers) so quests show in the side panel.
+
 ## Status panel   (optional)
 A fenced ```Info block the narrator prints at the top of every reply. The app can read rows like
 Name:👤/❤️95(+1)/Location/"thought" to fill the side panel. Or skip this and let the app track things itself
@@ -33,5 +37,6 @@ Name:👤/❤️95(+1)/Location/"thought" to fill the side panel. Or skip this a
 
 Tips
 - Put what must never change (rules, formats) in the prompt; put what changes (events, relationships) in play. The app keeps the memory.
+- You do not need to explain pictures in the prompt: the app adds its own image rules and ignores image keywords or links copied from other sites.
 - Test it with **🧪 Test this prompt** in the story creator before you play.
 - Longer prompts cost more on online AIs, but the app's prompt caching makes repeated reading cheap.

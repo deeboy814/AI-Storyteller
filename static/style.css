@@ -321,6 +321,8 @@ details.fold { margin: 8px 0; } details.fold > summary { cursor: pointer; color:
 .aff.chg { box-shadow: 0 0 0 2px rgba(224,180,74,.45); }
 .st-other { color: var(--teal); border-color: var(--teal); }
 .chgbar { font-size: 12px; color: var(--gold); margin-bottom: 8px; cursor: help; } .chgbar.none { color: var(--muted); }
+.artneed { background: none; border: 1px solid var(--accent2); border-radius: 6px; padding: 0 5px; margin-left: 6px; font-size: 12px; line-height: 18px; cursor: pointer; animation: artpulse 2.4s ease-in-out infinite; } .artneed:hover { background: var(--accent2); }
+@keyframes artpulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 .newtag { font-size: 10px; color: var(--teal); border: 1px solid var(--teal); border-radius: 6px; padding: 0 5px; margin-left: 4px; font-weight: 400; }
 
 .sbgroup { display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: center; margin: 6px 0; } .sbgroup > b { flex: 0 0 100%; font-size: 12px; color: var(--muted); }
@@ -357,3 +359,46 @@ body.has-backdrop #app { background: var(--bg); box-shadow: 0 0 70px rgba(0,0,0,
 .trow1 input[data-k="label"] { flex: 1 1 140px; min-width: 0; } .trow input, .trow select { margin: 0; }
 .trow2 label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; } .trow2 input[type=number] { width: 70px; }
 .trow2 input[data-k="options"], .trow2 .tnote { flex: 1 1 100%; min-width: 0; } .trow .tmsg { margin: 4px 0 0; min-height: 0; } .trow .tmsg:empty { display: none; }
+
+.ptabs { display: flex; gap: 4px; align-items: center; margin: 4px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.ptab { flex: 0 1 auto; padding: 3px 9px; font-size: 12px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); color: var(--muted); cursor: pointer; }
+.ptab.on { color: var(--text); border-color: var(--accent2); background: var(--panel); } .ptitle { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.pmin { margin-left: auto; padding: 1px 8px; font-size: 12px; background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); cursor: pointer; }
+.qhead { font-size: 12px; margin: 2px 0 6px; } .qhead small { color: var(--muted); }
+details.quest { border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; background: var(--panel2); }
+details.quest > summary { cursor: pointer; padding: 6px 8px; display: flex; gap: 6px; align-items: center; justify-content: space-between; list-style: none; }
+details.quest > summary::-webkit-details-marker { display: none; } details.quest > summary::before { content: "▸"; color: var(--muted); margin-right: 2px; } details.quest[open] > summary::before { content: "▾"; }
+details.quest .qn { flex: 1; font-weight: 600; min-width: 0; } .qbody { padding: 2px 10px 8px; font-size: 13px; } .qbody small { color: var(--muted); margin-right: 4px; }
+.qobj { list-style: none; padding: 0 !important; margin: 2px 0 6px !important; } .qobj li { margin: 2px 0; } .qobj li.done { color: var(--muted); text-decoration: line-through; }
+details.quest.completed { border-color: var(--teal); } details.quest.failed { opacity: .65; } details.quest.chg { box-shadow: 0 0 0 2px rgba(224,180,74,.45); }
+details.quest > summary { flex-wrap: wrap; }
+details.quest .qn { flex: 1 1 55%; overflow-wrap: normal; word-break: normal; hyphens: auto; }
+#sidebar details.quest .qn, #sidebar details.quest summary { overflow-wrap: normal; }
+.ptabs { flex-wrap: wrap; } .ptab { white-space: nowrap; overflow-wrap: normal; word-break: normal; padding: 3px 8px; font-size: 11.5px; }
+button.quitbtn { color: var(--danger); border-color: rgba(216,92,92,.45); }
+button.quitbtn:hover { background: rgba(216,92,92,.12); }
+
+/* picture services in Settings: one collapsible card per service */
+details.iprov { border: 1px solid var(--line); border-radius: 8px; padding: 2px 12px; margin: 6px 0; background: var(--panel); }
+details.iprov > summary { color: var(--text); font-size: 14px; padding: 8px 0; }
+details.iprov[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+details.iprov .ipstat { color: var(--muted); margin-left: 8px; font-weight: normal; }
+details.iprov .imnote:empty { display: none; }
+
+#lightbox { position: fixed; inset: 0; z-index: 50; background: rgba(4, 3, 10, .92); display: flex; flex-direction: column; }
+#lightbox .lbbar { display: flex; align-items: center; justify-content: flex-end; gap: 14px; padding: 8px 14px; color: #ddd; font-size: 13px; z-index: 2; }
+#lightbox .lbbar a { color: #cbd; } #lightbox .lbcount { margin-right: auto; opacity: .8; }
+#lightbox .lbclose { font-size: 26px; line-height: 1; background: none; border: 0; color: #fff; cursor: pointer; padding: 0 6px; }
+#lightbox .lbwrap { flex: 1; min-height: 0; overflow: auto; display: flex; padding: 0 12px 12px; }
+#lightbox .lbwrap img { margin: auto; max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; border-radius: 4px; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
+#lightbox.actual .lbwrap img { max-width: none; max-height: none; cursor: zoom-out; }
+#lightbox .lbnav { position: absolute; top: 50%; transform: translateY(-50%); z-index: 2; background: rgba(0,0,0,.45); color: #fff; border: 0; font-size: 34px; width: 44px; height: 72px; cursor: pointer; border-radius: 8px; }
+#lightbox .lbprev { left: 10px; } #lightbox .lbnext { right: 10px; } #lightbox.single .lbnav { display: none; }
+img:not(.hcover img):not(#lightbox img) { cursor: zoom-in; }
+
+.titlerow { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.tedit { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 4px; opacity: 0; transition: opacity .12s; }
+.titlerow:hover .tedit, .ttl:hover .tedit, .tedit:focus { opacity: 1; } .tedit:hover { color: var(--accent2); }
+.ttl { display: flex; align-items: center; gap: 2px; min-width: 0; } .ttl b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+input.titleedit { font: inherit; width: 100%; min-width: 120px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--accent2); background: var(--panel); color: inherit; }
+@media (hover: none) { .tedit { opacity: .7; } }

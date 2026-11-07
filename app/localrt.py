@@ -22,8 +22,11 @@ _starting: asyncio.Lock | None = None
 LOG = store.DATA / "comfyui.log"
 
 
+WINDOWS = os.name == "nt"
+
+
 def default_cmd() -> str:
-    return str(Path.home() / "ComfyUI" / "start.sh")
+    return str(Path.home() / "ComfyUI" / ("start.bat" if WINDOWS else "start.sh"))
 
 
 def touch(service: str) -> None:
@@ -100,6 +103,15 @@ def _port(cfg: dict) -> int:
 
 
 def _pid_on_port(port: int) -> int | None:
+    if WINDOWS:
+        try:
+            for line in subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True, timeout=6).stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[3].upper() == "LISTENING" and parts[1].rsplit(":", 1)[-1] == str(port):
+                    return int(parts[4])
+        except Exception:
+            pass
+        return None
     try:
         out = subprocess.run(["ss", "-ltnp", f"sport = :{port}"], capture_output=True, text=True, timeout=4).stdout
         if "pid=" in out:
@@ -122,11 +134,14 @@ async def comfy_start(cfg: dict | None = None, wait: float = 150) -> bool:
         if await comfy_up(cfg):
             return True
         cmd = (cfg.get("rt_comfy_cmd") or default_cmd()).strip()
-        argv = shlex.split(os.path.expanduser(cmd))
+        argv = shlex.split(os.path.expanduser(cmd), posix=not WINDOWS)
+        if WINDOWS:
+            argv = [a.strip('"') for a in argv]
         if not argv or not Path(argv[0]).exists():
             return False
         LOG.parent.mkdir(parents=True, exist_ok=True)
-        _proc = subprocess.Popen(argv, stdout=open(LOG, "ab"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(Path(argv[0]).parent))
+        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if WINDOWS else {"start_new_session": True}
+        _proc = subprocess.Popen(argv, stdout=open(LOG, "ab"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=str(Path(argv[0]).parent), **flags)
         t0 = time.time()
         while time.time() - t0 < wait:
             if await comfy_up(cfg):
@@ -157,14 +172,21 @@ async def comfy_stop(cfg: dict | None = None) -> bool:
     else:
         p = _pid_on_port(_port(cfg))
         try:
-            if p and b"main.py" in Path(f"/proc/{p}/cmdline").read_bytes():
+            if p and WINDOWS:
+                out = subprocess.run(["tasklist", "/FI", f"PID eq {p}", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=6).stdout.lower()
+                if "python" in out:   # ComfyUI runs as python; leave anything else on that port alone
+                    pid = p
+            elif p and b"main.py" in Path(f"/proc/{p}/cmdline").read_bytes():
                 pid = p
         except OSError:
             pass
     if pid is None:
         return not await comfy_up(cfg)
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM) if (_proc and pid == _proc.pid) else os.kill(pid, signal.SIGTERM)
+        if WINDOWS:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)   # also ends the processes it started
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGTERM) if (_proc and pid == _proc.pid) else os.kill(pid, signal.SIGTERM)
     except Exception:
         pass
     for _ in range(20):

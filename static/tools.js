@@ -83,26 +83,77 @@ function renderQuick() {
 const tts = { on: !!window.speechSynthesis };
 function voiceSettings() { try { return JSON.parse(localStorage.getItem("voices:" + (story ? story.id : "")) || "{}"); } catch { return {}; } }
 function saveVoices(v) { try { localStorage.setItem("voices:" + story.id, JSON.stringify(v)); } catch {} }
-function pickVoice(name) { const all = speechSynthesis.getVoices(), vs = voiceSettings(); const want = vs[name] || vs.narrator; return all.find((v) => v.name === want) || all.find((v) => v.default) || all[0]; }
+// Which language to read in: the browser's language if it is a Latin-script one, Japanese/Chinese text by its letters, else English.
+function ttsLang(text = "") {
+  if (/[\u3040-\u30ff]/.test(text)) return "ja";
+  if (/[\u4e00-\u9fff]/.test(text)) return "zh";
+  const b = (navigator.language || "en").slice(0, 2).toLowerCase();
+  return ["en", "fr", "de", "es", "it", "pt", "nl", "sv"].includes(b) ? b : "en";
+}
+// Voices are ranked, never taken from the top of the list: on Linux the first voice is often Afrikaans, which turns English text into noise.
+function rankVoice(v, lang) {
+  const l = (v.lang || "").toLowerCase().replace("_", "-");
+  let sc = l.startsWith(lang) ? 100 : 0;
+  if (lang === "en") sc += l === "en-us" ? 10 : l === "en-gb" ? 8 : 0;
+  if (/natural|neural|premium|enhanced|online|google|siri|wavenet/i.test(v.name)) sc += 20;
+  if (v.localService) sc += 2;
+  if (/\+/.test(v.name)) sc -= 5;        // espeak voice variants (English+Adam…) sound stranger than the plain one
+  if (v.default) sc += 1;
+  return sc;
+}
+function bestVoice(lang) {
+  const all = speechSynthesis.getVoices();
+  return all.slice().sort((x, y) => rankVoice(y, lang) - rankVoice(x, lang))[0] || null;
+}
+function pickVoice(name, lang = "en") {
+  const all = speechSynthesis.getVoices(), vs = voiceSettings(), want = vs[name] || vs.narrator;
+  return all.find((v) => v.name === want) || bestVoice(lang);
+}
+// Plain speech text from a reply: no status blocks, pictures, links, hidden tags; then (per line) no markdown marks or emoji.
+function speechBlocks(text) {
+  return text.replace(/```[\s\S]*?```/g, "").replace(/<(state|scene|newchar)>[\s\S]*?(<\/\1>|$)/gi, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/^\[\/\/\]:.*$/gm, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/https?:\/\/\S+/g, "");
+}
+function speechMarks(t) {
+  return t.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu, "").replace(/[*_#>`~|]/g, " ").replace(/[ \t]{2,}/g, " ").trim();
+}
+// Short pieces (a sentence or two): long utterances get cut off or garbled by several browsers and engines.
+function chunks(text, max = 200) {
+  const parts = text.match(/[^.!?…]+(?:[.!?…]+["')\]]*|$)\s*/g) || [text], out = [];
+  let cur = "";
+  for (const p of parts) {
+    if ((cur + p).length > max && cur) { out.push(cur.trim()); cur = ""; }
+    if (p.length > max * 1.5) { for (let i = 0; i < p.length; i += max) out.push(p.slice(i, i + max).trim()); }   // no punctuation at all: cut at a fixed length
+    else cur += p;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out.filter((x) => /[A-Za-z0-9\u00c0-\uffff]/.test(x));
+}
 function segments(text) {
-  const clean = text.replace(/```[\s\S]*?```/g, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/^\[\/\/\]:.*$/gm, "");
   const out = [];
-  for (const para of clean.split(/\n+/)) {
-    const m = para.match(/^\*\*([^*|]{1,40}?)\*\*\s*\|\s*(.*)$/);
-    const body = (m ? m[2] : para).replace(/[*_#>`~]/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").trim();
-    if (body) out.push({ who: m ? m[1].trim() : "narrator", text: body });
+  for (const para of speechBlocks(text).split(/\n+/)) {
+    const m = para.match(/^\s*\*\*([^*|]{1,40}?)\*\*\s*\|\s*(.*)$/);   // "**Name** | line" is that character speaking
+    const body = speechMarks(m ? m[2] : para);
+    if (body) out.push({ who: m ? speechMarks(m[1]) : "narrator", text: body });
   }
   return out;
 }
+let ttsRun = 0;
 function speakText(text) {
   if (!tts.on) return alert("This browser can't read aloud.");
   speechSynthesis.cancel();
-  const rate = +localStorage.getItem("ttsRate") || 1;
-  for (const seg of segments(text)) {
-    const u = new SpeechSynthesisUtterance(seg.text); u.rate = rate;
-    const v = pickVoice(seg.who); if (v) u.voice = v;
-    speechSynthesis.speak(u);
-  }
+  const run = ++ttsRun, rate = +localStorage.getItem("ttsRate") || 1, lang = ttsLang(text);
+  setTimeout(() => {   // speaking right after cancel() makes Chrome drop or garble the first words
+    if (run !== ttsRun) return;
+    for (const seg of segments(text)) {
+      const v = pickVoice(seg.who, lang);
+      for (const piece of chunks(seg.text)) {
+        const u = new SpeechSynthesisUtterance(piece); u.rate = rate; u.lang = v ? v.lang : lang;
+        if (v) u.voice = v;
+        speechSynthesis.speak(u);
+      }
+    }
+  }, 120);
 }
 function readLatest() {
   if (!story) return;
@@ -111,15 +162,17 @@ function readLatest() {
 }
 function showVoices() {
   if (!tts.on) return alert("This browser can't read aloud.");
-  const vs = speechSynthesis.getVoices(), cur = voiceSettings(), names = ["narrator", ...(story.cast || []).map((c) => c.name.split(" ")[0])];
+  const lang0 = ttsLang(), vs = speechSynthesis.getVoices().slice().sort((x, y) => rankVoice(y, lang0) - rankVoice(x, lang0) || x.name.localeCompare(y.name)), cur = voiceSettings(), names = ["narrator", ...(story.cast || []).map((c) => c.name.split(" ")[0])];
+  const noLang = !vs.some((v) => (v.lang || "").toLowerCase().startsWith(lang0));
   const opts = (sel) => `<option value="">(same as narrator)</option>` + vs.map((v) => `<option value="${esc(v.name)}" ${v.name === sel ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`).join("");
   modal(`<h2>Read-aloud voices</h2><p class="hint">Uses the voices built into your browser and computer, so nothing is sent anywhere. Voices are saved on this device. Speaker lines (<code>**Name** | "…"</code>) use that character's voice; everything else uses the narrator.</p>
+    ${noLang ? `<p class="hint" style="color:var(--danger)">Your computer has no ${lang0.toUpperCase()} voice installed, so speech will sound garbled. On Linux install one with <code>sudo apt install speech-dispatcher espeak-ng</code>, then restart the browser.</p>` : ""}
     <label>Speed</label><input id="vRate" type="number" step="0.1" min="0.5" max="2" value="${+localStorage.getItem("ttsRate") || 1}">
     <div class="chkgrid" style="grid-template-columns:1fr 2fr">${names.map((n) => `<label>${esc(n)}</label><select data-v="${esc(n)}">${n === "narrator" ? opts(cur[n]).replace('<option value="">(same as narrator)</option>', "") : opts(cur[n])}</select>`).join("")}</div>
     <div class="actions"><button id="vAuto">Give each character a different voice</button><button id="vTest">Test narrator</button><span style="flex:1"></span><button id="mClose">Close</button><button class="primary" id="vSave">Save</button></div>`);
   $("mClose").onclick = () => { speechSynthesis.cancel(); closeModal(); };
-  $("vTest").onclick = () => { const v = vs.find((x) => x.name === document.querySelector('[data-v="narrator"]').value); speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance("The corridor was quiet, and then it was not."); if (v) u.voice = v; u.rate = +$("vRate").value || 1; speechSynthesis.speak(u); };
-  $("vAuto").onclick = () => { const pool = vs.filter((v) => /^en/i.test(v.lang)); const sels = [...document.querySelectorAll("[data-v]")].filter((s) => s.dataset.v !== "narrator"); sels.forEach((s, k) => { if (pool.length) s.value = pool[(k + 1) % pool.length].name; }); };
+  $("vTest").onclick = () => { const v = vs.find((x) => x.name === document.querySelector('[data-v="narrator"]').value) || bestVoice(lang0); speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance("The corridor was quiet, and then it was not."); if (v) { u.voice = v; u.lang = v.lang; } u.rate = +$("vRate").value || 1; speechSynthesis.speak(u); };
+  $("vAuto").onclick = () => { const pool = vs.filter((v) => (v.lang || "").toLowerCase().startsWith(lang0) && !/\+/.test(v.name)); const sels = [...document.querySelectorAll("[data-v]")].filter((s) => s.dataset.v !== "narrator"); sels.forEach((s, k) => { if (pool.length) s.value = pool[(k + 1) % pool.length].name; }); };
   $("vSave").onclick = () => { const v = {}; document.querySelectorAll("[data-v]").forEach((s) => { if (s.value) v[s.dataset.v] = s.value; }); saveVoices(v); localStorage.setItem("ttsRate", $("vRate").value); speechSynthesis.cancel(); closeModal(); };
 }
 if (tts.on) speechSynthesis.getVoices();

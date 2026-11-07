@@ -72,6 +72,8 @@ DEFAULT_CONFIG = {
     "claude_thinking": False,  # let Claude "think" before replying (costs extra output tokens)
     "events_mode": "every",     # key events: "every" = after each reply a small text-model call logs important moments per character; "off"
     "events_model": "",         # "provider|model" for that bookkeeping call ("" = the story's own model; a cheaper or local one is fine)
+    "default_art_direction": "",   # art style new stories start with (chosen under Settings → AI & story)
+    "mood_looks": {},   # what to draw for moods you add yourself: {"blushing": "embarrassed, red cheeks, hand over mouth"}
     "mood_sets": DEFAULT_SETS,  # which extra pictures to draw for a new character: basic / extended (editable in Settings)
     "image_active": "gemini",   # which image provider makes pictures (Claude cannot)
     "image_max_refs": 3,        # reference portraits sent with a scene so faces stay consistent
@@ -164,7 +166,7 @@ def new_story(title: str, subtitle: str, base_prompt: str, player_name: str = ""
         "models": {},          # this story's AI choices: story / recaps / images -> {"provider", "model"} (empty = use app defaults)
         "user_notes": "",      # standing instructions from the player, sent every turn
         "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True},
+                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False},
         "art_dismissed": [],   # names the player said never to ask about
         "cast": [],            # characters: name, appearance (for image prompts), moods {mood: portrait url}
         "opening": "",         # the story's first scene (markdown), shown before the first move; ![](intro:It1) shows an intro panel
@@ -195,7 +197,7 @@ STORY_DEFAULTS = {
     "cover": "", "description": "",
     "auto_replies": False, "reply_options": {}, "group_cast": True, "models": {}, "avatar": {}, "avatar_image": "", "user_notes": "", "cast": [], "opening": "", "opening_in_context": True, "intro_images": [],
     "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True},
+            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False},
     "art_dismissed": [],
 }
 
