@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -50,6 +51,9 @@ DEFAULT_CONFIG = {
     "backup_keep": 5,           # how many automatic backups to keep
     "ui_bg": "",                # appearance: background colour of the reading area ("" = default theme)
     "ui_text": "",              # appearance: text colour
+    "image_bg": {"on": False, "model": "flux-2-klein-4b-fp8.safetensors", "workflow": ""},   # a separate (local, ComfyUI) picture maker for backgrounds and places, e.g. FLUX.2 klein
+    "ui_twotone": False,        # two-tone story text: dimmer narration, bright dialogue
+    "ui_narr_dim": 38,          # how much the narration is dimmed in two-tone mode (percent toward the background)
     "ui_backdrop": False,       # show the story's generated backdrop on the sides of the screen
     "ui_backdrop_dim": 55,      # how much to darken the backdrop (percent)
     "sidebar_default_mode": "prompt",   # side panel for new stories: "prompt" (the story prompt decides), "player" (you pick fields), "ai" (the AI decides)
@@ -71,6 +75,8 @@ DEFAULT_CONFIG = {
     "thinking_headroom": 4096,  # extra token ceiling so hidden thinking cannot cut the visible reply short (only used tokens are billed)
     "claude_thinking": False,  # let Claude "think" before replying (costs extra output tokens)
     "events_mode": "every",     # key events: "every" = after each reply a small text-model call logs important moments per character; "off"
+    "char_memory_size": "medium",   # how much of each present character's history the narrator is reminded of: small / medium / large
+    "char_memory": True,        # each character's key events are sent to the narrator only while they are in the scene; the shared summary stays short; long logs are condensed
     "events_model": "",         # "provider|model" for that bookkeeping call ("" = the story's own model; a cheaper or local one is fine)
     "default_art_direction": "",   # art style new stories start with (chosen under Settings → AI & story)
     "mood_looks": {},   # what to draw for moods you add yourself: {"blushing": "embarrassed, red cheeks, hand over mouth"}
@@ -166,7 +172,7 @@ def new_story(title: str, subtitle: str, base_prompt: str, player_name: str = ""
         "models": {},          # this story's AI choices: story / recaps / images -> {"provider", "model"} (empty = use app defaults)
         "user_notes": "",      # standing instructions from the player, sent every turn
         "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False},
+                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False},
         "art_dismissed": [],   # names the player said never to ask about
         "cast": [],            # characters: name, appearance (for image prompts), moods {mood: portrait url}
         "opening": "",         # the story's first scene (markdown), shown before the first move; ![](intro:It1) shows an intro panel
@@ -197,24 +203,89 @@ STORY_DEFAULTS = {
     "cover": "", "description": "",
     "auto_replies": False, "reply_options": {}, "group_cast": True, "models": {}, "avatar": {}, "avatar_image": "", "user_notes": "", "cast": [], "opening": "", "opening_in_context": True, "intro_images": [],
     "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False},
+            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False},
     "art_dismissed": [],
 }
+
+
+class StoryDict(dict):
+    """A story as loaded. It remembers how it looked at that moment (_base), so a later save can keep the changes somebody else saved meanwhile."""
+    _base: dict | None = None
+
+
+_locks: dict[str, "threading.RLock"] = {}
+_locks_guard = threading.Lock()
+
+
+def _lock(sid: str):
+    with _locks_guard:
+        return _locks.setdefault(sid, threading.RLock())
+
+
+def _merge_val(base, mine, cur):
+    """Three-way merge of one value: what I changed wins, what I left alone takes the newest saved version. Dicts merge key by key; lists of
+    characters merge character by character; anything else I changed is taken whole."""
+    if isinstance(mine, dict) and isinstance(cur, dict) and isinstance(base, dict):
+        out = {}
+        for k in [*cur, *(k for k in mine if k not in cur)]:
+            inm, inc, inb = k in mine, k in cur, k in base
+            if inm and inb and mine[k] == base[k]:          # I did not touch it: keep whatever is saved now
+                if inc:
+                    out[k] = cur[k]
+            elif inm:                                        # I changed or added it
+                out[k] = _merge_val(base.get(k), mine[k], cur[k]) if (inc and inb) else mine[k]
+            # not in mine but in base: I deleted it
+        return out
+    keyed = lambda l: isinstance(l, list) and l and all(isinstance(x, dict) and x.get("slug") for x in l)
+    if keyed(mine) and keyed(cur) and keyed(base):
+        b = {x["slug"]: x for x in base}
+        out, seen = [], set()
+        for x in cur:                                        # saved order first
+            sl = x["slug"]
+            mine_x = next((m for m in mine if m["slug"] == sl), None)
+            seen.add(sl)
+            if mine_x is None:                               # I deleted this one (or never had it)
+                if sl not in b:
+                    out.append(x)                            # added by somebody else meanwhile
+                continue
+            out.append(_merge_val(b.get(sl), mine_x, x) if sl in b else mine_x)
+        out += [m for m in mine if m["slug"] not in seen and m["slug"] not in b]    # added by me (one somebody else deleted stays deleted)
+        return out
+    return mine
 
 
 def load_story(sid: str) -> dict:
     p = _path(sid)
     if not p.exists():
         raise KeyError(sid)
-    s = json.loads(p.read_text(encoding="utf-8"))
+    text = p.read_text(encoding="utf-8")
+    s = StoryDict(json.loads(text))
     for k, v in STORY_DEFAULTS.items():   # stories made before a feature existed get its defaults
         s.setdefault(k, json.loads(json.dumps(v)))
+    s._base = json.loads(json.dumps(s))
     return s
 
 
 def save_story(story: dict) -> None:
+    """Save a story. Several things save the same story file (your reply, background helpers, drawing jobs). A story that was loaded keeps what the
+    others saved since: only the parts this save actually changed are written over the newest saved version."""
     story["updated"] = time.time()
-    _write(_path(story["id"]), story)
+    path = _path(story["id"])
+    with _lock(story["id"]):
+        base = getattr(story, "_base", None)
+        if base is not None and path.exists():
+            try:
+                cur = json.loads(path.read_text(encoding="utf-8"))
+                merged = _merge_val(base, dict(story), cur)
+                for k, v in STORY_DEFAULTS.items():
+                    merged.setdefault(k, json.loads(json.dumps(v)))
+                story.clear()
+                story.update(merged)
+            except (OSError, ValueError):
+                pass
+        _write(path, story)
+        if isinstance(story, StoryDict):
+            story._base = json.loads(json.dumps(story))
 
 
 # ---------- automatic backups ----------
@@ -292,3 +363,32 @@ def list_stories() -> list[dict]:
         except Exception:
             continue
     return sorted(out, key=lambda s: s["updated"], reverse=True)
+
+
+# ---- scratch pictures: options drawn for the player to pick from ("Draw 4 options") that were never chosen ----
+SCRATCH_DIRS = {"_candidates", "_cover_candidates", "_avatar_candidates", "_place_candidates"}
+SCRATCH_FILES = ("_candidate.", "_avatar_candidate.")
+
+
+def is_scratch(path) -> bool:
+    """True for a picture that only exists as an unchosen option (never part of a story, never worth backing up)."""
+    p = Path(path)
+    return any(part in SCRATCH_DIRS for part in p.parts) or p.name.startswith(SCRATCH_FILES)
+
+
+def clean_scratch(max_age_hours: float = 24) -> int:
+    """Delete unchosen option pictures older than max_age_hours (run at startup, so abandoned options do not pile up on disk). Returns files removed."""
+    cutoff, n = time.time() - max_age_hours * 3600, 0
+    try:
+        for f in list(PORTRAITS.rglob("*")):
+            if f.is_file() and is_scratch(f.relative_to(PORTRAITS)) and f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+                n += 1
+        for d in sorted((d for d in PORTRAITS.rglob("*") if d.is_dir() and d.name in SCRATCH_DIRS), key=lambda d: len(d.parts), reverse=True):
+            try:
+                d.rmdir()          # only if empty now
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return n

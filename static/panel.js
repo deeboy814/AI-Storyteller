@@ -147,3 +147,38 @@ function trackerEditor(el, initial, ctx) {
   draw();
   return { get: () => { sync(); return list.filter((f) => (f.label || "").trim()); } };
 }
+
+
+// "Right now" card: who the player is talking to (picture for their mood, mood, clothing). It takes the place of the player's avatar at the top of the
+// side panel; a small button flips back to the avatar. Needs art.now_card (Art tab); the server fills story.now after each reply.
+let nowShowAvatar = (() => { try { return localStorage.getItem("nowShowAvatar") === "1"; } catch (e) { return false; } })();
+function latestScenePicture() {   // the newest scene picture of the story (while a new one is being drawn, the previous one stays up)
+  if (!(story && story.art && story.art.scene_where === "panel")) return null;
+  for (let i = (story.turns || []).length - 1; i >= 0; i--) {
+    const t = story.turns[i];
+    if (t.role === "assistant" && (t.images || []).length) return { turn: i, k: t.images.length - 1, im: t.images[t.images.length - 1] };
+  }
+  return null;
+}
+function nowCardHtml() {
+  const n = story && story.now, on = story && story.art && story.art.now_card, sc = latestScenePicture();
+  const p = on && n && n.name ? portraitInfo(`${n.name}/${n.mood || "default"}`) : null;
+  const drawing = typeof illustratingTurn !== "undefined" && illustratingTurn !== null;
+  if (!p && !sc && !(drawing && story.art && story.art.scene_where === "panel")) return "";
+  const scene = sc ? `<figure class="nowscene"><a href="${esc(sc.im.url)}" target="_blank"><img src="${thumbUrl(sc.im.url, 640)}" alt=""></a>
+      <figcaption>${esc(oneLine(sc.im.scene || "", 160))}</figcaption>
+      <span class="nowscbtn"><button data-act="redraw" data-turn="${sc.turn}" data-img="${sc.k}" title="Draw this scene again (the earlier picture stays)">↻</button><button data-act="save" data-turn="${sc.turn}" data-img="${sc.k}" title="Keep this picture as a portrait of a character">💾</button><button data-act="del" data-turn="${sc.turn}" data-img="${sc.k}" title="Delete this picture">×</button></span></figure>` : "";
+  const drawingNote = drawing && story.art.scene_where === "panel" ? '<div class="drawing">🎨 Drawing the scene…</div>' : "";
+  const who = p ? `<div class="nowbody">${p.url ? `<img class="nowpic" src="${thumbUrl(p.url, 360)}" alt="">` : ""}<div class="nowtext"><b class="pname" data-slug="${esc(p.ch.slug)}">${esc(p.ch.name)}</b>
+    ${n.mood ? `<div class="nowmood">${esc(n.mood)}</div>` : ""}${n.doing ? `<div class="nowdoing">${esc(n.doing)}</div>` : ""}${n.wearing ? `<div class="nowwear"><small>Wearing</small> ${esc(n.wearing)}</div>` : ""}</div></div>` : "";
+  return `<div class="nowcard"><div class="nowhead"><small>Right now</small><button class="nowflip" title="Show my own avatar instead">me</button></div>${scene}${drawingNote}${who}</div>`;
+}
+async function watchNow() {
+  if (!story || !(story.art && story.art.now_card)) return;
+  const id = story.id;
+  try {
+    const r = await api(`/stories/${id}/now?wait=true`);
+    if (!story || story.id !== id) return;
+    story.now = r.now; renderSidebar();
+  } catch (e) { /* keep what is shown */ }
+}

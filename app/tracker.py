@@ -132,6 +132,28 @@ def coerce(field: dict, v):
     return s
 
 
+def read_labeled(fields: list[dict], text: str) -> tuple[dict, list[dict]]:
+    """Free pass before asking the AI: a tracker whose label the narrator already prints as "Label: value" (a status line such as
+    "Rank: Cadet   Merit: 0   Sync: 96") is read straight from the reply. Only single values for the player or the scene; character rows, quest logs
+    and anything that does not fit its field are left for the AI. Returns (patch, fields still to ask the AI about)."""
+    patch: dict = {"scene": {}, "me": {}, "chars": {}}
+    rest = []
+    for f in fields:
+        sec, _, key = f["id"].partition(".")
+        if sec not in ("scene", "me") or f.get("kind", "text") not in ("text", "number", "slider", "status") or not f.get("label"):
+            rest.append(f)
+            continue
+        m = None
+        for m in re.finditer(r"(?:^|\n|\s{2,}|\|)\s*" + re.escape(f["label"]) + r"\s*[:=]\s*([^\n|]+?)(?=\s{2,}|\s*\||\n|$)", text, re.IGNORECASE):
+            pass       # the last one in the reply (the status line is at the end)
+        v = m.group(1).strip() if m else ""
+        if v and coerce(f, v) is not None:
+            patch[sec][key] = v
+        else:
+            rest.append(f)
+    return patch, rest
+
+
 def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
     """The player's typed trackers, made safe: unique ids (section.slug), a known type, sane limits. Existing ids are kept when the label is unchanged."""
     out, seen = [], {d["id"] for d in DEFAULT_FIELDS}

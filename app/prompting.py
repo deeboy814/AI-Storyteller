@@ -3,7 +3,7 @@ import copy
 import json
 import re
 
-from . import tracker
+from . import store, tracker
 
 ENGINE_CORE = """\
 === ENGINE RULES (added by the app; always follow) ===
@@ -40,11 +40,22 @@ SCENE_RULE = """\
 === SCENE IMAGES (app feature) ===
 Only when this turn is visually striking (a new location, a dramatic moment, an important emotional beat), also end the reply with
 <scene>one sentence describing the single best frame: setting, the characters present by name, their poses and expressions, the lighting</scene>
-placed just before the state block if there is one, otherwise at the very end. Most turns should have NO scene tag.
+placed just before the state block if there is one, otherwise at the very end. Most turns should have NO scene tag, unless the story prompt \
+above asks for scene pictures more often: then follow the story prompt's frequency.
 {CONTENT}
 The tag is hidden from the player and read by an image generator."""
 SCENE_SFW = "Keep it safe for work: no nudity or explicit content; for intimate moments pick a different frame (a hand, the room, a glance)."
 SCENE_ADULT = "Adult content is allowed in this story: an intimate moment may be shown as it happens, between adults only."
+
+
+SCENE_RULE_OFTEN = """\
+=== SCENE IMAGES (app feature, this story asks for them often) ===
+Add a scene picture to most replies: end the reply with
+<scene>one sentence describing the single best frame: setting, the characters present by name (one or two is best), their poses and expressions, what they wear, the lighting</scene>
+placed just before the state block if there is one, otherwise at the very end. Skip it only for a short back-and-forth with nothing new to look at, or when the reply only moves the
+characters into one of the PLACES in the PICTURES AVAILABLE note (the place picture covers that). A place picture and a scene frame can appear in the same reply when something dramatic happens there.
+{CONTENT}
+The tag is hidden from the player and read by an image generator."""
 
 
 IMAGE_GUARD = """\
@@ -70,11 +81,22 @@ def _is_begin(story: dict, turn: dict) -> bool:
     return turn["role"] == "user" and story["turns"] and turn is story["turns"][0] and turn["text"].strip().lower().rstrip(".!") == "begin the story"
 
 
-def images_block(story: dict) -> str:
-    """Instructions for the app's image features. Stable text (sorted), so it does not disturb prompt caching."""
-    art = story.get("art") or {}
-    parts = [IMAGE_GUARD]
-    # Characters that have exactly the same moods share one line (a big cast would otherwise repeat the same long list for each).
+# Compact portrait tag: the narrator writes [[Name/mood]] (fewer tokens than ![](portrait:Name/mood)); the app stores and shows the long form, accepts both,
+# and turns the long form back into the short one when it sends the history to the narrator again.
+_COMPACT_TAG = re.compile(r"\[\[([^\]/\n|]{1,40})/([^\]\n|]{1,40})\]\]")
+_LONG_TAG = re.compile(r"!\[\]\(portrait:([^)/\n]+)/([^)\n]+)\)")
+
+
+def expand_tags(text: str) -> str:
+    return _COMPACT_TAG.sub(lambda m: f"![](portrait:{m.group(1).strip()}/{m.group(2).strip()})", text)
+
+
+def compact_tags(text: str) -> str:
+    return _LONG_TAG.sub(lambda m: f"[[{m.group(1).strip()}/{m.group(2).strip()}]]", text)
+
+
+def portrait_lines(story: dict) -> list[str]:
+    """Who has which portrait moods. Characters with exactly the same moods share one line (a big cast would repeat the same long list)."""
     groups: dict[tuple, list[str]] = {}
     avail = []
     for c in story.get("cast") or []:
@@ -84,23 +106,73 @@ def images_block(story: dict) -> str:
             avail.append(f"{c['name']} (the player character: use this tag only if the story prompt above says to show the player's portrait): {', '.join(sorted(c['moods']))}")
         else:
             groups.setdefault(tuple(sorted(c["moods"])), []).append(c["name"])
-    avail = [f"{', '.join(names)}: {', '.join(moods)}" for moods, names in sorted(groups.items(), key=lambda kv: kv[1][0])] + avail
+    return [f"{', '.join(names)}: {', '.join(moods)}" for moods, names in sorted(groups.items(), key=lambda kv: kv[1][0])] + avail
+
+
+def pictures_available(story: dict) -> str:
+    """The lists that change as pictures get drawn (moods per character, places with pictures). They go at the END of the newest message, not in the
+    cached start of the prompt, so drawing a new mood no longer makes the whole prompt be paid for again."""
+    art = story.get("art") or {}
+    out = []
+    lines = portrait_lines(story)
+    if lines and art.get("portraits", True):
+        out.append("Portraits (characters and the moods available):\n" + "\n".join(lines))
+    rows = _place_rows(story)
+    if rows:
+        out.append("Places (fixed pictures):\n" + "\n".join(rows))
+    if out and extended_moods_on(story):
+        out.append("(Extended mood set: prefer the most specific fitting mood over normal or smile.)")
+    return ("[PICTURES AVAILABLE NOW, for the narrator only]\n" + "\n".join(out)) if out else ""
+
+
+def images_block(story: dict) -> str:
+    """Instructions for the app's image features. Stable text, so it does not disturb prompt caching (the changing lists are in pictures_available)."""
+    art = story.get("art") or {}
+    parts = [IMAGE_GUARD]
+    avail = portrait_lines(story)
     if avail and art.get("portraits", True):
+        if art.get("exact_moods"):
+            mood_rule = ("Use the names and moods listed in that note, spelled exactly, whenever one of them is an exact match. "
+                         "Name the character's real emotion in that line as precisely as you can, in one or two words. Use a listed mood ONLY when it is an exact match: "
+                         "a listed mood that is merely close is NOT a match (for example smile is not mischievous, teasing, smug or proud; fear is not worried or anxious; "
+                         "surprise is not shocked, stunned or flustered; sad is not guilty or lonely). In those cases use the precise word as a new mood name (one or two "
+                         "lowercase words): the player will be offered to draw it. Reuse a mood name you have already asked for instead of inventing near-duplicates. ")
+        else:
+            mood_rule = ("Use the names and moods listed in that note, spelled exactly, whenever one of them fits. Only if NONE of a character's listed moods fits what they feel, "
+                         "you may use a new one- or two-word mood name (for example terrified): the player will be offered to draw it. "
+                         "Always prefer a listed mood, even if it is only the closest fit; ask for a new mood only when no listed one comes close. ")
         parts.append(
             "=== PORTRAITS (character images available in this app; this replaces any other instruction about images) ===\n"
-            + "\n".join(avail)
-            + "\nDirectly above each line of dialogue from a listed character, output one image tag on its own line: "
-              "![](portrait:Name/mood), choosing the mood that best fits what they feel or do in that line. Use the names and moods "
-              "listed above, spelled exactly, whenever one of them fits. Only if NONE of a character's listed moods fits what they feel, "
-              "you may use a new one- or two-word mood name (for example terrified): the player will be offered to draw it. "
-              "Always prefer a listed mood, even if it is only the closest fit; ask for a new mood only when no listed one comes close. "
-              "Skip the tag for anyone not listed."
+            "Which characters have which moods is listed in the PICTURES AVAILABLE note at the end of each player message.\n"
+            "Directly above each line of dialogue from a listed character, output one image tag on its own line: "
+              "[[Name/mood]], choosing the mood that best fits what they feel or do in that line. "
+            + mood_rule
+            + "Skip the tag for anyone not listed. If the story prompt above asks for portraits more often (for example for silent reactions "
+              "or first appearances), follow it: the tag format is the same."
         )
     if art.get("newchar", False):
         parts.append(NEWCHAR_RULE)
+    pl = places_block(story)
+    if pl:
+        parts.append(pl)
     if art.get("auto"):
-        parts.append(SCENE_RULE.replace("{CONTENT}", SCENE_ADULT if story.get("nsfw") else SCENE_SFW))
+        rule = SCENE_RULE_OFTEN if art.get("scene_often") else SCENE_RULE
+        parts.append(rule.replace("{CONTENT}", SCENE_ADULT if story.get("nsfw") else SCENE_SFW))
     return "\n\n".join(parts)
+
+
+def _place_rows(story: dict) -> list[str]:
+    return sorted(f"- {p['name']}" + (f": {p['description']}" if (p.get("description") or "").strip() else "") for p in story.get("places") or [] if p.get("url"))
+
+
+def places_block(story: dict) -> str:
+    """Static place pictures the narrator can show: rooms and locations the story returns to again and again (only places that have a picture)."""
+    if not _place_rows(story):
+        return ""
+    return ("=== PLACES (fixed pictures of locations the story returns to often; the list is in the PICTURES AVAILABLE note at the end of each player message) ===\n"
+            "When a scene takes place in, or moves into, one of these places, put one tag on its own line near the start of that scene: ![](place:Name) "
+              "(the name spelled exactly as in that list). Use it once when the characters arrive there, not again in every reply while they stay, and again when they come back. "
+              "These are for routine, repeated settings. For anything else, or a dramatic moment inside one of them, use a scene frame instead if the app asks for those.")
 
 
 def split_scene(text: str) -> tuple[str, str]:
@@ -212,6 +284,18 @@ def cast_block(story: dict) -> str:
     return ("=== CAST (the story author's characters; keep them true to these notes) ===\n" + "\n".join(rows)) if rows else ""
 
 
+def names_block(story: dict) -> str:
+    """The author's rules for who may use which name for a character (a private first name, titles for leadership...). Sent every turn when filled in."""
+    rows = []
+    for c in story.get("cast") or []:
+        a = (c.get("address") or "").strip()
+        if not a:
+            continue
+        aka = c.get("aka") or []
+        rows.append(f"- {c['name']}" + (f" (also known as: {', '.join(aka)})" if aka else "") + f": {a}")
+    return ("=== NAMES AND FORMS OF ADDRESS (the story author's rules; follow them strictly, in dialogue AND in narration) ===\n" + "\n".join(rows)) if rows else ""
+
+
 def endings_block(story: dict) -> str:
     ends = [e for e in story.get("endings") or [] if e.get("title") or e.get("text")]
     if not ends:
@@ -225,11 +309,56 @@ def endings_block(story: dict) -> str:
     return out
 
 
+def _past_first_turn(story: dict) -> bool:
+    """True once the narrator has already replied: the story prompt is no longer fresh, so the app has to carry the reminder."""
+    return any(t.get("role") == "assistant" for t in story.get("turns") or [])
+
+
+def extended_moods_on(story: dict) -> bool:
+    art = story.get("art") or {}
+    return bool(art.get("extended_moods") and art.get("portraits", True) and _past_first_turn(story)
+                and any(len(c.get("moods") or {}) >= 3 for c in story.get("cast") or []))
+
+
+def _fancy_moods(story: dict) -> list[str]:
+    """Mood names the characters have beyond the plain ones (normal / smile), for the reminder's examples."""
+    out: dict[str, int] = {}
+    for c in story.get("cast") or []:
+        for m in c.get("moods") or {}:
+            b = re.sub(r"\s*\d+$", "", m.strip().lower())
+            if b not in ("normal", "default", "smile"):
+                out[b] = out.get(b, 0) + 1
+    return [m for m, _ in sorted(out.items(), key=lambda kv: -kv[1])][:8]
+
+
+def picture_reminder(story: dict) -> str:
+    """A short per-turn reminder placed right before the narrator writes (the long rules sit far back and a long history of replies that
+    followed the listed moods pulls the narrator toward repeating them). Only for stories with "Ask for exact moods" and/or "Scene picture most turns" on, or with Places pictures."""
+    art = story.get("art") or {}
+    lines = []
+    if art.get("exact_moods") and art.get("portraits", True) and any(c.get("moods") for c in story.get("cast") or []):
+        lines.append("In each portrait tag name the character's exact feeling. A listed mood that is only close does not count: "
+                     "for teasing, mischievous or smug do not use a smile mood; for worried or anxious do not use fear; for shocked, flustered or stunned do not use surprise; "
+                     "for guilty or lonely do not use sad. Use the precise word as a new mood instead (for example [[Name/flustered]]) whenever the moment clearly "
+                     "calls for one, and reuse names you already asked for.")
+    if extended_moods_on(story):
+        ex = _fancy_moods(story)
+        lines.append("The characters have an extended range of mood pictures (see PICTURES AVAILABLE). Use the whole range: for every portrait tag pick the most specific mood that fits that line"
+                     + (f" (for example {', '.join(ex[:6])})" if ex else "") + " instead of falling back on normal or smile, and vary the moods from line to line.")
+    if art.get("auto") and art.get("scene_often"):
+        has_places = any(p.get("url") for p in story.get("places") or [])
+        lines.append("End this reply with a <scene>…</scene> frame unless it is only a short back-and-forth" + (" or only moves the characters into a listed place" if has_places else "")
+                     + ". One or two named characters, their poses, expressions, clothing and the lighting.")
+    if any(p.get("url") for p in story.get("places") or []):
+        lines.append("If this reply starts a scene in (or returns to) one of the listed PLACES, put its ![](place:Name) tag near the start.")
+    return ("[PICTURE REMINDER, for the narrator only] " + " ".join(lines)) if lines else ""
+
+
 def build(story: dict) -> Built:
     use_state = story.get("use_state_block", True)
     rules = ENGINE_CORE + ("\n" + ENGINE_STATE if use_state else "")
     name = player_name(story)
-    core = "\n\n".join(p for p in (story.get("base_prompt", "").strip(), avatar_block(story), cast_block(story), endings_block(story), images_block(story), rules, content_block(story)) if p)
+    core = "\n\n".join(p for p in (story.get("base_prompt", "").strip(), avatar_block(story), cast_block(story), names_block(story), endings_block(story), images_block(story), rules, content_block(story)) if p)
     extras = []
     if story.get("prologue", "").strip():
         extras.append("=== PROLOGUE (events before the story begins; established background the narrator knows) ===\n" + story["prologue"].strip())
@@ -248,8 +377,17 @@ def build(story: dict) -> Built:
     panel = tracker.tail_text(story)   # what the side panel shows, so the narrator keeps it consistent
     if panel:
         tail = (tail + "\n\n" if tail else "") + panel
+    pic = pictures_available(story)
+    if pic:
+        tail = (tail + "\n\n" if tail else "") + pic
+    mem = memory_block(story)
+    if mem:
+        tail = (tail + "\n\n" if tail else "") + mem
+    rem = picture_reminder(story)
+    if rem:
+        tail = (tail + "\n\n" if tail else "") + rem
     start = min(story.get("summary_upto", 0), len(story["turns"]))
-    messages = [{"role": t["role"], "content": BEGIN_NOTE if _is_begin(story, t) else t["text"]} for t in story["turns"][start:]]
+    messages = [{"role": t["role"], "content": BEGIN_NOTE if _is_begin(story, t) else (compact_tags(t["text"]) if t["role"] == "assistant" else t["text"])} for t in story["turns"][start:]]
     opening = opening_for_model(story)
     if opening and start == 0:   # the opening is the story's first message (older, summarized stories no longer need it)
         messages = [{"role": "user", "content": "(The story begins.)"}, {"role": "assistant", "content": opening}] + messages
@@ -330,7 +468,155 @@ SUMMARY_SYSTEM = (
 )
 
 
-def summary_request(old_summary: str, turns: list[dict]) -> list[dict]:
+# Character memory (Settings → Memory & cost): each character's key events live on their own card and are sent to the narrator only while
+# that character is in the scene, so the shared summary can stay short and cover the plot, places, items and open threads.
+SUMMARY_SYSTEM_LEAN = (
+    "You maintain the long-term memory of an interactive story. Given the existing summary and new story events, write the updated summary. "
+    "Keep the plot, locations, time of day, items, abilities, groups and open plot threads, who is who, deaths and turn markers like '[Turn:50]', "
+    "and add the new events in order in the same style. Each character's personal key events are also logged separately (shown below as CHARACTER LOGS) "
+    "and given to the narrator whenever that character is present: do NOT repeat details that appear in those logs, and drop them from the existing "
+    "summary when the logs already hold them (keep a relationship only if it matters to the plot as a whole). "
+    "Keep the whole summary under about 1,200 words: compress the OLDEST entries first, never the recent ones, and never drop names, numbers or consequences "
+    "that are not in the logs. Lay it out exactly as: a first line 'SUMMARY OF STORY SO FAR', then 'Setting and status:' (a short paragraph: place, time, stats, "
+    "relationships, open plot threads), then 'Events in order:' followed by numbered entries (1., 2., 3. ...), one per story beat. Output only the summary."
+)
+
+# Append-only summary: the app keeps the "Events in order:" list and only asks the model for the NEW entries plus a refreshed status paragraph.
+EVENTS_HEAD = "Events in order:"
+SUMMARY_APPEND_SYSTEM = (
+    "You maintain the long-term memory of an interactive story. You are given the CURRENT STATUS paragraph, the LAST FEW EVENT ENTRIES, and NEW STORY TEXT. "
+    "Reply in exactly this form and nothing else:\n"
+    "STATUS:\n<the status paragraph, updated: keep everything still true and add what changed (place, time of day, stats and numbers, relationships and bond "
+    "levels, promises, injuries, items, open plot threads); no more than about 250 words; do not describe characters' personalities, those are kept elsewhere>\n"
+    "EVENTS:\n<one numbered entry per distinct story beat in the NEW STORY TEXT, continuing the numbering from the last entry, one to three sentences each; "
+    "keep names, numbers, exact promises and consequences; do not repeat earlier entries>"
+)
+SUMMARY_COMPACT_SYSTEM = (
+    "You compress the older part of an interactive story's event list. Merge the given numbered entries into at most 8 short numbered entries (or one short "
+    "paragraph if there are few), keeping order, names, numbers, promises, deaths, injuries, discoveries and consequences; drop small talk and scenery. Output only the result."
+)
+
+
+def split_summary(text: str):
+    """(head, characters section, events section) of a summary laid out with 'Events in order:'; None when the summary has another layout."""
+    import re as _re
+    if not text or EVENTS_HEAD not in text:
+        return None
+    pre, _, events = text.partition(EVENTS_HEAD)
+    m = _re.search(r"^Key characters:\s*$", pre, _re.MULTILINE)
+    head, chars = (pre[:m.start()], pre[m.start():]) if m else (pre, "")
+    return head.strip(), chars.strip(), events.strip()
+
+
+def join_summary(head: str, chars: str, events: str) -> str:
+    return "\n\n".join(p for p in (head.strip(), chars.strip(), EVENTS_HEAD + "\n" + events.strip()) if p)
+
+
+def event_entries(events: str) -> tuple[str, list[str]]:
+    """(condensed intro paragraph, the numbered entries) of an events section."""
+    import re as _re
+    parts = _re.split(r"(?m)^(?=\d+\.\s)", events)
+    intro = parts[0].strip() if parts and not _re.match(r"\d+\.\s", parts[0]) else ""
+    nums = [p.strip() for p in parts if _re.match(r"\d+\.\s", p)]
+    return intro, nums
+
+
+def summary_append_request(head: str, last_entries: list[str], turns: list[dict], next_no: int) -> list[dict]:
     transcript = "\n\n".join(("PLAYER: " if t["role"] == "user" else "NARRATOR: ") + t["text"] for t in turns)
-    content = f"EXISTING SUMMARY:\n{old_summary or '(none yet)'}\n\nNEW EVENTS:\n{transcript}\n\nWrite the updated summary."
+    content = (f"CURRENT STATUS:\n{head}\n\nLAST FEW EVENT ENTRIES:\n{chr(10).join(last_entries) or '(none yet)'}\n\n"
+               f"The next entry is number {next_no}.\n\nNEW STORY TEXT:\n{transcript}")
+    return [{"role": "user", "content": content}]
+
+
+def char_memory_on() -> bool:
+    cfg = store.load_config()
+    return bool(cfg.get("char_memory", True)) and cfg.get("events_mode", "every") == "every"
+
+
+def summary_system() -> str:
+    return SUMMARY_SYSTEM_LEAN if char_memory_on() else SUMMARY_SYSTEM
+
+
+def _ev_lines(ch: dict, recent: int) -> list[str]:
+    """A character's condensed history lines, then their newest `recent` single events."""
+    evs = ch.get("events") or []
+    old = [e for e in evs if e.get("digest")]
+    new = [e for e in evs if not e.get("digest")][-recent:]
+    out = []
+    for e in old + new:
+        when = (e.get("when") or "").strip()
+        out.append(f"- {'(' + when + ') ' if when else ''}{(e.get('text') or '').strip()[:1300 if e.get('digest') else 260]}")
+    return out
+
+
+def logs_text(story: dict, recent: int = 12) -> str:
+    """Every character's log, for the summary writer (so it can leave those details out of the shared summary)."""
+    rows = []
+    for c in story.get("cast") or []:
+        lines = _ev_lines(c, recent)
+        if lines:
+            rows.append(f"{c['name']}:\n" + "\n".join(lines))
+    return "\n".join(rows)
+
+
+def scene_cast(story: dict) -> list[dict]:
+    """Characters with a log who are in the scene now, most relevant first: named (full name, first name or an 'also called' name) in the player's newest move
+    (counts six times) or the narrator's reply before it. The player's own character is always first."""
+    turns = story.get("turns") or []
+    user = turns[-1]["text"] if turns and turns[-1]["role"] == "user" else ""
+    reply = " ".join(t["text"] for t in turns[-2:] if t["role"] == "assistant")
+    scored = []
+    for c in story.get("cast") or []:
+        if not c.get("events"):
+            continue
+        if c.get("player"):
+            scored.append((10**6, c))
+            continue
+        pat = "|".join(re.escape(n) for n in {c["name"], c["name"].split()[0], *(c.get("aka") or [])} if n)
+        n = 6 * len(re.findall(rf"\b(?:{pat})\b", user, re.IGNORECASE)) + len(re.findall(rf"\b(?:{pat})\b", reply, re.IGNORECASE)) if pat else 0
+        if n:
+            scored.append((n, c))
+    return [c for _, c in sorted(scored, key=lambda x: -x[0])]
+
+
+MEMORY_SIZES = {"small": (2000, 700), "medium": (3200, 1000), "large": (5000, 1500)}   # (whole note, one character) in characters
+
+
+def _fmt_ev(e: dict, cap: int) -> str:
+    when = (e.get("when") or "").strip()
+    return f"- {'(' + when + ') ' if when else ''}{(e.get('text') or '').strip()[:cap]}"
+
+
+def memory_block(story: dict) -> str:
+    """What the narrator is reminded of about the characters in this scene (newest turn only, so the cached part of the prompt stays unchanged). Each
+    character gets their newest events first, then their condensed history from the newest line backwards, until their share of the size runs out."""
+    if not char_memory_on():
+        return ""
+    total, per = MEMORY_SIZES.get(store.load_config().get("char_memory_size", "medium"), MEMORY_SIZES["medium"])
+    rows, size = [], 0
+    for c in scene_cast(story)[:7]:
+        evs = c.get("events") or []
+        loose = [_fmt_ev(e, 240) for e in evs if not e.get("digest")][-(3 if c.get("player") else 4):]
+        room = per - sum(len(x) for x in loose) - len(c["name"]) - 2
+        hist: list[str] = []
+        for e in reversed([e for e in evs if e.get("digest")]):
+            line = _fmt_ev(e, 420)
+            if room - len(line) < 0:
+                break
+            hist.append(line); room -= len(line)
+        lines = hist[::-1] + loose
+        if not lines:
+            continue
+        row = f"{c['name']}:\n" + "\n".join(lines)
+        if size + len(row) > total:
+            continue                 # does not fit: a less relevant character with a shorter entry still may
+        rows.append(row); size += len(row)
+    return ("[CHARACTER MEMORY, for the narrator only: key past events of the characters in this scene; stay consistent with them, do not recite them]\n"
+            + "\n".join(rows)) if rows else ""
+
+
+def summary_request(old_summary: str, turns: list[dict], logs: str = "") -> list[dict]:
+    transcript = "\n\n".join(("PLAYER: " if t["role"] == "user" else "NARRATOR: ") + t["text"] for t in turns)
+    extra = f"CHARACTER LOGS (kept separately; do not repeat these details):\n{logs}\n\n" if logs else ""
+    content = f"EXISTING SUMMARY:\n{old_summary or '(none yet)'}\n\n{extra}NEW EVENTS:\n{transcript}\n\nWrite the updated summary."
     return [{"role": "user", "content": content}]

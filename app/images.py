@@ -12,6 +12,7 @@ To add a provider type, write one function and register it in GENERATORS.
 import asyncio
 import base64
 import copy
+import io
 import json
 import random
 import re
@@ -144,6 +145,65 @@ def fill_workflow(node, values: dict):
     return node
 
 
+def _tw_num(tw: dict, key: str, lo: float, hi: float):
+    try:
+        return min(hi, max(lo, float(tw.get(key))))
+    except (TypeError, ValueError):
+        return None
+
+
+def tweak_workflow(wf: dict, tw: dict) -> dict:
+    """Per-checkpoint settings applied to the workflow's own numbers (the workflow itself stays shared):
+    ref_weight / ref_end go to the IPAdapter node that applies the reference to the model, hires_denoise to the second (refining)
+    sampler (denoise below 1), steps to the first sampler. Anything left blank keeps the workflow's own value."""
+    rw, re_, hd, st = _tw_num(tw, "ref_weight", 0, 2), _tw_num(tw, "ref_end", 0, 1), _tw_num(tw, "hires_denoise", 0, 1), _tw_num(tw, "steps", 1, 150)
+    if str(tw.get("refine", "")).strip().lower() == "off":
+        # skip the refine pass: whatever decodes the refined latent decodes the first sampler's result instead (unused nodes are not run)
+        for rid, r in wf.items():
+            ri = r.get("inputs") if isinstance(r, dict) else None
+            if not (isinstance(ri, dict) and str(r.get("class_type", "")).startswith("KSampler") and isinstance(ri.get("denoise"), (int, float)) and ri["denoise"] < 1):
+                continue
+            up = wf.get((ri.get("latent_image") or [None])[0]) if isinstance(ri.get("latent_image"), list) else None
+            src = (up or {}).get("inputs", {}).get("samples") if isinstance(up, dict) and "Upscale" in str(up.get("class_type", "")) else ri.get("latent_image")
+            if not isinstance(src, list):
+                continue
+            for n in wf.values():
+                ni = n.get("inputs") if isinstance(n, dict) else None
+                if isinstance(ni, dict) and ni.get("samples") == [rid, 0]:
+                    ni["samples"] = src
+    for node in wf.values():
+        inp = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inp, dict):
+            continue
+        cls = str(node.get("class_type", ""))
+        if "IPAdapter" in cls and "end_at" in inp:
+            if rw is not None and isinstance(inp.get("weight"), (int, float)):
+                inp["weight"] = rw
+            if re_ is not None and isinstance(inp.get("end_at"), (int, float)):
+                inp["end_at"] = re_
+        elif cls.startswith("KSampler") and isinstance(inp.get("denoise"), (int, float)):
+            if inp["denoise"] < 1 and hd is not None:
+                inp["denoise"] = hd
+            elif inp["denoise"] >= 1 and st is not None:
+                inp["steps"] = int(st)
+    return wf
+
+
+def face_region(data: bytes) -> bytes:
+    """Crop a reference picture to where the face is: the app draws portraits upper-body, centred and facing the viewer, so the middle half
+    of the width and the top 62% holds the head and shoulders. The face model only sees a small square of the whole picture, so a tight
+    crop gives it much more of the face to match. Returns the picture unchanged if it can't be read."""
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+        w, h = im.size
+        out = io.BytesIO()
+        im.crop((int(w * 0.25), 0, int(w * 0.75), max(1, int(h * 0.62)))).save(out, "PNG")
+        return out.getvalue()
+    except Exception:
+        return data
+
+
 async def _comfyui(p, prompt, negative, shape, refs, seed):
     base = (p.get("base_url") or "http://127.0.0.1:8188").rstrip("/")
     text = p.get("workflow_ref") if (refs and p.get("workflow_ref")) else p.get("workflow")
@@ -152,10 +212,21 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
     except ValueError as e:
         raise ImageError(f"The ComfyUI workflow in Settings is not valid JSON: {e}")
     w, h = SHAPES[shape]
-    if (p.get("extra_positive") or "").strip():     # optional player tweaks for this model (data/config.json), added to every picture
-        prompt = f"{prompt}, {p['extra_positive'].strip()}"
-    if (p.get("extra_negative") or "").strip():
-        negative = f"{negative}, {p['extra_negative'].strip()}" if negative else p["extra_negative"].strip()
+    tw = (p.get("model_tweaks") or {}).get(p.get("model", "")) or {}   # settings for this checkpoint only (Settings -> Pictures -> Local)
+    if tw:
+        wf = tweak_workflow(wf, tw)
+        n = _tw_num(tw, "ref_count", 1, 3)       # use only the first N references (the face you picked comes first; later ones may have drifted)
+        if n:
+            refs = refs[: int(n)]
+        if str(tw.get("ref_crop", "")).strip().lower() == "face":
+            refs = [(face_region(d), "image/png") for d, m in refs]
+    # optional tweaks added to every picture; a checkpoint's own words replace the shared ones
+    xpos = (tw.get("extra_positive") or "").strip() or (p.get("extra_positive") or "").strip()
+    xneg = (tw.get("extra_negative") or "").strip() or (p.get("extra_negative") or "").strip()
+    if xpos:
+        prompt = f"{prompt}, {xpos}"
+    if xneg:
+        negative = f"{negative}, {xneg}" if negative else xneg
     values = {"prompt": prompt, "negative": negative, "seed": seed if seed is not None else random.randint(0, 2**32 - 1),
               "width": w, "height": h, "model": p.get("model", "")}
     try:
