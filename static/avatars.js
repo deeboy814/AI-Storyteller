@@ -30,7 +30,7 @@ async function showAvatarEditor(id) {
   modal(`<h2>${a.id ? "Edit avatar" : "New avatar"}</h2>
     <div class="avrow"><div id="lvPreview">${a.image ? `<img class="avatar" src="${esc(a.image)}" alt="">` : '<div class="avatar noimg">No image</div>'}</div>
       <div><input type="file" id="lvFile" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:4px">
-        <div class="actions" style="justify-content:flex-start;margin-top:8px"><button id="lvGen">✨ Generate from the info below</button></div>
+        <div class="actions" style="justify-content:flex-start;margin-top:8px"><button id="lvGen">✨ Draw 4 options from the info below</button></div>
         <div class="field"><label>Style it for the world of</label><select id="lvStory"><option value="">No particular story (plain)</option>${stories.map((s) => `<option value="${esc(s.id)}" ${story && story.id === s.id ? "selected" : ""}>${esc(s.title)}</option>`).join("")}</select></div>
         <div id="lvNote" class="hint">Uploads apply immediately. Generating uses that story's picture maker and setting, so the avatar fits its world; pick another story later to make a different version.</div></div></div>
     <div class="grid2" style="grid-template-columns:1fr 1fr 1fr">${AV_FIELDS.slice(0, 3).map(([k, l]) => `<div><label>${l}</label><input id="lv_${k}" value="${esc(a.sheet[k] || "")}"></div>`).join("")}</div>
@@ -48,19 +48,26 @@ async function showAvatarEditor(id) {
     if (!r.ok) { $("lvNote").textContent = "Upload failed."; return; }
     a = await r.json(); prev(a.image);
   };
-  const gen = async () => {
-    $("lvGen").disabled = true; $("lvNote").textContent = "Drawing…";
+  let opts = [], look = "";
+  const showOpts = (aid) => {
+    $("lvNote").innerHTML = opts.length ? `<b>Pick a picture.</b> Nothing is saved until you choose one.
+      <div class="gallery">${opts.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="primary lvUse" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div>
+      <div class="actions" style="justify-content:flex-start"><button id="lvMore">Draw 4 more</button></div><div class="hint">Drawn from: ${esc(look)}</div>` : "";
+    document.querySelectorAll(".lvUse").forEach((b) => b.onclick = async () => { a = await api(`/avatars/${aid}/use`, { method: "POST", body: { url: b.dataset.url } }); prev(a.image); opts = []; $("lvNote").textContent = "Saved."; });
+    if ($("lvMore")) $("lvMore").onclick = () => gen(false);
+  };
+  const gen = async (fresh = true) => {
+    $("lvGen").disabled = true; $("lvNote").textContent = "Starting…";
     try {
       const aid = await ensure();
-      const r = await api(`/avatars/${aid}/generate`, { method: "POST", body: { sheet: sheet(), story_id: $("lvStory").value || null } });
-      prev(r.candidate);
-      $("lvNote").innerHTML = `<b>New picture, not saved yet.</b> <button class="primary" id="lvUse">Use this picture</button> <button id="lvAgain">Try again</button><div class="hint">Drawn from: ${esc(r.look)}</div>`;
-      $("lvUse").onclick = async () => { a = await api(`/avatars/${aid}/use`, { method: "POST" }); prev(a.image); $("lvNote").textContent = "Saved."; };
-      $("lvAgain").onclick = gen;
+      const r = await api(`/avatars/${aid}/candidates`, { method: "POST", body: { sheet: sheet(), story_id: $("lvStory").value || null, count: 4, fresh } });
+      const job = await watchJob(r.job, (j) => { $("lvNote").textContent = j.current || "Drawing…"; });
+      if (job.status === "error") $("lvNote").textContent = "Could not draw: " + job.error;
+      else { if (fresh) opts = []; opts.push(...job.result.candidates); look = job.result.look; showOpts(aid); }
     } catch (err) { $("lvNote").textContent = err.message; }
     $("lvGen").disabled = false;
   };
-  $("lvGen").onclick = gen;
+  $("lvGen").onclick = () => gen(true);
 }
 
 // Player → Avatar: the library row (only when the library is on)

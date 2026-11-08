@@ -3,20 +3,23 @@
 const AI_ROLES = [
   { key: "story", title: "Story narrator", kind: "text", help: "Writes the story each turn. This is the one that matters most for quality." },
   { key: "recaps", title: "Recaps & helpers", kind: "text", help: "Memory summaries, key events, bios and picture prompts. Small jobs that run often, so a cheaper model is fine." },
+  { key: "small", title: "Small helpers (optional)", kind: "text", optional: true, help: "A second, cheaper (or local) model for the small jobs that run after every reply: key events log, new characters, side panel, background place and suggested replies. Leave on “same as Recaps & helpers” to use one helper for everything." },
   { key: "images", title: "Pictures", kind: "image", help: "Draws character portraits and scene illustrations." },
 ];
 const FIT_LABEL = { fits: "fits in video memory", partial: "slower: spills into RAM", cpu: "CPU only: slow", too_big: "too big for this computer" };
 
-function mountAIChooser(el, { initial = {}, onChange = null } = {}) {
+function mountAIChooser(el, { initial = {}, onChange = null, roles = null } = {}) {
   const st = { opts: null, choice: {}, keyOpen: {} };
+  const ROLES = roles ? AI_ROLES.filter((r) => roles.includes(r.key)) : AI_ROLES;   // roles: show only some of the three choices
   const notify = () => { if (onChange && st.opts) onChange(); };   // lets other parts of the Settings window follow the choices
   const list = (kind) => (kind === "image" ? st.opts.images : st.opts.text);
   const prov = (kind, id) => list(kind).find((p) => p.id === id);
   const label = (p) => p.name + (p.local ? (p.ready ? "" : " (not available)") : p.has_key ? "" : " (needs a key)");
 
   function fill() { // make sure every role has a valid choice: saved one if usable, else the recommendation
-    for (const r of AI_ROLES) {
+    for (const r of ROLES) {
       const c = st.choice[r.key] || initial[r.key], p = c && prov(r.kind, c.provider);
+      if (r.optional && !(c && c.provider && c.model)) { st.choice[r.key] = null; continue; }   // "same as Recaps & helpers"
       if (p && p.models.some((m) => m.id === c.model)) st.choice[r.key] = { provider: c.provider, model: c.model };
       else if (p && c && c.provider === p.id && !p.models.length) st.choice[r.key] = { provider: c.provider, model: c.model };
       else if (st.opts.recommended[r.key]) { const x = st.opts.recommended[r.key]; st.choice[r.key] = { provider: x.provider, model: x.model }; }
@@ -32,13 +35,17 @@ function mountAIChooser(el, { initial = {}, onChange = null } = {}) {
   };
   function roleHtml(r) {
     const c = st.choice[r.key], p = c && prov(r.kind, c.provider), rec = st.opts.recommended[r.key];
+    if (r.optional && !c) {   // not chosen: one dropdown to turn it on
+      return `<div class="aiRole" data-role="${r.key}"><div class="aiHead"><b>${r.title}</b> <small>${esc(r.help)}</small></div>
+        <div class="grid2" style="grid-template-columns:1fr 2fr"><div><select data-sel="prov"><option value="">Same as Recaps &amp; helpers</option>${list(r.kind).map((q) => `<option value="${esc(q.id)}">${esc(label(q))}</option>`).join("")}</select></div><div></div></div></div>`;
+    }
     const provs = list(r.kind);
     const isRec = rec && c && rec.provider === c.provider && rec.model === c.model;
     const needsKey = p && !p.local && !p.has_key;
     return `<div class="aiRole" data-role="${r.key}">
       <div class="aiHead"><b>${r.title}</b> <small>${esc(r.help)}</small></div>
       <div class="grid2" style="grid-template-columns:1fr 2fr">
-        <div><select data-sel="prov">${provs.map((q) => `<option value="${esc(q.id)}" ${c && q.id === c.provider ? "selected" : ""}>${esc(label(q))}</option>`).join("")}</select></div>
+        <div><select data-sel="prov">${r.optional ? '<option value="">Same as Recaps &amp; helpers</option>' : ""}${provs.map((q) => `<option value="${esc(q.id)}" ${c && q.id === c.provider ? "selected" : ""}>${esc(label(q))}</option>`).join("")}</select></div>
         <div><select data-sel="model" ${p && p.models.length ? "" : "disabled"}>${p && p.models.length ? modelOptions(p, c && c.model) : `<option>${needsKey ? "add a key to see models" : "no models found"}</option>`}</select></div>
       </div>
       ${needsKey && p.hint ? `<div class="hint">${esc(p.hint)}</div>` : ""}
@@ -52,16 +59,17 @@ function mountAIChooser(el, { initial = {}, onChange = null } = {}) {
     el.innerHTML = `<div class="aiBox">
       <div class="hint">Your computer: <b>${esc(o.hardware.summary)}</b> <button data-rescan>Re-scan</button></div>
       ${o.notes.map((n) => `<div class="hint" style="color:var(--warn,#b8860b)">⚠ ${esc(n)}</div>`).join("")}
-      ${AI_ROLES.map(roleHtml).join("")}
+      ${ROLES.map(roleHtml).join("")}
       ${o.install.length ? `<details class="hint"><summary>Local models worth installing for this computer</summary>${o.install.map((i) => `<div><code>${esc(i.command)}</code> · ${i.size_gb} GB · ${esc(i.note)}</div>`).join("")}<div>Run the command in a terminal, then Re-scan.</div></details>` : ""}
     </div>`;
     el.querySelectorAll(".aiRole").forEach((box) => {
       const r = AI_ROLES.find((x) => x.key === box.dataset.role);
       box.querySelector('[data-sel="prov"]').onchange = (e) => {
+        if (r.optional && !e.target.value) { st.choice[r.key] = null; render(); return; }
         const p = prov(r.kind, e.target.value), m = p.models.find((x) => x.tier === "balanced") || p.models[0];
         st.choice[r.key] = { provider: p.id, model: m ? m.id : (p.default_model || "") }; render();
       };
-      box.querySelector('[data-sel="model"]').onchange = (e) => { st.choice[r.key].model = e.target.value; notify(); };
+      const ms = box.querySelector('[data-sel="model"]'); if (ms) ms.onchange = (e) => { st.choice[r.key].model = e.target.value; notify(); };
       const sk = box.querySelector("[data-savekey]");
       if (sk) sk.onclick = async () => {
         const v = box.querySelector("[data-key]").value.trim(); if (!v) return;
@@ -84,7 +92,7 @@ function mountAIChooser(el, { initial = {}, onChange = null } = {}) {
   const ready = load(false);
   return {
     ready,
-    get: () => Object.fromEntries(Object.entries(st.choice).filter(([, v]) => v)),
+    get: () => ({ ...Object.fromEntries(Object.entries(st.choice).filter(([, v]) => v)), ...(ROLES.some((r) => r.key === "small") && !st.choice.small ? { small: {} } : {}) }),   // small: {} = "same as Recaps & helpers" (clears an earlier choice)
     opts: () => st.opts,
     choice: (role) => st.choice[role] || null,
     // another part of the window changed a model: keep the chooser in step (only if that provider is the chosen one)

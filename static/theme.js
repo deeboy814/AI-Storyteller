@@ -26,6 +26,12 @@ function applyTheme(cfg, st) {
     root.style.setProperty("--panel", rgb2hex(mix(b, toward, 0.06))); root.style.setProperty("--panel2", rgb2hex(mix(b, toward, 0.11)));
     root.style.setProperty("--line", rgb2hex(mix(b, toward, 0.2))); root.style.setProperty("--muted", rgb2hex(mix(t, b, 0.42)));
   }
+  // Two-tone story text: narration in a dimmed shade of the dialogue colour (white on dark backgrounds, black on light ones), dialogue at full strength.
+  const base = bg || [18, 17, 28], two = !!(cfg && cfg.ui_twotone), dlg = lum(base) > 0.5 ? [0, 0, 0] : [255, 255, 255];
+  root.style.setProperty("--dlg", rgb2hex(dlg));
+  root.style.setProperty("--narr", rgb2hex(mix(dlg, base, ((cfg && cfg.ui_narr_dim) ?? 38) / 100)));
+  const nv = document.getElementById("narrative"); if (nv) nv.classList.toggle("twotone", two);
+  document.querySelectorAll(".uiprev").forEach((el) => el.classList.toggle("twotone", two));
   const url = st === undefined ? (story && story.backdrop && story.backdrop.url) : (st && st.backdrop && st.backdrop.url);
   const on = !!(cfg && cfg.ui_backdrop && url);
   document.body.classList.toggle("has-backdrop", on);
@@ -41,18 +47,23 @@ function appearanceHtml(cfg) {
     <div class="grid2"><div class="field"><label>Background colour</label><div class="colorrow"><input type="color" id="uiBg" value="${b || "#12111c"}"><input id="uiBgHex" value="${esc(b)}" placeholder="default"></div></div>
       <div class="field"><label>Text colour</label><div class="colorrow"><input type="color" id="uiText" value="${t || "#e8e5f2"}"><input id="uiTextHex" value="${esc(t)}" placeholder="default"></div></div><div></div></div>
     <div class="hint" id="uiContrast"></div>
-    <div class="uiprev" id="uiPrev"><b>Preview</b><p>The corridor was quiet, and then it was not. <em>*Her hand closed over his.*</em></p></div>
+    <label class="chk top"><input type="checkbox" id="uiTwo" ${cfg.ui_twotone ? "checked" : ""}><span><b>Two-tone story text</b><span class="hint">Narration and description show in a dimmer grey, while spoken words (in quotes) stay bright, so you can tell them apart at a glance.</span></span></label>
+    <div class="grid2"><div class="field"><label>How dim the narration is</label><input type="range" id="uiNarr" min="15" max="60" value="${cfg.ui_narr_dim ?? 38}"><div class="hint"><span id="uiNarrV">${cfg.ui_narr_dim ?? 38}</span>% (lower = brighter, easier to read)</div></div><div></div><div></div></div>
+    <div class="uiprev" id="uiPrev"><b>Preview</b><p>The corridor was quiet, and then it was not. <em>*Her hand closed over his.*</em> <span class="dlg">“Stay behind me,”</span> she whispered, eyes on the door.</p></div>
     <h3>Scene backdrop</h3>
     <label class="chk top"><input type="checkbox" id="uiBackdrop" ${cfg.ui_backdrop ? "checked" : ""}><span><b>Show the story's backdrop on the sides of the screen</b><span class="hint">A picture drawn from the story's setting or its current scene fills the sides of a wide window. The centre keeps your chosen colours. The backdrop is static: it does not scroll. It only shows on windows wider than the story column.</span></span></label>
     <div class="grid2"><div class="field"><label>Darken the backdrop</label><input type="range" id="uiDim" min="0" max="90" value="${cfg.ui_backdrop_dim ?? 55}"><div class="hint"><span id="uiDimV">${cfg.ui_backdrop_dim ?? 55}</span>%</div></div><div></div><div></div></div>
-    <div id="uiBackdropStory"></div>`;
+    <div class="hint">To draw, upload or remove this story's backdrop, or have it follow the scene automatically, open <b>🖼 Art → Backgrounds</b> inside the story.</div>`;
 }
 
 function bindAppearance(cfg) {
-  const draft = { ui_bg: cfg.ui_bg || "", ui_text: cfg.ui_text || "", ui_backdrop: !!cfg.ui_backdrop, ui_backdrop_dim: cfg.ui_backdrop_dim ?? 55 };
+  const draft = { ui_bg: cfg.ui_bg || "", ui_text: cfg.ui_text || "", ui_backdrop: !!cfg.ui_backdrop, ui_backdrop_dim: cfg.ui_backdrop_dim ?? 55, ui_twotone: !!cfg.ui_twotone, ui_narr_dim: cfg.ui_narr_dim ?? 38 };
   const refresh = () => {
     applyTheme(draft);
     const b = hex2rgb(draft.ui_bg) || [18, 17, 28], t = hex2rgb(draft.ui_text) || (lum(b) > 0.5 ? [29, 29, 31] : [232, 229, 242]), r = contrastRatio(b, t);
+    const nr = contrastRatio(b, mix(lum(b) > 0.5 ? [0, 0, 0] : [255, 255, 255], b, draft.ui_narr_dim / 100));
+    $("uiNarrV").textContent = draft.ui_narr_dim;
+    $("uiNarr").nextElementSibling.style.color = draft.ui_twotone && nr < 4.5 ? "var(--danger)" : "";
     $("uiContrast").innerHTML = r < 3 ? `<span style="color:var(--danger)">⚠ Low contrast (${r.toFixed(1)}:1): the text may be hard to read.</span>` : `Contrast ${r.toFixed(1)}:1 ${r >= 7 ? "(excellent)" : "(good)"}`;
     $("uiBg").value = rgb2hex(b); $("uiText").value = rgb2hex(t);
     $("uiBgHex").value = draft.ui_bg; $("uiTextHex").value = draft.ui_text;
@@ -62,22 +73,26 @@ function bindAppearance(cfg) {
   $("uiBgHex").onchange = (e) => set("ui_bg", hex2rgb(e.target.value) ? e.target.value.trim() : ""); $("uiTextHex").onchange = (e) => set("ui_text", hex2rgb(e.target.value) ? e.target.value.trim() : "");
   document.querySelectorAll(".preset").forEach((b) => b.onclick = () => { const p = THEME_PRESETS[+b.dataset.i]; draft.ui_bg = p.bg; draft.ui_text = p.text; refresh(); });
   $("uiBackdrop").onchange = (e) => set("ui_backdrop", e.target.checked);
+  $("uiTwo").onchange = (e) => set("ui_twotone", e.target.checked);
+  $("uiNarr").oninput = (e) => { set("ui_narr_dim", +e.target.value); if (!draft.ui_twotone) { draft.ui_twotone = true; $("uiTwo").checked = true; refresh(); } };
   $("uiDim").oninput = (e) => { $("uiDimV").textContent = e.target.value; set("ui_backdrop_dim", +e.target.value); };
-  const box = $("uiBackdropStory");
-  const drawStory = () => {
-    if (!story) { box.innerHTML = '<div class="hint">Open a story to create its backdrop.</div>'; return; }
-    const bd = story.backdrop || {};
-    box.innerHTML = `<label>Backdrop for “${esc(story.title)}”</label>${bd.url ? `<img class="bdprev" src="${esc(bd.url)}" alt="">` : '<div class="hint">No backdrop yet.</div>'}
-      <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="bdSetting">✨ From the story's setting</button><button id="bdScene">✨ From the latest scene</button>${bd.url ? '<button id="bdDel">Remove</button>' : ""}</div>
-      <div class="hint" id="bdNote">Drawn with this story's picture maker (about 20 seconds locally), environment only. ${bd.source ? `Last made from the ${bd.source}.` : ""}</div>`;
-    const gen = (source) => async (e) => {
-      e.target.disabled = true; $("bdNote").textContent = "Drawing the backdrop…";
-      try { story = await api(`/stories/${story.id}/backdrop/generate`, { method: "POST", body: { source } }); if (!draft.ui_backdrop) { draft.ui_backdrop = true; $("uiBackdrop").checked = true; } refresh(); drawStory(); }
-      catch (err) { $("bdNote").textContent = err.message; e.target.disabled = false; }
-    };
-    $("bdSetting").onclick = gen("setting"); $("bdScene").onclick = gen("scene");
-    if ($("bdDel")) $("bdDel").onclick = async () => { story = await api(`/stories/${story.id}/backdrop`, { method: "DELETE" }); refresh(); drawStory(); };
-  };
-  drawStory(); refresh();
+  refresh();
   return draft;
+}
+
+
+// Automatic backdrop: after a reply the server works out where the scene is; when it picks another background, fade to it.
+async function watchBackdrop() {
+  if (!story || !(story.art && story.art.auto_backdrop) || !(config && config.ui_backdrop)) return;
+  const id = story.id;
+  try {
+    const r = await api(`/stories/${id}/backdrop?wait=true`);
+    if (!story || story.id !== id) return;
+    const nu = (r.backdrop || {}).url || "", cur = (story.backdrop || {}).url || "";
+    if (!nu || nu === cur) return;
+    document.body.classList.add("bdswap");
+    await new Promise((res) => setTimeout(res, 380));
+    story.backdrop = r.backdrop; applyTheme(config);
+    document.body.classList.remove("bdswap");
+  } catch (e) { document.body.classList.remove("bdswap"); }
 }

@@ -20,6 +20,8 @@ async function showUsage(opts = {}) {
     <div class="ubig"><b>${money(t.cost)}</b> estimated${t.unpriced ? ` <small>(+ ${t.unpriced} call${t.unpriced > 1 ? "s" : ""} with no price set)</small>` : ""}<br>
       <small>${t.calls} calls · ${num(allIn)} tokens in (${allIn ? Math.round(100 * t.cache_read / allIn) : 0}% read from cache) · ${num(t.output)} out · ${t.images} picture${t.images === 1 ? "" : "s"}</small></div>
     <div class="ubars">${r.day.map((d) => `<div title="${d.name}: ${money(d.cost)}"><i style="height:${Math.max(2, 100 * d.cost / maxDay)}%"></i><small>${d.name.slice(5)}</small></div>`).join("")}</div>
+    ${r.cache && r.cache.turns ? `<h3>Narrator cache</h3><div class="hint">${r.cache.hits} of ${r.cache.turns} narrator replies read the prompt from the cache. The others wrote a large part of it again, for these reasons:</div>
+      <table class="utab"><tr><th></th><th>Times</th><th>Tokens written</th></tr>${r.cache.rewrites.map((x) => `<tr><td>${esc(x.name)}</td><td>${x.calls}</td><td>${num(x.tokens)}</td></tr>`).join("") || '<tr><td colspan="3">none</td></tr>'}</table>` : ""}
     ${table("By story", r.story)}${table("By job", r.purpose)}${table("By model", r.model)}
     <p class="hint">Costs are estimates from the prices below, not your bill. Local models and ComfyUI cost nothing. Usage is logged from now on; calls made before this feature existed aren't included.</p>
     <details><summary>Prices ($ per million tokens; per picture for pictures)</summary>

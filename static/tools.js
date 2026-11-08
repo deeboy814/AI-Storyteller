@@ -227,14 +227,18 @@ function showCompare() {
 // ---------- export & share ----------
 function showExport() {
   if (!story) return;
-  modal(`<h2>Export “${esc(story.title)}”</h2>
+  modal(`<h2>Export &amp; backups: “${esc(story.title)}”</h2>
     <div class="aiBox"><b>Plain text</b><div class="hint">Every turn as a text file.</div><button id="xText">Download .txt</button></div>
     <div class="aiBox"><b>Illustrated page</b><div class="hint">One self-contained web page with the story, pictures and your cover, ready to print or save as PDF from the browser (Ctrl+P). Pictures are shrunk to keep the file small.</div>
       <label class="chk"><input type="checkbox" id="xStatus"> Include status panels</label><button id="xHtml">Build page</button> <span class="hint" id="xProg"></span></div>
     <div class="aiBox"><b>Story package</b><div class="hint">Everything the author made, as one .zip to share or back up: prompt, prologue, opening scene and suggested first moves, cast (looks, personalities, bios, pictures), suggested trackers, endings, cover, intro panels and backdrop. It never contains your turns, memory, character sheet, notes or API keys. Import it from the Home screen (📦).</div>
       <select id="xPics"><option value="all">All pictures</option><option value="normal">One picture per character</option><option value="none">No pictures</option></select> <button id="xPack">Download package</button></div>
+    <div class="aiBox"><b>Backups</b><div class="hint">This story: the app keeps copies of it automatically (before a summary, an edit or a restore, and every 5 turns) and you can restore one. Everything: one .zip with all stories, pictures, avatars and settings.</div>
+      <button id="xSnaps">This story's backups…</button> <button id="xAll">Back up everything…</button></div>
     <div class="actions"><button id="mClose">Close</button></div>`);
   $("mClose").onclick = closeModal;
+  $("xSnaps").onclick = () => showBackups(story.id);
+  $("xAll").onclick = () => showSettings("Backup");
   $("xText").onclick = () => window.open(`/api/stories/${story.id}/export`, "_blank");
   $("xPack").onclick = () => { window.location = `/api/stories/${story.id}/pack?pictures=${$("xPics").value}`; };
   $("xHtml").onclick = () => exportHtml($("xStatus").checked, (t) => { $("xProg").textContent = t; });

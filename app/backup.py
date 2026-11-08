@@ -45,7 +45,7 @@ def make_zip(dest: Path, keys: bool = False) -> dict:
             if not root.exists():
                 continue
             for f in sorted(root.rglob("*")):
-                if f.is_file():
+                if f.is_file() and not store.is_scratch(f.relative_to(root)):
                     z.write(f, f.relative_to(store.DATA).as_posix(), zipfile.ZIP_STORED if f.suffix.lower() in NO_COMPRESS else zipfile.ZIP_DEFLATED)
                     n += 1
         for name in FILES:

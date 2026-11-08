@@ -20,7 +20,9 @@ function inlineMd(text) {
     .map((l) => {
       let imgs = "";
       l = l.replace(/!\[[^\]]*\]\(portrait:([^)]+)\)/g, (_, spec) => { imgs += portraitHtml(spec); return ""; });
+      l = l.replace(/\[\[([^\]\/\n|]{1,40})\/([^\]\n|]{1,40})\]\]/g, (_, n, m) => { imgs += portraitHtml(n.trim() + "/" + m.trim()); return ""; });   // the compact tag the narrator writes while a reply is still streaming
       l = l.replace(/!\[[^\]]*\]\(intro:([^)]+)\)/g, (_, name) => { imgs += introPanelHtml(name); return ""; });
+      l = l.replace(/!\[[^\]]*\]\(place:([^)]+)\)/g, (_, name) => { imgs += placeHtml(name); return ""; });
       l = l.replace(/^&gt;\s?/, "");   // "> quote" marker: show the text without it
       l = l.replace(/!\[[^\]]*\]\((\/(?:static|portraits)\/[^)\s]*)\)/g, (_, u) => { imgs += `<img class="portrait" src="${u}">`; return ""; })
            .replace(/!\[[^\]]*\]\([^)]*\)/g, "");
@@ -28,6 +30,8 @@ function inlineMd(text) {
       // be read as bold/italic markers. Park them as \u0001 while formatting, then restore.
       l = l.replace(/\\\*/g, "\u0001").replace(/(\w)(\*{1,2})(?=\w)/g, (m, c, a) => c + "\u0001".repeat(a.length));
       l = l.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/\*(.+?)\*/g, "<i>$1</i>").replace(/\u0001/g, "*").trim();
+      // Spoken words (in quotes) get a span so the two-tone reading option (Settings > Appearance) can show them brighter than the narration.
+      l = l.replace(/(“[^”\n]*”|"[^"\n]*"|«[^»\n]*»)/g, '<span class="dlg">$1</span>');
       const hm = l.match(/^(#{1,3})\s+(.+)$/);
       return imgs + (hm ? `<h3 class="mdh">${hm[2]}</h3>` : l ? "<p>" + l + "</p>" : "");
     }).join("");
@@ -87,7 +91,8 @@ function renderNarrative(streamText = null, scroll = "bottom") {   // scroll: "b
   let html = openingHtml();
   const lastAi = story.turns.map((t) => t.role).lastIndexOf("assistant");
   story.turns.forEach((t, i) => {
-    const inner = t.role === "user" ? `<div class="player">${md(t.text)}</div>` : md(t.text) + sceneHtml(t, i) + (i === lastAi ? usageLine(t.usage) : "");
+    const sw = (story.art || {}).scene_where, sc = t.role === "user" ? "" : sceneHtml(t, i);
+    const inner = t.role === "user" ? `<div class="player">${md(t.text)}</div>` : (sw === "banner_top" ? sc + md(t.text) : md(t.text) + sc) + (i === lastAi ? usageLine(t.usage) : "");
     html += `<div class="turn ${t.role}${t.bookmark ? " bm" : ""}" data-i="${i}">${turnBar(t, i, lastAi)}${t.bookmark ? `<div class="bmlabel">★ ${esc(t.bookmark)}</div>` : ""}${inner}</div>`;
   });
   if (streamText !== null) html += `<div class="typing" style="min-height:${Math.max(200, box.clientHeight - 40)}px">${md(stripState(streamText)) || ""}</div>`;   // room below, so your move can sit at the top of the page while the reply grows
@@ -116,7 +121,10 @@ function renderSidebar() {
   let h = "";
   const av = (story && story.avatar) || {};
   const panel = panelSidebarHtml();   // the tracked side panel (scene, you, characters), when there is data
-  if (story && (story.avatar_image || (av.name && !panel))) {
+  const now = nowShowAvatar ? "" : nowCardHtml();   // who the player is talking to covers the avatar for now
+  if (now) h += now;
+  else if (story && story.art && story.art.now_card && nowShowAvatar && nowCardHtml()) h += `<div class="nowflipbar"><button class="nowflip" title="Show who I am talking to">↩ who I'm talking to</button></div>`;
+  if (!now && story && (story.avatar_image || (av.name && !panel))) {
     h += "<h4>You</h4>" + (story.avatar_image ? `<img class="avatar" src="${story.avatar_image}" alt="">` : "") + (av.name ? `<div><b>${esc(av.name)}</b></div>` : "");
   }
   h += panel;
@@ -136,6 +144,13 @@ function renderSidebar() {
   if (story && story.summary) h += "<h4>Memory</h4><div class='side-empty'>Older events summarized (" + story.summary.length + " chars)</div>";
   el.innerHTML = h || '<div class="side-empty">The sheet fills in as the story is played.</div>';
   el.querySelectorAll(".pname[data-slug]").forEach((n) => n.onclick = () => showCharacter(n.dataset.slug));
+  el.querySelectorAll(".nowscbtn button").forEach((b) => b.onclick = async () => {   // the scene picture's own buttons (same as under a reply)
+    const turn = +b.dataset.turn, im = story.turns[turn] && (story.turns[turn].images || [])[+b.dataset.img]; if (!im) return;
+    if (b.dataset.act === "redraw") illustrate(turn, im.scene);
+    else if (b.dataset.act === "save") showSaveAsPortrait(im.url);
+    else if (b.dataset.act === "del" && confirm("Delete this picture?")) { story = await api(`/stories/${story.id}/images?url=${encodeURIComponent(im.url)}`, { method: "DELETE" }); renderAll(); }
+  });
+  el.querySelectorAll(".nowflip").forEach((b) => b.onclick = () => { nowShowAvatar = !nowShowAvatar; try { localStorage.setItem("nowShowAvatar", nowShowAvatar ? "1" : "0"); } catch (e) { /* not saved */ } renderSidebar(); });
   el.querySelectorAll(".artneed[data-art]").forEach((b) => b.onclick = () => showArtDialog({ only: b.dataset.art, onClose: () => { closeModal(); renderAll(); } }));
   bindPanel(el);
 }
@@ -245,7 +260,7 @@ async function send(text, override, forceBudget = false) {
     $("narrative").insertAdjacentHTML("beforeend", `<div class="err">${esc(failed.replace(/^BUDGET: /, ""))}</div>`);
     $("narrative").scrollTop = $("narrative").scrollHeight;
   }
-  if (!failed) { genStatus("done", words); refreshTracker(); wasAtBottom = false; if (narrativeAtBottom() && $("narrative").scrollHeight <= $("narrative").clientHeight + 40) maybeShowReplies(); }
+  if (!failed) { genStatus("done", words); refreshTracker(); watchBackdrop(); watchNow(); wasAtBottom = false; if (narrativeAtBottom() && $("narrative").scrollHeight <= $("narrative").clientHeight + 40) maybeShowReplies(); }
   const lastT = story.turns[story.turns.length - 1];
   if (!failed && story.art && story.art.auto && lastT && lastT.role === "assistant" && lastT.scene && !(lastT.images || []).length) illustrate(story.turns.length - 1);
   if (!failed && story.auto_replies) fetchReplies(false);
@@ -274,9 +289,18 @@ async function undo() {
 }
 
 // ---------- modals ----------
-function modal(html) { $("modalCard").className = "card"; $("modalCard").innerHTML = html; $("modal").classList.remove("hidden"); }
+let artBack = null;   // set while a screen opened from the 🖼 Art menu is showing: a "← Art menu" button on top of it reopens the menu
+function modal(html) {
+  $("modalCard").className = "card"; $("modalCard").innerHTML = html; $("modal").classList.remove("hidden");
+  if (artBack) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "backart"; b.textContent = "← Art menu";
+    b.onclick = () => { const f = artBack; artBack = null; f(); };
+    $("modalCard").prepend(b);
+  }
+}
 let onModalClose = null;
-function closeModal() { $("modal").classList.add("hidden"); if (onModalClose) onModalClose(); }
+function closeModal() { artBack = null; $("modal").classList.add("hidden"); if (onModalClose) onModalClose(); }
 $("modal").addEventListener("mousedown", (e) => { if (e.target === $("modal")) closeModal(); });
 
 // Import a story played elsewhere: memory summary + latest status panel (+ optional last few turns word for word).
@@ -357,12 +381,12 @@ function showPlayer() {
     : `<div><label>${label}</label><input id="av_${key}" value="${esc(av[key] || "")}"></div>`;
   const preview = () => story.avatar_image ? `<img class="avatar" src="${story.avatar_image}" alt="">` : '<div class="avatar noimg">No image</div>';
   modal(`<h2>Player</h2>
-    <div class="tabs"><button class="tab on" data-tab="Avatar">Avatar</button><button class="tab" data-tab="Notes">User notes</button><button class="tab" data-tab="Art">Art style</button></div>
+    <div class="tabs"><button class="tab on" data-tab="Avatar">Avatar</button><button class="tab" data-tab="Notes">User notes</button></div>
     <div id="tabAvatar">
       ${config.avatar_library ? avatarLibraryRow() : ""}
       <div class="avrow"><div id="avPreview">${preview()}</div>
         <div><input type="file" id="avFile" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:4px">
-        <div class="actions" style="justify-content:flex-start;margin-top:8px"><button id="avGen" title="Draws a picture from the Avatar fields below with this story's picture maker">✨ Generate from the info below</button><button class="danger" id="avRemove">Remove image</button></div>
+        <div class="actions" style="justify-content:flex-start;margin-top:8px"><button id="avGen" title="Draws four pictures from the Avatar fields below with this story's picture maker, and you pick one">✨ Draw 4 options from the info below</button><button class="danger" id="avRemove">Remove image</button></div>
         <div id="avCand" class="hint">Upload your own, or generate one from the name, age, gender and appearance below (a safe-for-work description is written from them first). Uploads and removals apply immediately (PNG/JPEG/WebP/GIF, up to 8 MB). The picture also joins the Cast as you, so scenes can use it as a face reference; whether it is shown in scenes is up to your story prompt.</div></div></div>
       ${field("name", "Name (replaces {user} in the story prompt)")}
       <div class="grid2" style="grid-template-columns:1fr 1fr">${field("gender", "Gender")}${field("age", "Age")}</div>
@@ -374,13 +398,11 @@ function showPlayer() {
       <textarea id="uNotes" placeholder="e.g. Keep combat gritty and consequences permanent. Slow-burn romance. Never skip time without asking. Avoid repeating a character's catchphrase…">${esc(story.user_notes || "")}</textarea>
       <p class="hint">Sent every turn, right after the story's memory. Edit any time; changes apply from the next turn.</p>
     </div>
-    ${artTabHtml()}
     <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="mSave">Save</button></div>`);
-  artTabInit();
   if (config.avatar_library) avatarLibraryInit();
   document.querySelectorAll(".tab").forEach((b) => b.onclick = () => {
     document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
-    for (const n of ["Avatar", "Notes", "Art"]) $("tab" + n).classList.toggle("hidden", n !== b.dataset.tab);
+    for (const n of ["Avatar", "Notes"]) $("tab" + n).classList.toggle("hidden", n !== b.dataset.tab);
   });
   const refresh = () => { $("avPreview").innerHTML = preview(); renderSidebar(); };
   $("avFile").onchange = async (e) => {
@@ -389,27 +411,36 @@ function showPlayer() {
     if (!r.ok) { alert((await r.json().catch(() => ({}))).detail || "Upload failed"); return; }
     story = await r.json(); refresh();
   };
-  const genAvatar = async () => {
+  let avOpts = [], avLook = "";
+  const showAvOpts = () => {
+    $("avCand").innerHTML = avOpts.length ? `<b>Pick a picture.</b> Nothing is saved until you choose one.
+      <div class="gallery">${avOpts.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="primary avUse" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div>
+      <div class="actions" style="justify-content:flex-start"><button id="avMore">Draw 4 more</button><button id="avDiscard">Discard</button></div><div class="hint">Drawn from: ${esc(avLook)}</div>` : "";
+    document.querySelectorAll(".avUse").forEach((b) => b.onclick = async () => {
+      try { story = await api(`/stories/${story.id}/avatar-image/use`, { method: "POST", body: { look: avLook, url: b.dataset.url } }); avOpts = []; refresh(); $("avCand").textContent = "Saved as your avatar (and added to the Cast as you)."; }
+      catch (err) { $("avCand").textContent = err.message; }
+    });
+    if ($("avMore")) $("avMore").onclick = () => genAvatar(false);
+    if ($("avDiscard")) $("avDiscard").onclick = () => { avOpts = []; $("avCand").textContent = ""; };
+  };
+  const genAvatar = async (fresh = true) => {
     const avatar = {}; for (const k of ["name", "gender", "age", "appearance", "background"]) avatar[k] = $("av_" + k).value;
-    $("avGen").disabled = true; $("avCand").textContent = "Drawing… (about 20 seconds on a local graphics card)";
+    $("avGen").disabled = true; $("avCand").textContent = "Starting…";
     try {
-      const r = await api(`/stories/${story.id}/avatar-image/generate`, { method: "POST", body: { avatar } });
-      $("avPreview").innerHTML = `<img class="avatar" src="${r.candidate}" alt="">`;
-      $("avCand").innerHTML = `<b>New picture.</b> Not saved yet. <div class="actions" style="justify-content:flex-start;margin-top:6px"><button class="primary" id="avUse">Use this picture</button><button id="avAgain">Try again</button><button id="avDiscard">Discard</button></div><div class="hint">Drawn from: ${esc(r.look)}</div>`;
-      $("avUse").onclick = async () => { story = await api(`/stories/${story.id}/avatar-image/use`, { method: "POST", body: { look: r.look } }); refresh(); $("avCand").textContent = "Saved as your avatar (and added to the Cast as you)."; };
-      $("avAgain").onclick = genAvatar;
-      $("avDiscard").onclick = () => { $("avPreview").innerHTML = preview(); $("avCand").textContent = ""; };
+      const r = await api(`/stories/${story.id}/avatar-image/candidates`, { method: "POST", body: { avatar, count: 4, fresh } });
+      const job = await watchJob(r.job, (j) => { if ($("avCand")) $("avCand").textContent = j.current || "Drawing…"; });
+      if (job.status === "error") { $("avCand").textContent = "Could not draw: " + job.error; }
+      else { if (fresh) avOpts = []; avOpts.push(...job.result.candidates); avLook = job.result.look; showAvOpts(); }
     } catch (err) { $("avCand").textContent = err.message; }
     $("avGen").disabled = false;
   };
-  $("avGen").onclick = genAvatar;
+  $("avGen").onclick = () => genAvatar(true);
   $("avRemove").onclick = async () => { story = await api(`/stories/${story.id}/avatar-image`, { method: "DELETE" }); refresh(); };
   $("mClose").onclick = closeModal;
   $("mSave").onclick = async () => {
     const avatar = {};
     for (const k of ["name", "gender", "age", "appearance", "personality", "background", "abilities"]) avatar[k] = $("av_" + k).value;
     story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar, user_notes: $("uNotes").value } });
-    await artTabSave();
     closeModal(); renderAll();
   };
 }
@@ -418,6 +449,7 @@ function currentChoices() { // what this story uses right now, including older s
   out.story = m.story || (story ? config.active : d.story);
   const ev = (config.events_model || "").split("|");
   out.recaps = m.recaps || (story && ev.length === 2 && ev[0] ? { provider: ev[0], model: ev[1] } : d.recaps);
+  out.small = m.small || (story ? null : d.small);
   out.images = m.images || (story && config.image_active ? { provider: config.image_active, model: "" } : d.images);
   if (out.images && !out.images.model) out.images = null;
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v));
@@ -432,11 +464,11 @@ async function showSettings(tab = "AI") {
     <div class="actions" style="margin-top:8px"><button class="danger" data-rm="${i}">Remove provider</button></div></div>`;
   const field = (label, control, help = "") => `<div class="field"><label>${label}</label>${control}${help ? `<div class="hint">${help}</div>` : ""}</div>`;
   modal(`<h2>Settings</h2>
-    <div class="tabs"><button class="tab stt" data-t="AI">AI &amp; story</button><button class="tab stt" data-t="Memory">Memory &amp; cost</button><button class="tab stt" data-t="Libraries">Libraries</button><button class="tab stt" data-t="Pictures">Pictures</button><button class="tab stt" data-t="Appearance">Appearance</button><button class="tab stt" data-t="Local">Local models</button><button class="tab stt" data-t="Backup">Backup</button><button class="tab stt" data-t="Advanced">Advanced</button></div>
+    <div class="tabs"><button class="tab stt" data-t="AI">AI &amp; story</button><button class="tab stt" data-t="Memory">Memory &amp; cost</button><button class="tab stt" data-t="Libraries">Libraries</button><button class="tab stt" data-t="Appearance">Appearance</button><button class="tab stt" data-t="Local">Local models</button><button class="tab stt" data-t="Backup">Backup</button><button class="tab stt" data-t="Advanced">Advanced</button></div>
 
     <div class="stpane" data-p="AI">
       <h3>Which AI does what${story ? ` in “${esc(story.title)}”` : ""}</h3>
-      <div id="aiPick"></div>
+      <div id="aiPick"></div><div id="aiPickImg" class="hidden"></div>
       <div id="artStyleBox"></div>
       <div class="hint">${story ? "Saved for this story, and used as the starting choice for new stories." : "Used as the starting choice for new stories (open a story to change it for that story)."}</div>
       ${story ? `<h3>Content</h3><label class="chk top"><input type="checkbox" id="sNsfw" ${story.nsfw ? "checked" : ""}><span><b>Adult (NSFW) content</b><span class="hint">Allows explicit content between adult characters in the narration. Off by default and set per story. It also lets scene pictures and portraits show adult content between adults (covers and backdrops stay safe for work). Online picture services (Gemini, OpenAI, Grok) usually refuse explicit images; a local model in ComfyUI is what allows them. Your AI provider's own rules still apply.</span></span></label>` : ""}
@@ -462,6 +494,9 @@ async function showSettings(tab = "AI") {
       <div class="grid2">${field("Summarize when history exceeds", `<input id="sWhen" type="number" min="6" step="2" value="${config.summarize_when || 24}">`, "messages")}
         ${field("…keeping this many recent", `<input id="sRecent" type="number" min="2" step="2" value="${config.keep_recent || 10}">`, "messages, word for word")}<div></div></div>
       <div class="hint">Older turns are folded into a short summary the narrator always reads. A longer window keeps more detail verbatim but costs more tokens per turn and causes fewer cache rewrites. Edit the summary any time under 🧠 Memory.</div>
+      <h3>Character memory</h3>
+      <label class="chk top"><input type="checkbox" id="sCharMem" ${config.char_memory !== false ? "checked" : ""}><span><b>Keep each character's key events on their card, and send them only when they are in the scene</b><span class="hint">The narrator is reminded of the key past events of the characters named in the latest exchange (a short note, about 400 to 600 tokens, added to the newest message), so the shared memory summary above can stay short (about 1,200 words) and cover plot, places, items and open threads. Long event logs are condensed automatically by the helper AI (older events folded into a short history; your own entries are never touched). Needs <b>Key events log</b> on AI &amp; story to be on. Saves the most with models that do not cache the prompt; with Claude's caching the saving is smaller, since the summary is cached.</span></span></label>
+      <div class="grid2">${field("How much of each character's history the narrator sees", '<select id="sCharMemSize"><option value="small">Small (cheapest)</option><option value="medium">Medium</option><option value="large">Large (most detail)</option></select>', "Applies to the characters named in the latest exchange. A smaller note costs less per turn (it is not cached) but older events of that character are left out.")}<div></div><div></div></div>
       <h3>Claude prompt caching</h3>
       <label class="chk top"><input type="checkbox" id="sCache" ${config.prompt_cache !== false ? "checked" : ""}><span><b>Cache the story prompt</b><span class="hint">Cached prompt text costs about 10% of normal. Strongly recommended for Claude; other providers cache automatically.</span></span></label>
       <div class="grid2">${field("Cache lifetime", '<select id="sTtl"><option value="5m">5 minutes</option><option value="1h">1 hour</option></select>', "Saves money only if your next turn comes within this time. 5 minutes is cheapest to write; 1 hour suits slower play.")}<div></div><div></div></div>
@@ -476,10 +511,6 @@ async function showSettings(tab = "AI") {
       <label class="chk top"><input type="checkbox" id="sReuse" ${config.reuse_art ? "checked" : ""}><span><b>Reuse character art across stories</b><span class="hint">Borrow a character's pictures from another story as a face reference (Cast → character → Images). Only identity carries over: each story's own art style and setting still apply, so the character looks like they belong to the new story.</span></span></label>
     </div>
 
-    <div class="stpane hidden" data-p="Pictures">
-      ${imageSettingsHtml(config)}
-    </div>
-
     <div class="stpane hidden" data-p="Appearance">
       ${appearanceHtml(config)}
     </div>
@@ -492,7 +523,7 @@ async function showSettings(tab = "AI") {
       <label class="chk top"><input type="checkbox" id="sRtText" ${config.rt_text ? "checked" : ""}><span><b>Manage local text models automatically</b><span class="hint">When you open a story (or change its AI), its local model is loaded and ready, and local models no story is using are unloaded to free video memory. Turn off to leave Ollama alone.</span></span></label>
       <div class="grid2">${field("Unload an idle model after", `<input id="sKeep" value="${esc(config.keep_alive || "30m")}">`, "e.g. 10m, 30m, 2h. Ollama frees the model itself after this much time without a turn; it reloads automatically at your next turn.")}<div></div><div></div></div>
       <h3>Picture generator (ComfyUI)</h3>
-      <div class="hint">Its address and which checkpoint to use are under the <b>Pictures</b> tab (and the picture choice on <b>AI &amp; story</b>); this section only controls starting and stopping it.</div>
+      <div class="hint">Its address and which checkpoint to use are under <b>🖼 Art → Picture makers</b> inside a story; this section only controls starting and stopping it.</div>
       <label class="chk top"><input type="checkbox" id="sRtComfy" ${config.rt_comfy ? "checked" : ""}><span><b>Start and stop ComfyUI automatically</b><span class="hint">ComfyUI starts when you open a story that draws pictures locally (or when a picture is asked for), and shuts down after it has been idle for the time below. Starting takes about 15 to 30 seconds.</span></span></label>
       <div class="grid2">${field("Idle time before it stops", `<input id="sRtIdle" type="number" min="1" step="1" value="${config.rt_comfy_idle_min ?? 15}">`, "minutes without drawing. Pictures are drawn in bursts, so a longer time than for text suits it.")}
         ${field("When idle", `<select id="sRtMode"><option value="stop">Stop ComfyUI completely</option><option value="free">Keep it running, free its video memory</option></select>`, "Stopping frees the most; keeping it running restarts faster.")}<div></div></div>
@@ -536,6 +567,7 @@ async function showSettings(tab = "AI") {
   showTab(tab);
   document.querySelectorAll(".prov").forEach((el, i) => el.querySelector('[data-f="type"]').value = config.providers[i].type);
   $("sTtl").value = config.cache_ttl || "5m";
+  document.querySelectorAll(".stpane").forEach((p) => collapsify(p));   // each section can be minimised; the first of each tab starts open
   $("sUsage").onclick = () => showUsage();
   $("sbDefault").value = config.sidebar_default_mode || "prompt";
   if (story) {
@@ -558,7 +590,7 @@ async function showSettings(tab = "AI") {
   }
   const themeDraft = bindAppearance(config);
   onModalClose = () => { applyTheme(config); onModalClose = null; };   // Cancel / click-away undoes the colour preview
-  $("sBudAct").value = config.budget_action || "warn";
+  $("sBudAct").value = config.budget_action || "warn"; $("sCharMemSize").value = config.char_memory_size || "medium";
   api("/budget").then((b) => { $("sBudNow").textContent = `Spent so far: $${b.daily.spent.toFixed(2)} today` + (b.monthly.limit > 0 ? ` · $${b.monthly.spent.toFixed(2)} this month` : "") + " (estimated)."; }).catch(() => {});
   const fmtSize = (n) => (n > 1e9 ? (n / 1e9).toFixed(2) + " GB" : n > 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1e3)) + " KB");
   const bkRefresh = () => api("/backup/status").then((r) => { $("bkList").innerHTML = r.backups.length ? `Saved in <code>${esc(r.dir)}</code>:<br>` + r.backups.slice(0, 6).map((b) => `${new Date(b.when * 1000).toLocaleString()} · ${fmtSize(b.bytes)} · ${esc(b.name)}`).join("<br>") : `No backups in <code>${esc(r.dir)}</code> yet.`; }).catch(() => {});
@@ -584,11 +616,11 @@ async function showSettings(tab = "AI") {
   };
   $("rtRefresh").onclick = rtRefresh; rtRefresh();
   $("rtFree").onclick = async (e) => { e.target.disabled = true; await api("/runtime/free", { method: "POST" }); await rtRefresh(); e.target.disabled = false; };
-  let imgSync = null, styleBox = null;
-  const picker = mountAIChooser($("aiPick"), { initial: currentChoices(), onChange: () => { if (imgSync) imgSync(); if (styleBox) styleBox.render(); } });
-  imgSync = bindImageSettings(config, picker);
-  styleBox = mountArtStyle($("artStyleBox"), picker, story ? (story.art || {}).direction || "" : config.default_art_direction || "");
-  picker.ready.then(() => styleBox.render());
+  let styleBox = null;
+  const picker = mountAIChooser($("aiPick"), { initial: currentChoices(), roles: ["story", "recaps", "small"] });
+  const imgPicker = mountAIChooser($("aiPickImg"), { initial: currentChoices(), roles: ["images"] });   // hidden: only tells the art-style list which picture maker is chosen (changed in 🖼 Art → Picture makers)
+  styleBox = mountArtStyle($("artStyleBox"), imgPicker, story ? (story.art || {}).direction || "" : config.default_art_direction || "");
+  imgPicker.ready.then(() => styleBox.render());
   $("sThink").value = config.claude_thinking ? "on" : "off";
   $("sEffort").value = config.claude_effort || "low";
   $("sEvents").value = config.events_mode || "every";
@@ -610,9 +642,8 @@ async function showSettings(tab = "AI") {
   $("mClose").onclick = closeModal;
   $("mSave").onclick = async () => {
     collect();
-    collectImageSettings(config);
     config.temperature = +$("sTemp").value; config.max_tokens = +$("sMax").value; config.num_ctx = +$("sCtx").value;
-    config.prompt_cache = $("sCache").checked; config.cache_ttl = $("sTtl").value; config.keep_alive = $("sKeep").value.trim() || "30m"; config.claude_thinking = $("sThink").value === "on"; config.claude_effort = $("sEffort").value; config.events_mode = $("sEvents").value; config.thinking_headroom = +$("sHead").value || 0;
+    config.char_memory = $("sCharMem").checked; config.char_memory_size = $("sCharMemSize").value; config.prompt_cache = $("sCache").checked; config.cache_ttl = $("sTtl").value; config.keep_alive = $("sKeep").value.trim() || "30m"; config.claude_thinking = $("sThink").value === "on"; config.claude_effort = $("sEffort").value; config.events_mode = $("sEvents").value; config.thinking_headroom = +$("sHead").value || 0;
     Object.assign(config, themeDraft);
     config.budget_daily = +$("sBudD").value || 0; config.budget_monthly = +$("sBudM").value || 0; config.budget_action = $("sBudAct").value;
     config.backup_auto_days = +$("bkDays").value || 0; config.backup_keep = +$("bkKeep").value || 5; config.backup_dir = $("bkDir").value.trim();
@@ -625,10 +656,9 @@ async function showSettings(tab = "AI") {
     config.summarize_when = +$("sWhen").value || 24; config.keep_recent = +$("sRecent").value || 10;
     await picker.ready;
     const chosen = picker.get();
-    if (chosen.images) config.image_active = chosen.images.provider;                                   // keep the app-wide fallbacks (for older stories) in step with the chooser
     if (chosen.recaps) config.events_model = `${chosen.recaps.provider}|${chosen.recaps.model}`;
     config = await api("/config", { method: "PUT", body: config });
-    await api("/default-models", { method: "PUT", body: chosen });
+    await api("/default-models", { method: "PUT", body: { ...(config.default_models || {}), ...chosen } });
     if (story) story.models = await api(`/stories/${story.id}/models`, { method: "PUT", body: chosen });
     if (story && $("sbMode")) {
       const mode = $("sbMode").value, fields = [...document.querySelectorAll("#sbFields input:checked")].map((i) => i.dataset.f), old = story.sidebar || {};
@@ -693,6 +723,7 @@ $("btnPlayer").onclick = showPlayer;
 $("btnMemory").onclick = showMemory;
 $("btnEndings").onclick = showEndings;
 $("btnCast").onclick = () => showCast();
+$("btnArt").onclick = () => showArtHub();
 $("btnIllustrate").onclick = () => illustrate();
 $("btnReplies").onclick = () => fetchReplies(true);
 $("narrative").addEventListener("scroll", () => { const at = narrativeAtBottom(); if (at && !wasAtBottom) maybeShowReplies(); wasAtBottom = at; });
