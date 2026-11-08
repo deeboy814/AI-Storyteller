@@ -24,13 +24,13 @@ DEFAULT_PRICES = [
 LOCAL = {"ollama", "comfyui"}
 
 
-def set_ctx(story: str | None, purpose: str) -> None:
-    CTX.set({"story": story or "", "purpose": purpose})
+def set_ctx(story: str | None, purpose: str, why: str | None = None) -> None:
+    CTX.set({"story": story or "", "purpose": purpose, **({"why": why} if why else {})})
 
 
 def record(entry: dict) -> None:
     c = CTX.get() or {}
-    entry = {"ts": round(time.time()), "story": c.get("story", ""), "purpose": c.get("purpose", "other"), **entry}
+    entry = {"ts": round(time.time()), "story": c.get("story", ""), "purpose": c.get("purpose", "other"), **({"why": c["why"]} if c.get("why") else {}), **entry}
     try:
         with LOG.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -102,8 +102,18 @@ def report(cfg: dict, since: float, titles: dict[str, str], story: str | None = 
         bump(groups["purpose"], e.get("purpose", "other"), e, c)
         bump(groups["model"], f"{e['provider']}: {e['model']}", e, c)
         bump(groups["day"], time.strftime("%Y-%m-%d", time.localtime(e["ts"])), e, c)
+    # Why the narrator's prompt was written to the cache again (turns that wrote a large part of it): by reason
+    nar = [e for e in es if e.get("purpose") == "story narration"]
+    why: dict[str, dict] = {}
+    for e in nar:
+        if e.get("cache_write", 0) >= 3000:
+            w = why.setdefault(e.get("why") or "reason not recorded (older entries)", {"calls": 0, "tokens": 0})
+            w["calls"] += 1
+            w["tokens"] += e.get("cache_write", 0)
     out = {k: sorted(({"name": n, **v} for n, v in g.items()), key=lambda x: (x["name"] if k == "day" else -x["cost"], x["name"])) for k, g in groups.items()}
-    return {"total": tot, **out, "prices": (cfg.get("prices") or []), "default_prices": DEFAULT_PRICES}
+    cache = {"turns": len(nar), "hits": sum(1 for e in nar if e.get("cache_read", 0) > 0),
+             "rewrites": sorted(({"name": n, **v} for n, v in why.items()), key=lambda x: -x["tokens"])}
+    return {"total": tot, **out, "cache": cache, "prices": (cfg.get("prices") or []), "default_prices": DEFAULT_PRICES}
 
 
 def spend(cfg: dict, since: float) -> float:

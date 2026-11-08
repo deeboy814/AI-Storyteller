@@ -44,6 +44,9 @@ def known_names(story: dict) -> set[str]:
     for c in story.get("cast") or []:
         names.add(c["name"].lower())
         names.add(c["name"].lower().split()[0])
+        for a in c.get("aka") or []:            # other names the story uses for them
+            names.add(a.lower())
+            names.add(a.lower().split()[0])
     av = (story.get("avatar") or {}).get("name") or story.get("player_name") or ""
     if av:
         names.add(av.lower())
@@ -114,10 +117,6 @@ def vocabulary_from_cast(story: dict, exclude_slug: str | None = None) -> list[s
     need = max(1, (len(chars) + 1) // 2)
     return sorted((m for m, n in counts.items() if n >= need and mood_base(m) in DRAWABLE),
                   key=lambda m: (mood_base(m) != "normal", m))
-
-
-def drawable(moods: list[str]) -> list[str]:
-    return [m for m in moods if mood_base(m) in DRAWABLE]
 
 
 def add_to_extended(cfg: dict, mood: str) -> bool:

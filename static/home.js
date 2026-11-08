@@ -32,7 +32,7 @@ async function showHome() {
       <p>${esc(blurb(s)) || '<i>No description yet. Use ⋯ to add one.</i>'}</p>
       <small>${s.turns} turn${s.turns === 1 ? "" : "s"}${s.player ? " · " + esc(s.player) : ""}${s.cast ? " · " + s.cast + " characters" : ""}</small></div></div>`;
   home.innerHTML = `<div class="hwrap">
-    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label>${config && config.avatar_library ? '<button id="hAv" title="Your saved player avatars">🧑 Avatars</button>' : ""}<button id="hUse" title="Usage and estimated cost">💲 Usage</button><button id="hSet" title="Settings">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close AI Storyteller">⏻ Quit</button></div>
+    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label>${config && config.avatar_library ? '<button id="hAv" title="Your saved player avatars">🧑 Avatars</button>' : ""}<button id="hUse" title="Usage and estimated cost">💲 Usage</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close AI Storyteller">⏻ Quit</button></div>
     <div class="hgrid">
       ${list.map(card).join("")}
       <button class="hcard hnew" id="hNew"><div class="hplus">＋</div><b>New story</b><small>Write or paste a prompt and start playing</small></button>
@@ -50,6 +50,7 @@ async function showHome() {
   home.querySelectorAll(".hedit").forEach((b) => b.onclick = () => showCardEditor(list.find((s) => s.id === b.dataset.edit)));
   $("hNew").onclick = () => editStory(null);
   $("hImp").onclick = () => showImport(list);
+  $("hMk").onclick = () => showArtHub("Makers");
   $("hSet").onclick = () => showSettings();
   $("hQuit").onclick = () => quitApp();
   $("hUse").onclick = () => showUsage();
@@ -65,18 +66,22 @@ async function showHome() {
   if ($("hBack")) $("hBack").onclick = hideHome;
 }
 
-function showCardEditor(s) {
+function showCardEditor(s, nav = {}) {   // nav.back: where to go when closed instead of Home (used by the Art hub)
   modal(`<h2>${esc(s.title)}</h2>
     <label>Title</label><input id="cvTitle" maxlength="120" value="${esc(s.title)}">
     <label>Cover art</label>
     <div class="hcover small" id="cvPrev" style="${s.cover ? "" : `background:${gradientFor(s.title)}`}">${s.cover ? `<img src="${esc(s.cover)}" alt="">` : ""}</div>
-    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="cvGen">✨ Generate from the story prompt</button><label class="btnlike">Upload…<input type="file" id="cvUp" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>${s.cover ? '<button id="cvDel">Remove</button>' : ""}</div>
-    <p class="hint" id="cvNote">Generating uses this story's picture maker (Settings → AI & story) and its recap model to write the picture description.</p>
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><label class="btnlike">Upload…<input type="file" id="cvUp" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>${s.cover ? '<button id="cvDel">Remove</button>' : ""}</div>
+    <label>Picture description (what the artist is told: edit it freely)</label>
+    <textarea class="short" id="cvPrompt" rows="3" placeholder="Leave empty and the text model writes one from the story prompt when you draw. Your art style is added automatically."></textarea>
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="cvWritePrompt" title="Have the text model write the description from the story prompt">✨ Write it from the story</button><button class="primary" id="cvGen">Draw 4 options</button></div>
+    <p class="hint" id="cvNote">Uses this story's picture maker (Settings → AI & story) and its recap model for the description. Nothing changes on the card until you pick one.</p>
+    <div id="cvOpts"></div>
     <label>Description (shown on the card)</label>
     <textarea class="short" id="cvDesc" style="min-height:70px" maxlength="400">${esc(s.description || "")}</textarea>
     <div class="actions" style="justify-content:flex-start"><button id="cvWrite">✨ Write it for me</button></div>
     <div class="actions"><button id="cvBk">Backups…</button><button id="cvPack" title="Export this story (prompt, cast with pictures, prologue, opening, trackers, endings, media) as a package. No turns, memory or notes.">Export story…</button><button class="danger" id="cvRm">Delete story</button><span style="flex:1"></span><button id="cvClose">Close</button><button class="primary" id="cvSave">Save</button></div>`);
-  const done = async () => { closeModal(); await showHome(); };
+  const done = async () => { closeModal(); if (nav.back) await nav.back(); else await showHome(); };
   const busyNote = (t) => { $("cvNote").textContent = t; };
   $("cvClose").onclick = done;
   $("cvSave").onclick = async () => {
@@ -85,12 +90,43 @@ function showCardEditor(s) {
     done();
   };
   $("cvWrite").onclick = async (e) => { e.target.disabled = true; busyNote("Writing…"); try { const r = await api(`/stories/${s.id}/description/generate`, { method: "POST" }); $("cvDesc").value = r.description; busyNote("Written. Edit it if you like, then Save."); } catch (err) { busyNote(err.message); } e.target.disabled = false; };
-  $("cvGen").onclick = async (e) => {
-    e.target.disabled = true; busyNote("Drawing the cover… (about 20 seconds on a local graphics card)");
-    try { const r = await api(`/stories/${s.id}/cover/generate`, { method: "POST" }); s.cover = r.cover; $("cvPrev").style.background = ""; $("cvPrev").innerHTML = `<img src="${esc(r.cover)}" alt="">`; busyNote("Done. Close to see it on the card."); }
-    catch (err) { busyNote(err.message); }
+  api(`/stories/${s.id}/cover/prompt`).then((r) => { if (!$("cvPrompt").value) $("cvPrompt").value = r.prompt || ""; }).catch(() => {});
+  $("cvWritePrompt").onclick = async (e) => {
+    e.target.disabled = true; busyNote("Writing the description…");
+    try { const r = await api(`/stories/${s.id}/cover/describe`, { method: "POST" }); $("cvPrompt").value = r.prompt; busyNote("Written. Edit it if you like, then draw."); } catch (err) { busyNote(err.message); }
     e.target.disabled = false;
   };
+  const opts = [];
+  const showOpts = () => {
+    $("cvOpts").innerHTML = opts.length ? `<div class="gallery">${opts.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="primary cvUse" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div>
+      <div class="actions" style="justify-content:flex-start"><button id="cvMore">Draw 4 more options</button></div>` : "";
+    if ($("cvMore")) $("cvMore").onclick = () => drawOpts(false);
+  };
+  const drawOpts = async (fresh) => {
+    $("cvGen").disabled = true; busyNote("Starting…");
+    try {
+      const r = await api(`/stories/${s.id}/cover/candidates`, { method: "POST", body: { prompt: $("cvPrompt").value, count: 4, fresh } });
+      const job = await watchJob(r.job, (j) => busyNote(j.current || "Drawing…"));
+      if (job.status === "error") { busyNote("Could not draw: " + job.error); }
+      else {
+        if (fresh) opts.length = 0;
+        opts.push(...job.result.candidates);
+        if (!$("cvPrompt").value.trim() && job.result.prompt) $("cvPrompt").value = job.result.prompt;
+        busyNote("Pick one, or change the description and draw again.");
+        showOpts();
+      }
+    } catch (err) { busyNote("Could not draw: " + err.message); }
+    $("cvGen").disabled = false;
+  };
+  $("cvGen").onclick = () => drawOpts(true);
+  $("cvOpts").addEventListener("click", async (e) => {
+    const b = e.target.closest(".cvUse"); if (!b) return;
+    try {
+      const r = await api(`/stories/${s.id}/cover/choose`, { method: "POST", body: { url: b.dataset.url } });
+      s.cover = r.cover; $("cvPrev").style.background = ""; $("cvPrev").innerHTML = `<img src="${esc(r.cover)}" alt="">`;
+      opts.length = 0; showOpts(); busyNote("✔ Saved as the cover. Close to see it on the card.");
+    } catch (err) { busyNote(err.message); }
+  });
   $("cvUp").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
     try {

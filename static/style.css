@@ -30,6 +30,8 @@ input:focus, textarea:focus, select:focus { outline: none; border-color: var(--a
 main { flex: 1; min-height: 0; display: flex; gap: 0; }
 #narrative { flex: 1; overflow-y: auto; padding: 18px 28px; font: 18px/1.75 Georgia, "Times New Roman", serif; scroll-behavior: smooth; }
 #narrative p { margin: 0 0 14px; }
+#narrative.twotone .turn.assistant p, #narrative.twotone .turn.assistant .mdh, #narrative.twotone .typing p, #narrative.twotone .openingbody p { color: var(--narr); }
+#narrative.twotone .dlg { color: var(--dlg); }
 #narrative .player { border-left: 3px solid var(--accent); padding: 2px 0 2px 14px; margin: 6px 0 18px; color: var(--accent2); font-style: italic; }
 #narrative .empty { color: var(--muted); font: 15px system-ui, sans-serif; text-align: center; margin-top: 15vh; }
 #narrative .empty button { margin-top: 14px; }
@@ -330,7 +332,7 @@ details.fold { margin: 8px 0; } details.fold > summary { cursor: pointer; color:
 
 /* appearance */
 body.has-backdrop { background: transparent; }
-body.has-backdrop::before { content: ""; position: fixed; inset: 0; z-index: -1; background: linear-gradient(rgba(0,0,0,var(--dim, .55)), rgba(0,0,0,var(--dim, .55))), var(--backdrop) center / cover no-repeat; }
+body.has-backdrop::before { transition: opacity .38s ease; content: ""; position: fixed; inset: 0; z-index: -1; background: linear-gradient(rgba(0,0,0,var(--dim, .55)), rgba(0,0,0,var(--dim, .55))), var(--backdrop) center / cover no-repeat; }
 body.has-backdrop #app { background: var(--bg); box-shadow: 0 0 70px rgba(0,0,0,.65); }
 .presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; } .preset { font-size: 12px; padding: 4px 12px; border-radius: 999px; }
 .colorrow { display: flex; gap: 6px; align-items: center; } .colorrow input[type=color] { width: 44px; height: 34px; padding: 2px; flex-shrink: 0; } .colorrow input:not([type=color]) { flex: 1; min-width: 0; }
@@ -402,3 +404,43 @@ img:not(.hcover img):not(#lightbox img) { cursor: zoom-in; }
 .ttl { display: flex; align-items: center; gap: 2px; min-width: 0; } .ttl b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 input.titleedit { font: inherit; width: 100%; min-width: 120px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--accent2); background: var(--panel); color: inherit; }
 @media (hover: none) { .tedit { opacity: .7; } }
+
+.uiprev.twotone p { color: var(--narr); }
+.uiprev.twotone .dlg { color: var(--dlg); }
+
+figure.placepic { margin: 8px 0 14px; max-width: 720px; } figure.placepic img { display: block; width: 100%; border-radius: 10px; box-shadow: 0 0 0 1px var(--line); aspect-ratio: auto 3 / 2; background: var(--panel); height: auto; }
+figure.placepic figcaption { font: 12px system-ui, sans-serif; color: var(--muted); margin-top: 3px; }
+.plhead { display: flex; gap: 6px; align-items: center; } .plhead .plName { flex: 1; } .plthumb { display: block; max-width: 220px; border-radius: 8px; margin: 6px 0; }
+
+body.bdswap.has-backdrop::before { opacity: 0; }
+
+.nowcard { border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px 8px; margin: 0 0 10px; background: var(--panel); }
+.nowhead { display: flex; justify-content: space-between; align-items: center; } .nowhead small { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.nowflip { font-size: 11px; padding: 1px 8px; border-radius: 10px; } .nowflipbar { margin: 0 0 8px; }
+.nowbody { display: flex; gap: 8px; margin-top: 4px; } .nowpic { width: 92px; height: 92px; object-fit: cover; object-position: top; border-radius: 8px; flex: none; }
+.nowtext { min-width: 0; font: 13px/1.35 system-ui, sans-serif; } .nowmood { color: var(--accent2); font-style: italic; margin: 1px 0 3px; } .nowwear small { color: var(--muted); font-size: 11px; display: block; }
+
+.nowdoing { margin: 0 0 4px; } 
+
+/* Art hub */
+.hubgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 8px; }
+.hubcard { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel); }
+.hubhead { display: flex; gap: 8px; align-items: center; font-size: 15px; } .hubstatus { color: var(--muted); font-size: 12.5px; margin-top: 3px; line-height: 1.45; }
+.nowscene { margin: 4px 0 6px; position: relative; } .nowscene img { display: block; width: 100%; border-radius: 8px; box-shadow: 0 0 0 1px var(--line); }
+.nowscene figcaption { font: 11.5px/1.35 system-ui, sans-serif; color: var(--muted); margin-top: 3px; }
+.nowscbtn { position: absolute; top: 5px; right: 5px; display: flex; gap: 3px; opacity: 0; transition: opacity .15s; } .nowscene:hover .nowscbtn { opacity: 1; }
+.nowscbtn button { font-size: 12px; padding: 1px 6px; border-radius: 8px; background: rgba(0,0,0,.65); border: 1px solid var(--line); }
+/* scene picture as a banner: a wide strip cropped to the middle of the picture, above or below the narration */
+.scenefig.banner { margin: 4px 0 14px; }
+.scenefig.banner img.scene { width: 100%; max-width: 100%; height: clamp(170px, 36vw, 330px); max-height: none; object-fit: cover; object-position: center 28%; border-radius: 10px; }
+.scenefig.banner .scenebar { margin-top: 4px; }
+
+/* collapsible sections inside menus (Settings panes, the Art menu) */
+details.sub { border: 1px solid var(--line); border-radius: 10px; margin: 8px 0; background: rgba(255,255,255,.02); }
+details.sub > summary { cursor: pointer; padding: 8px 12px; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 6px; }
+details.sub > summary::-webkit-details-marker { display: none; }
+details.sub > summary::before { content: "▸"; color: var(--muted); } details.sub[open] > summary::before { content: "▾"; }
+details.sub > :not(summary) { margin-left: 12px; margin-right: 12px; } details.sub[open] { padding-bottom: 10px; }
+
+button.backart { display: block; margin: 0 0 10px; padding: 4px 10px; font-size: 13px; background: transparent; border: 1px solid var(--line); border-radius: 8px; color: var(--accent2, var(--text)); cursor: pointer; }
+button.backart:hover { background: var(--panel2); }
