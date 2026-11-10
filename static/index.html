@@ -16,17 +16,19 @@
     </div>
     <div class="tools">
       <select id="modelSelect" title="Model"></select>
-      <button class="icon" id="btnSide" title="Status panel">ℹ</button>
+      <button class="icon" id="btnSide" title="Status panel">ℹ️</button>
       <button class="icon" id="btnHome" title="Home: all your stories">🏠</button>
-      <button class="icon" id="btnArt" title="Art: every picture tool of this story (characters, places, backgrounds, cover, style)">🖼</button>
+      <span class="tsep"></span>
+      <button class="icon" id="btnArt" title="Art: every picture tool of this story (characters, places, backgrounds, cover, style)">🖼️</button>
       <button class="icon" id="btnCast" title="Cast, portraits &amp; gallery">🎭</button>
       <button class="icon hidden" id="btnEndings" title="Possible endings (spoilers)">🏁</button>
       <button class="icon" id="btnMemory" title="Memory: summary, pinned facts, backups">🧠</button>
       <button class="icon" id="btnSearch" title="Search the story and bookmarks">🔍</button>
       <button class="icon" id="btnPlayer" title="Player: avatar & user notes">👤</button>
-      <button class="icon" id="btnEdit" title="Edit story prompt">✎</button>
-      <button class="icon" id="btnExport" title="Export &amp; backups">⭳</button>
-      <button class="icon" id="btnSettings" title="Settings">⚙</button>
+      <button class="icon" id="btnEdit" title="Edit the story: prompt, opening, endings, options">📝</button>
+      <button class="icon" id="btnExport" title="Export &amp; backups: text, illustrated page, story package, backups">💾</button>
+      <span class="tsep"></span>
+      <button class="icon" id="btnSettings" title="Settings">⚙️</button>
     </div>
   </header>
 
@@ -38,15 +40,18 @@
   <footer>
     <div id="artBanner" class="artbanner hidden"></div>
     <div id="cacheNote" class="cachenote"></div>
+    <div id="updateNote" class="budgetnote hidden"></div>
     <div id="budgetNote" class="budgetnote hidden"></div>
     <div id="genStatus" class="genstatus hidden"></div>
     <div id="quickBar" class="quickbar hidden"></div>
     <div id="replyOpts" class="replyopts hidden"></div>
     <div id="chips"></div>
     <div class="inputrow">
-      <button class="icon" id="btnUndo" title="Undo last turn">↶</button>
-      <button class="icon" id="btnRetry" title="Retry last turn">↻</button>
-      <button class="icon" id="btnCompare" title="Compare two AIs on your next move">⚖</button>
+      <button class="icon" id="btnUndo" title="Undo: take back your last move and its reply, and put your move back in the box to change it">↩️</button>
+      <button class="icon" id="btnRedo" title="Redo: put back the move and reply you just undid (until you send a new move)">↪️</button>
+      <button class="icon" id="btnRetry" title="Retry: ask for the last reply again (optionally saying what to change); every attempt is kept">🔄</button>
+      <span class="tsep"></span>
+      <button class="icon" id="btnCompare" title="Compare two AIs on your next move">⚖️</button>
       <button class="icon" id="btnQuick" title="Quick instructions for the narrator">⚡</button>
       <button class="icon" id="btnReplies" title="Suggest three replies based on what just happened">💡</button>
       <button class="icon" id="btnIllustrate" title="Illustrate the latest reply">🎨</button>

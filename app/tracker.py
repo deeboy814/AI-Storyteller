@@ -134,7 +134,7 @@ def coerce(field: dict, v):
 
 def read_labeled(fields: list[dict], text: str) -> tuple[dict, list[dict]]:
     """Free pass before asking the AI: a tracker whose label the narrator already prints as "Label: value" (a status line such as
-    "Rank: Cadet   Merit: 0   Sync: 96") is read straight from the reply. Only single values for the player or the scene; character rows, quest logs
+    "Health: 80   Gold: 12   Mood: calm") is read straight from the reply. Only single values for the player or the scene; character rows, quest logs
     and anything that does not fit its field are left for the AI. Returns (patch, fields still to ask the AI about)."""
     patch: dict = {"scene": {}, "me": {}, "chars": {}}
     rest = []
@@ -196,9 +196,18 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
                 d.pop("options")
         if kind == "number":
             d["unit"] = str(f.get("unit") or "").strip()[:12]
+            lv = f.get("levels")      # an XP-style counter: the totals at which the next levels are reached; the app then works out the "Level" tracker itself
+            if isinstance(lv, str):
+                lv = re.findall(r"\d[\d,]*", lv)
+            lv = sorted({int(str(x).replace(",", "")) for x in (lv or []) if str(x).replace(",", "").isdigit() and int(str(x).replace(",", "")) > 0})[:60]
+            if lv:
+                d["levels"] = lv
+                cap = _num(f.get("max_level"))
+                if cap and cap >= 2:
+                    d["max_level"] = int(cap)
         seen.add(fid)
         out.append(d)
-    return out[:16]
+    return out[:24]
 
 
 # ---------------- reading the narrator's own status panel ----------------
@@ -292,7 +301,7 @@ def _has_art(story: dict, name: str) -> bool:
 
 
 def resolve_alias(story: dict, name: str) -> str:
-    """A generic label the narrator or tracker used for someone ("Shop Girl") becomes their real name once that character has a name AND pictures."""
+    """A generic label the narrator or tracker used for someone ("Innkeeper") becomes their real name once that character has a name AND pictures."""
     real = (story.get("char_alias") or {}).get(name)
     return real if real and _has_art(story, real) else name
 
@@ -338,7 +347,47 @@ def _apply(story: dict, new: dict, turn: int) -> list[dict]:
             changes.append({"s": "chars", "n": name, "k": k, "b": cur.get(k), "a": v})
             cur[k] = v
     tr["changes"], tr["turn"] = changes, turn
+    changes += derive_levels(story)
     return changes
+
+
+def level_for(levels: list[int], xp, cap: int | None = None) -> tuple[int, int | None]:
+    """(level, total needed for the next level) for an XP total. Levels after the typed list continue with the last gap growing by the last increase.
+    cap: the highest level there is (no next goal once it is reached)."""
+    lv, n = list(levels), _num(xp)
+    if n is None or not lv:
+        return 1, (lv[0] if lv else None)
+    while lv[-1] <= n and len(lv) < (cap - 1 if cap else 500):         # past the typed table: keep going with gaps that grow like the last two
+        gap = lv[-1] - (lv[-2] if len(lv) > 1 else 0)
+        step = gap - ((lv[-2] - lv[-3]) if len(lv) > 2 else 0) if len(lv) > 2 else 0
+        lv.append(lv[-1] + gap + max(step, 0))
+    if cap:
+        lv = lv[:cap - 1]          # level 2 is lv[0], so the cap's own total is lv[cap - 2]
+    level = 1 + sum(1 for t in lv if t <= n)
+    if cap and level >= cap:
+        return cap, None
+    return level, next((t for t in lv if t > n), None)
+
+
+def derive_levels(story: dict) -> list[dict]:
+    """For a number tracker with level totals (XP): set the "Level" tracker of the same section from it, so the level never depends on the narrator's arithmetic."""
+    tr, out = story.setdefault("tracker", blank()), []
+    fields = active_fields(story)
+    for f in fields:
+        if f.get("kind") != "number" or not f.get("levels"):
+            continue
+        sec, k = f["id"].split(".")
+        if sec not in ("scene", "me") or tr[sec].get(k) is None:
+            continue
+        target = next((g for g in fields if g["id"].startswith(sec + ".") and g["label"].strip().lower() == "level" and g["id"] != f["id"]), None)
+        if not target:
+            continue
+        lk = target["id"].split(".")[1]
+        level, _ = level_for(f["levels"], tr[sec][k], f.get("max_level"))
+        if tr[sec].get(lk) != level:
+            out.append({"s": sec, "n": None, "k": lk, "b": tr[sec].get(lk), "a": level})
+            tr[sec][lk] = level
+    return out
 
 
 def update_from_reply(story: dict, reply: str, turn: int) -> bool:
@@ -379,7 +428,7 @@ def rebuild(story: dict) -> None:
         elif k in (old.get(sec) or {}):
             story["tracker"][sec][k] = old[sec][k]
     story["tracker"]["turn"] = old.get("turn", story["tracker"]["turn"])
-    for k in ("qprune", "qdone"):
+    for k in ("qprune", "qdone", "journal"):
         if k in old:
             story["tracker"][k] = old[k]
 
@@ -390,6 +439,15 @@ def _remember_done(story: dict, names) -> None:
         if n and not any(d.lower() == str(n).lower() for d in done):
             done.append(str(n))
     del done[:-60]
+
+
+def _to_journal(story: dict, quests: list[dict], turn: int) -> None:
+    """Finished and failed quests leave the quest log a turn later; the journal keeps them (newest last, up to 100)."""
+    j = story.setdefault("tracker", blank()).setdefault("journal", [])
+    for q in quests:
+        if not any(x["name"].lower() == q["name"].lower() and x.get("status") == q.get("status") for x in j[-30:]):
+            j.append({**q, "turn": turn})
+    del j[:-100]
 
 
 def _same_quest(a: str, b: str) -> bool:
@@ -412,6 +470,7 @@ def apply_patch(story: dict, patch: dict, turn: int, bad: list | None = None) ->
                 cur = tr0.get(sec, {}).get(k) or []
                 gone[k] = {q["name"].lower() for q in cur if q.get("status") in DONE_STATES}
                 _remember_done(story, gone[k])
+                _to_journal(story, [q for q in cur if q.get("status") in DONE_STATES], turn)
                 if gone[k]:
                     clean[sec][k] = [q for q in cur if q.get("status") not in DONE_STATES]
 
@@ -461,12 +520,39 @@ def visible(story: dict) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
-def tail_text(story: dict) -> str:
-    v = visible(story)
-    if not v:
+def _quest_note(story: dict) -> str:
+    """A story with a quest log: say so when it holds no active quest. An empty log is left out of the panel, so without this the narrator is never
+    reminded that the story has quests at all (a long prompt's quest rules then quietly drift out of use)."""
+    tr = story.get("tracker") or blank()
+    qf = [f for f in active_fields(story) if f["kind"] == "quests" and not f["id"].startswith("chars.")]
+    if not qf:
         return ""
+    for f in qf:
+        sec, k = f["id"].split(".")
+        if any(isinstance(q, dict) and q.get("status", "active") == "active" for q in (tr.get(sec) or {}).get(k) or []):
+            return ""
+    return ("[QUEST LOG: no active quest. This story keeps a quest log: when the story gives one (an order, a task, a goal, a lead), announce it in the story "
+            "and print its quest notification as the story's rules describe, so the log can show it.]")
+
+
+def _level_note(story: dict) -> str:
+    tr, notes = story.get("tracker") or blank(), []
+    for f in active_fields(story):
+        if f.get("kind") == "number" and f.get("levels") and f["id"].split(".")[0] in ("scene", "me"):
+            sec, k = f["id"].split(".")
+            if tr[sec].get(k) is not None:
+                level, nxt = level_for(f["levels"], tr[sec][k], f.get("max_level"))
+                notes.append(f"{f['label']} {tr[sec][k]} = level {level}" + (f"; next level at {nxt}" if nxt else " (the highest level: no more level-ups)" if f.get("max_level") else ""))
+    return ("[LEVELS (worked out by the app from the totals; use these numbers): " + "; ".join(notes) + ". When the total reaches the next level, announce the level-up.]") if notes else ""
+
+
+def tail_text(story: dict) -> str:
+    v, note = visible(story), "\n\n".join(x for x in (_quest_note(story), _level_note(story)) if x)
+    if not v:
+        return note
     return ("[SIDE PANEL: the tracked state of the story as the player sees it. Keep it consistent: a value changes only when events in the story cause it, "
-            "and only by the amount the story supports. A quest with status completed was finished last turn and its reward already given: do not give it again.]\n" + json.dumps(v, ensure_ascii=False))
+            "and only by the amount the story supports. A quest with status completed was finished last turn and its reward already given: do not give it again.]\n"
+            + json.dumps(v, ensure_ascii=False) + ("\n\n" + note if note else ""))
 
 
 def clear_custom_values(story: dict) -> None:
@@ -488,7 +574,7 @@ def snapshot(story: dict) -> dict:
 
 READ_RULES = """How to read the story:
 - Facts come from what the narrator says HAPPENED, not from what the player asks, wonders about or proposes. The player's move is context only; a question about a reward is not a reward.
-- A reward, price, bonus or amount that is only promised, offered, quoted, explained or asked about ("reward on completion", "you could earn", "costs 100 SP", shop lists) has NOT happened: never add it to a value and never mark a quest completed because of it.
+- A reward, price, bonus or amount that is only promised, offered, quoted, explained or asked about ("reward on completion", "you could earn", "costs 100 gold", shop lists) has NOT happened: never add it to a value and never mark a quest completed because of it.
 - Prefer the narrator's structured status text (a [SYSTEM NOTIFICATION] or status block with "Total", "Current Status", levels and stats) over prose. When it states a total or current value, use exactly that number; do not add up amounts yourself.
 - A number changes only when the narrator says it was gained, lost, spent or set. If the story does not state it, leave the field out. Number and slider fields take only numbers: words like "baseline" or "unchanged" are not numbers, so leave the field out.
 - Quests: keep each quest's name, objectives and reward wording exactly as the narrator wrote them; do not rename quests or invent objectives. Tick an objective only when the narrator says it is done (a checked box, "completed"), never for partial progress (16/20 is not done). Set status completed only when the narrator announces the quest complete and grants its reward in that same reply. A reward that was announced earlier stays in the quest's reward text; if no reward has been stated yet, use an empty string."""

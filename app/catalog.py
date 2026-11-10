@@ -99,12 +99,29 @@ async def ollama_models(p: dict) -> dict:
         return {"ok": False, "models": []}
 
 
+UNETS: set[str] = set()     # diffusion models ComfyUI listed last time (FLUX.2 and the like): drawn with the FLUX workflow, not the checkpoint one
+
+
 async def comfy_checkpoints(p: dict) -> dict:
+    """Checkpoints (all-in-one SDXL-style files) and diffusion models (FLUX.2 klein and other models loaded on their own) that ComfyUI has."""
     try:
         j = await _get(p["base_url"].rstrip("/") + "/object_info/CheckpointLoaderSimple", timeout=3)
-        return {"ok": True, "ids": j["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]}
+        ids = j["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
     except Exception:
-        return {"ok": False, "ids": []}
+        return {"ok": False, "ids": [], "unets": []}
+    try:
+        u = await _get(p["base_url"].rstrip("/") + "/object_info/UNETLoader", timeout=3)
+        unets = [x for x in u["UNETLoader"]["input"]["required"]["unet_name"][0] if is_flux(x)]
+    except Exception:
+        unets = []
+    UNETS.clear()
+    UNETS.update(unets)
+    return {"ok": True, "ids": ids, "unets": unets}
+
+
+def is_flux(name: str) -> bool:
+    """A FLUX.2 diffusion model the app's FLUX workflow can draw with."""
+    return bool(re.search(r"flux[._ -]?2", str(name), re.IGNORECASE))
 
 
 def _version(model_id: str) -> tuple:
@@ -142,12 +159,12 @@ async def _image_provider(p: dict, hw: dict) -> dict:
          "models": [], "error": "", "hint": HINTS.get(p["id"], ""), "key_help": KEY_HELP.get(p["id"], ""), "default_model": p.get("model", "")}
     if e["local"]:
         r = await comfy_checkpoints(p)
-        e["ready"] = r["ok"] and bool(r["ids"]) and hw["vram_gb"] >= hardware.SDXL_VRAM_GB
+        e["ready"] = r["ok"] and bool(r["ids"] or r["unets"]) and hw["vram_gb"] >= hardware.SDXL_VRAM_GB
         if not r["ok"]:
             e["error"] = "ComfyUI isn't running (start it with ~/ComfyUI/start.sh)."
         elif hw["vram_gb"] < hardware.SDXL_VRAM_GB:
             e["error"] = f"Local picture making needs about {hardware.SDXL_VRAM_GB} GB of video memory."
-        e["models"] = [{"id": i, "tier": "local"} for i in r["ids"]]
+        e["models"] = [{"id": i, "tier": "local"} for i in r["ids"]] + [{"id": i, "tier": "local", "kind": "flux"} for i in r["unets"]]
     elif e["has_key"]:
         r = await live_ids(p)
         ids = [i for i in r["ids"] if IS_IMAGE.search(i)] if r["ok"] else []
