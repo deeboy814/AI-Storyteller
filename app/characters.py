@@ -12,12 +12,23 @@ from collections import Counter
 
 # Moods the app knows how to draw for ONE character (see main.MOOD_LOOKS). Moods outside this list (hug, kissing, ...) need
 # other people in the frame or romantic content, so automatic sets never draw them; they can still be uploaded by hand.
-DRAWABLE = {"normal", "smile", "shy", "surprise", "sulky", "fear", "sad", "angry", "scorn", "despair", "combat", "cute", "dead", "zombie"}
+DRAWABLE = {"normal", "smile", "shy", "surprise", "sulky", "fear", "sad", "angry", "scorn", "despair", "combat", "cute", "dead", "zombie",
+            # action moods (one character in motion; see ACTION_MOODS)
+            "strike", "guard", "dodge", "charge", "leap", "aim", "cast", "draw weapon", "wounded", "knocked down", "defeated", "exhausted", "flee", "sneak", "battle cry", "victory"}
+
+# The action mood set: one character in the middle of physical action. The narrator prefers these in fights, chases and danger (Art → Style & options → Action moods).
+ACTION_MOODS = ["combat 1", "combat 2", "strike 1", "strike 2", "guard", "dodge", "charge", "leap", "aim", "cast", "draw weapon", "wounded", "knocked down",
+                "defeated", "exhausted", "flee", "sneak", "battle cry", "victory", "dead"]
+# Only for stories with adult content on: single-character pictures for intimate scenes (drawn by the adult picture maker when that is set up).
+ADULT_ACTION_MOODS = ["aroused", "seductive", "undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow"]
+ADULT_ONLY = {"undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow"}   # moods that are always explicit pictures in an adult story
 
 DEFAULT_SETS = {
     "basic": ["normal 2", "smile 1", "smile 2", "surprise", "fear", "sad", "angry 1", "scorn 1", "shy"],
     "extended": ["normal 2", "smile 1", "smile 2", "surprise", "sulky", "fear", "sad", "angry 1", "angry 2", "scorn 1", "scorn 2",
                  "despair", "shy", "cute 1", "cute 2", "combat 1", "combat 2", "dead"],
+    "action": list(ACTION_MOODS),
+    "action_adult": list(ADULT_ACTION_MOODS),
 }
 
 GENERIC = {
@@ -125,8 +136,54 @@ def add_to_extended(cfg: dict, mood: str) -> bool:
     if not mood or mood == "default":
         return False
     sets = cfg.setdefault("mood_sets", {k: list(v) for k, v in DEFAULT_SETS.items()})
-    have = {mood_base(m) for k in ("basic", "extended") for m in sets.get(k, [])} | {m.lower() for k in ("basic", "extended") for m in sets.get(k, [])}
+    have = {mood_base(m) for k in sets for m in sets.get(k, [])} | {m.lower() for k in sets for m in sets.get(k, [])}
     if mood in have or mood_base(mood) in have:
         return False
     sets.setdefault("extended", []).append(mood)
     return True
+
+
+# ---------------- characters that are probably the same person ----------------
+import difflib
+
+_TITLES = {"dr", "doctor", "mr", "mrs", "ms", "miss", "mx", "sir", "lady", "lord", "captain", "capt", "sergeant", "sgt", "lieutenant", "lt", "major", "colonel", "general",
+           "commander", "marshal", "professor", "prof", "father", "mother", "sister", "brother", "chief", "instructor", "officer", "private", "corporal", "king", "queen",
+           "prince", "princess", "master", "madam", "mistress", "the", "old", "young", "little"}
+
+
+def _tokens(name: str) -> list[str]:
+    return [t for t in re.sub(r"[^\w' -]", " ", name.lower()).replace("-", " ").split() if t and t not in _TITLES]
+
+
+def find_duplicates(story: dict) -> list[dict]:
+    """Pairs of cast entries that are probably one person: the same name apart from a title, a short form of a fuller name ("Ann" and "Ann Marsh"), or names spelled almost
+    alike. Free (no AI). Each result names which entry to fold into which (the shorter name into the fuller one). A short name that fits several fuller names is left alone."""
+    cast = [c for c in story.get("cast") or [] if c.get("name")]
+    toks = {c["slug"]: _tokens(c["name"]) for c in cast}
+    out, seen = [], set()
+    for i, a in enumerate(cast):
+        for b in cast[i + 1:]:
+            ta, tb = toks[a["slug"]], toks[b["slug"]]
+            if not ta or not tb or a.get("player") != b.get("player"):
+                continue
+            if any(x.lower() == b["name"].lower() for x in a.get("aka") or []) or any(x.lower() == a["name"].lower() for x in b.get("aka") or []):
+                continue
+            reason = ""
+            if sorted(ta) == sorted(tb):
+                reason = "the same name apart from a title"
+            else:
+                short, long_ = (ta, tb) if len(ta) < len(tb) else (tb, ta)
+                if len(short) < len(long_) and short and short == long_[:len(short)] or (len(short) == 1 and len(long_) > 1 and short[0] == long_[-1]):
+                    fits = [c for c in cast if (lambda t: t and len(t) >= len(short) and (t[:len(short)] == short or (len(short) == 1 and t[-1] == short[0])))(toks[c["slug"]])]
+                    if len([c for c in fits if toks[c["slug"]] != short]) == 1:
+                        reason = "one is the short form of the other"
+                elif len(" ".join(ta)) >= 5 and difflib.SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio() >= 0.86:
+                    reason = "the names are spelled almost alike"
+            if not reason:
+                continue
+            fold, into = (a, b) if len(toks[a["slug"]]) < len(toks[b["slug"]]) or (len(toks[a["slug"]]) == len(toks[b["slug"]]) and len(a["name"]) <= len(b["name"])) else (b, a)
+            key = tuple(sorted((a["slug"], b["slug"])))
+            if key not in seen:
+                seen.add(key)
+                out.append({"fold": fold["slug"], "into": into["slug"], "names": [fold["name"], into["name"]], "reason": reason})
+    return out[:10]

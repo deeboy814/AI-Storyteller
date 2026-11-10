@@ -12,7 +12,7 @@ async function showStoryForm(s) {
     opening_options: s ? [...(s.opening_options || [])] : [], endings: s ? (s.endings || []).map((e) => ({ ...e })) : [],
     sidebar: s ? JSON.parse(JSON.stringify(s.sidebar || {})) : { mode: (config && config.sidebar_default_mode) || "prompt", fields: TRACKER_FIELDS.map((f) => f.id), schema: null, custom: [] },
     art: { direction: s && s.art ? s.art.direction || "" : (config.default_art_direction || ""), setting: s && s.art ? s.art.setting || "" : "" },
-    use_state_block: !s || s.use_state_block !== false, auto_replies: !!(s && s.auto_replies), rule_check: !!(s && s.rule_check), nsfw: false,
+    use_state_block: !s || s.use_state_block !== false, auto_replies: !!(s && s.auto_replies), rule_check: !!(s && s.rule_check), narrator_acts: !!(s && s.narrator_acts), code_check: !s || s.code_check !== false, format_fix: !s || s.format_fix !== false, clock: (s && s.clock) || { mode: "auto", start: "06:00", minutes: 30 }, nsfw: false,
     cast: [], cover: null, intro: [], backdrop: null, models: null,
   };
   const tabs = isNew ? ["Basics", "Cast", "Story start", "Trackers & endings", "Media", "Options"] : ["Basics", "Story start", "Trackers & endings", "Options"];
@@ -33,7 +33,7 @@ async function showStoryForm(s) {
       D.endings = [...document.querySelectorAll(".endrow")].map((r) => ({ title: r.querySelector("input").value, text: r.querySelector("textarea").value })).filter((e) => e.title.trim() || e.text.trim());
       D.art.direction = val("sfArtDir"); D.art.setting = val("sfArtSet");
     }
-    if (tab === "Options") { D.use_state_block = $("fState").checked; D.auto_replies = $("fAutoRep").checked; D.rule_check = $("fRuleChk").checked; if ($("fNsfw")) D.nsfw = $("fNsfw").checked; if (picker) D.models = picker.get(); }
+    if (tab === "Options") { D.use_state_block = $("fState").checked; D.auto_replies = $("fAutoRep").checked; D.rule_check = $("fRuleChk").checked; D.narrator_acts = $("fActs").checked; D.code_check = $("fCode").checked; D.format_fix = $("fFix").checked; D.clock = { mode: $("fClockMode").value, start: $("fClockStart").value || "06:00", minutes: +$("fClockMin").value || 30 }; if ($("fNsfw")) D.nsfw = $("fNsfw").checked; if (picker) D.models = picker.get(); }
   };
 
   // ---- panes
@@ -83,6 +83,12 @@ async function showStoryForm(s) {
       ${chk("fState", D.use_state_block, "Let the app track the story state", "Fills the sidebar from a hidden block. Turn off if your prompt prints its own status panel.")}
       ${chk("fAutoRep", D.auto_replies, "Suggest three replies after every narrator reply", "Otherwise use the 💡 button. Costs one small call each time.")}
       ${chk("fRuleChk", D.rule_check, "Check each reply against this story's rules", "The small helper AI reads the story prompt and the reply and flags clear slips (a missing status line, a quest without its notice, points spent for you). A flagged reply gets a one-click fix. Costs one small call per reply (it reads the whole story prompt).")}
+      ${chk("fActs", D.narrator_acts, "Let the narrator decide some of my character's routine actions", "Lets the narrator write routine, in-character actions, thoughts and short lines for your character (following an order, a habitual reaction), based on their backstory, stats, skills, quests and the story so far, which keeps replies long and scenes moving. It still follows exactly what you write, and the story prompt says how far it may go. Off: only you decide what your character does or says.")}
+      ${chk("fCode", D.code_check, "Check each reply's format and numbers in the app (free)", "The app itself (no AI, no cost) flags a status line printed twice or not last, labels missing, Day, XP or Lives moving the wrong way, XP past the next level's total, stat points changed without you spending them, and a number change with no status line. It only runs when the story prompt shows a status line. Flags appear under the reply with a one-click Fix.")}
+      ${chk("fFix", D.format_fix, "Tidy each reply's status line (free)", "When the story prompt describes a status line: an earlier copy of it in the same reply is removed, and it is moved to the end when the prompt says it is the last line. What was done is noted under the reply (the original wording is kept in the turn's data). Lines inside a code block are left alone.")}
+      <label>World clock <small class="hint">(the app keeps the in-world time and tells the narrator each turn, so the time of day stops drifting)</small></label>
+      <div class="grid2" style="grid-template-columns:2fr 1fr 1fr"><select id="fClockMode"><option value="auto" ${D.clock.mode === "auto" ? "selected" : ""}>Let the story prompt decide (on when it talks about a clock or a Time value)</option><option value="on" ${D.clock.mode === "on" ? "selected" : ""}>On</option><option value="off" ${D.clock.mode === "off" ? "selected" : ""}>Off</option></select>
+        <div><label style="margin:0">Day starts at</label><input id="fClockStart" type="time" value="${esc(D.clock.start || "06:00")}"></div><div><label style="margin:0">Minutes per reply</label><input id="fClockMin" type="number" min="1" max="720" value="${esc(String(D.clock.minutes || 30))}"></div></div>
       ${isNew ? chk("fNsfw", D.nsfw, "Adult (NSFW) content", "Allows explicit content between adult characters, in the text and in scene pictures. Off by default; change it later in Settings.") : ""}
       ${isNew ? '<h3>Which AI should run this story?</h3><div id="aiPick"></div><div class="hint">A one-time choice for this story. You can change it later in Settings.</div>' : ""}`,
   };
@@ -155,7 +161,7 @@ async function showStoryForm(s) {
     const prog = (t) => { const e = $("sfProg"); if (e) e.textContent = t; };
     $("mSave").disabled = true;
     const body = { title: D.title, subtitle: D.subtitle, base_prompt: D.base_prompt, description: D.description, prologue: D.prologue, opening: D.opening, opening_in_context: D.opening_in_context,
-      opening_options: D.opening_options, endings: D.endings, auto_replies: D.auto_replies, rule_check: D.rule_check, use_state_block: D.use_state_block, art: D.art,
+      opening_options: D.opening_options, endings: D.endings, auto_replies: D.auto_replies, rule_check: D.rule_check, narrator_acts: D.narrator_acts, code_check: D.code_check, format_fix: D.format_fix, clock: D.clock, use_state_block: D.use_state_block, art: D.art,
       sidebar: D.sidebar.mode === "player" ? { mode: "player", fields: D.sidebar.fields, custom: D.sidebar.custom || [] } : D.sidebar.mode === "ai" ? { mode: "ai", schema: D.sidebar.schema } : { mode: "prompt" } };
     try {
       if (!isNew) { story = await api("/stories/" + s.id, { method: "PUT", body }); localStorage.setItem("story", story.id); closeModal(); renderAll(); applyTheme(config); return; }

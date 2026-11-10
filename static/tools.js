@@ -96,9 +96,30 @@ function showSearch(initialTab = "Search") {
 const QUICK = [["Shorter", "keep the next reply shorter"], ["More detail", "describe the scene in richer detail"], ["More dialogue", "use more dialogue and less narration"], ["Slow down", "slow the pacing; stay in this moment"],
   ["Skip ahead", "skip ahead to the next significant moment"], ["Don't decide for me", "do not describe my character's actions, words or feelings"], ["Lighter tone", "lighten the tone a little"], ["Stay in character", "keep every character true to their established personality"]];
 function renderQuick() {
-  $("quickBar").innerHTML = QUICK.map(([l, v]) => `<button data-v="${esc(v)}" title="Adds an OOC note to your message">${l}</button>`).join("");
-  $("quickBar").querySelectorAll("button").forEach((b) => b.onclick = () => { const t = $("input"); t.value = (t.value.trim() ? t.value.trim() + "\n\n" : "") + `(OOC: ${b.dataset.v}.)`; autosize(); t.focus(); });
+  const act = (() => { try { return localStorage.getItem("fightAct") === "1"; } catch (e) { return false; } })();
+  const adult = !!(story && story.nsfw);
+  $("quickBar").innerHTML = `<div class="qcmds"><div class="qrow">
+      <button data-cmd="continue" title="The narrator carries the story on by itself from the prompt, characters, world lore and the last few turns">▶️ Continue</button>
+      <button data-cmd="dice" title="Roll a d20 check against one of your stats and send your move with the result (the narrator must narrate the outcome)">🎲 Check…</button>
+      <button data-cmd="fight" title="Continue the ongoing battle with dynamic, creative actions: enemies attack, dodge, counter and adapt">⚔️ Continue the fight</button>
+      <label class="chk qact" title="Off: your character is left to you. On: the narrator may also choose fitting actions for your character in the fight."><input type="checkbox" id="fightAct" ${act ? "checked" : ""}> narrator may act for me</label></div>
+      ${adult ? `<div class="qrow"><button data-cmd="adult" class="${armed ? "armed" : ""}" title="A fuller adult-content instruction for narrator models that fade to black or skip intimate scenes. Press to attach it to your next move (press again to take it off).">🔞 Full adult scene</button>
+      <label class="chk qact" title="Keep it attached to every move until you turn it off"><input type="checkbox" id="adultKeep" ${cmdKeep() ? "checked" : ""}> every move</label></div>` : ""}
+    </div><div id="qDice" class="qdice hidden"></div><div class="qmoves" id="qMoves"></div><div class="qnotes">` + QUICK.map(([l, v]) => `<button data-v="${esc(v)}" title="Adds an OOC note to your message">${l}</button>`).join("") + "</div>";
+  const bar = $("quickBar");
+  bar.querySelectorAll("button[data-v]").forEach((b) => b.onclick = () => { const t = $("input"); t.value = (t.value.trim() ? t.value.trim() + "\n\n" : "") + `(OOC: ${b.dataset.v}.)`; autosize(); t.focus(); });
+  bar.querySelector("[data-cmd='continue']").onclick = () => { if (!busy) sendCommand("continue"); };
+  bar.querySelector("[data-cmd='fight']").onclick = () => { if (!busy) sendCommand("fight", { act_for_me: $("fightAct").checked }); };
+  $("fightAct").onchange = () => { try { localStorage.setItem("fightAct", $("fightAct").checked ? "1" : "0"); } catch (e) { /* not saved */ } };
+  bar.querySelector("[data-cmd='dice']").onclick = () => diceForm();
+  renderMoves();
+  const ad = bar.querySelector("[data-cmd='adult']");
+  if (ad) {
+    ad.onclick = () => setArmed(!armed);
+    $("adultKeep").onchange = () => { try { localStorage.setItem("adultKeep", $("adultKeep").checked ? "1" : "0"); } catch (e) { /* not saved */ } };
+  }
 }
+
 
 // ---------- read aloud (the browser's own voices: free, local) ----------
 const tts = { on: !!window.speechSynthesis };
@@ -324,4 +345,53 @@ function bindTools() {   // called by app.js once $ and the page exist
   $("btnQuick").onclick = () => { renderQuick(); $("quickBar").classList.toggle("hidden"); };
   $("btnCompare").onclick = showCompare;
   $("btnExport").onclick = showExport;
+}
+
+
+// ---- 🎲 dice: the app rolls d20 + (stat - 5) against a difficulty and sends the result with your move
+async function diceForm() {
+  const box = $("qDice"); if (!box || !story) return;
+  if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+  let d; try { d = await api(`/stories/${story.id}/dice`); } catch (e) { alert(e.message); return; }
+  box.classList.remove("hidden");
+  box.innerHTML = `<div class="trow"><div class="lrow" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+    <label>Roll against <select id="dStat"><option value="">(no stat: a plain d20)</option>${d.stats.map((x) => `<option value="${esc(x.id)}">${esc(x.label)}${x.value != null ? " " + x.value : ""}</option>`).join("")}</select></label>
+    <label>Difficulty <select id="dDiff">${Object.entries(d.difficulties).map(([k, v]) => `<option value="${esc(k)}" ${k === d.difficulty ? "selected" : ""}>${esc(k)} (${v})</option>`).join("")}</select></label>
+    <label>Dice <select id="dAdv"><option value="">one d20</option><option value="adv">advantage (best of two)</option><option value="dis">disadvantage (worst of two)</option></select></label>
+    <button class="primary" id="dGo">🎲 Roll and send</button></div>
+    <div class="hint">Your move is whatever is in the box (or “I attempt it.”). Result = d20 + (stat − 5) against the difficulty; the app rolls, so the narrator cannot fudge it.</div>
+    <div class="lrow" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px"><label>Automatic rolls <select id="dMode"><option value="">Let the story prompt decide (${d.prompt_calls_for_checks ? "it calls for rolls: automatic" : "it does not mention rolls: only when I press 🎲"})</option><option value="auto">Automatic: the app rolls for risky actions</option><option value="manual">Only when I press 🎲</option><option value="off">Never</option></select></label></div></div>`;
+  $("dMode").value = d.mode || "";
+  $("dMode").onchange = () => api(`/stories/${story.id}/dice`, { method: "PUT", body: { mode: $("dMode").value } }).catch((e) => alert(e.message));
+  $("dGo").onclick = async () => {
+    if (busy) return;
+    try {
+      const r = await api(`/stories/${story.id}/roll`, { method: "POST", body: { id: $("dStat").value, difficulty: $("dDiff").value, adv: $("dAdv").value } });
+      const typed = $("input").value.trim();
+      box.classList.add("hidden");
+      send(typed || "I attempt it.", undefined, false, "", false, [], {}, r);
+    } catch (e) { alert(e.message); }
+  };
+}
+
+// ---- 🧭 moves the app suggests from the scene (no AI): talk to whoever is here, go to a place, check a quest, spend points
+function renderMoves() {
+  const box = $("qMoves"); if (!box || !story) return;
+  const turns = story.turns || [], lastAi = [...turns].reverse().find((t) => t.role === "assistant"), txt = lastAi ? lastAi.text : "";
+  const names = [], places = [];
+  for (const m of txt.matchAll(/!\[\]\(portrait:([^/)]+)\/|\[\[([^/\]]+)\//g)) { const n = (m[1] || m[2] || "").trim(); if (n && !names.includes(n)) names.push(n); }
+  for (const m of txt.matchAll(/!\[\]\(place:([^)]+)\)/g)) { const n = m[1].trim(); if (n && !places.includes(n)) places.push(n); }
+  const me = ((story.avatar || {}).name || story.player_name || "").toLowerCase();
+  const items = [];
+  names.filter((n) => n.toLowerCase() !== me).slice(0, 4).forEach((n) => items.push([`💬 Talk to ${n}`, `I turn to ${n} and talk to ${n.split(" ")[0]}.`]));
+  (story.places || []).filter((p) => p.name && !places.includes(p.name)).slice(0, 3).forEach((p) => items.push([`🚪 Go to ${p.name}`, `I head to ${p.name}.`]));
+  const tr = story.tracker || {};
+  for (const f of activeFields().filter((x) => x.kind === "quests")) {
+    const q = ((tr.me || {})[f.id.split(".")[1]] || []).find((x) => x.status === "active"); if (q) { items.push([`📋 ${q.name}`, `I think about my task: ${q.name}, and decide what to do next.`]); break; }
+  }
+  items.push(["🔎 Look around", "I look around carefully."]);
+  const pf = activeFields().find((f) => (f.spend_on || []).length);
+  if (pf && Number((tr.me || {})[pf.id.split(".")[1]]) > 0) items.push([`⭐ Spend ${pf.label.toLowerCase()}`, null]);
+  box.innerHTML = items.length ? `<small class="hint">Suggested moves (no AI):</small> ` + items.map(([l, v], i) => `<button data-mv="${i}">${esc(l)}</button>`).join("") : "";
+  box.querySelectorAll("button").forEach((b) => b.onclick = () => { const it = items[+b.dataset.mv]; if (!it[1]) return showPoints(); const t = $("input"); t.value = (t.value.trim() ? t.value.trim() + " " : "") + it[1]; autosize(); t.focus(); });
 }

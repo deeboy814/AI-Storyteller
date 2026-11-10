@@ -27,7 +27,6 @@ function showArtHub(tab = "Overview") {
       ${card("📖", "Cover", story.cover ? "Has a cover on the Home card" : "No cover yet", `<button id="hCover">Cover art…</button>`)}
       ${card("🖼", "Intro panels", `${intro} picture${intro === 1 ? "" : "s"} shown at the start of the story`, `<button id="hIntro">Intro panels…</button>`)}
       ${card("🎬", "Scene pictures", `Auto-illustrate: ${onoff(a.auto)} · a picture most turns: ${onoff(a.scene_often)} · shown ${({ panel: "in the side panel", banner_top: "as a banner above the narration", banner_bottom: "as a banner below the narration" })[a.scene_where] || "under the reply"}`, `<button id="hIllus" ${busy ? "disabled" : ""}>Illustrate the latest reply</button><button id="hStyle1">Options…</button>`)}
-      ${card("🛠", "Picture makers", `Characters, scenes and covers: ${esc(((story.models || {}).images || {}).model || (config && config.image_active) || "not chosen")}<br>Backgrounds and places: ${bg.on ? esc(bg.model || "separate maker") + " (separate)" : "the same maker"}`, `<button id="aSet">Picture makers…</button>`)}
     </div>
     <div id="hubStyle" class="hidden">${artTabHtml().replace('id="tabArt" class="hidden"', 'id="tabArt"')}
       <div class="actions"><span class="hint" id="hubStyleNote"></span><span style="flex:1"></span><button class="primary" id="hubStyleSave">Save</button></div></div>
@@ -58,7 +57,6 @@ function showArtHub(tab = "Overview") {
   $("hCover").onclick = via(() => showCardEditor({ id: story.id, title: story.title, cover: story.cover || "", description: story.description || "" }, { back: async () => { try { story = await api(`/stories/${story.id}`); } catch (e) { /* keep */ } renderAll(); back(); } }));
   $("hIllus").onclick = () => { closeModal(); illustrate(); };
   $("hStyle1").onclick = () => show("Style");
-  $("aSet").onclick = () => show("Makers");
 
   // ----- Style & options: the story's art direction and every picture switch
   artTabInit();
