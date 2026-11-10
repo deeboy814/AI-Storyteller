@@ -205,8 +205,37 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
                 cap = _num(f.get("max_level"))
                 if cap and cap >= 2:
                     d["max_level"] = int(cap)
+            so = f.get("spend_on")        # a points tracker: the stats and skills the player spends them on (labels or ids); the app does the spending
+            if isinstance(so, str):
+                so = [x for x in re.split(r"[,;|]", so)]
+            so = [str(x).strip()[:30] for x in (so or []) if str(x).strip()][:24]
+            if so:
+                d["spend_on"] = so
+                cap = _num(f.get("spend_cap"))
+                if cap and cap >= 1:
+                    d["spend_cap"] = int(cap)
+            if str(f.get("counts") or "").strip():      # counts the narrator's replies since another tracker (e.g. Day) last changed; the app works it out, the narrator never does
+                d["counts"] = str(f["counts"]).strip()[:30]
         seen.add(fid)
         out.append(d)
+    by_label = {d["label"].lower(): d["id"] for d in out}
+    for d in out:        # "spend_on" names its trackers by label (the editor) or by id
+        if d.get("spend_on"):
+            ids = {x["id"] for x in out}
+            res = [x if x in ids else by_label.get(x.lower(), "") for x in d["spend_on"]]
+            res = [x for x in dict.fromkeys(res) if x and x != d["id"] and x.split(".")[0] in ("scene", "me")]
+            if res:
+                d["spend_on"] = res
+            else:
+                d.pop("spend_on", None); d.pop("spend_cap", None)
+    for d in out:        # "counts" may name the other tracker by label (the editor) or by id
+        if d.get("counts"):
+            c = d["counts"]
+            c = c if c in {x["id"] for x in out} or c in {x["id"] for x in DEFAULT_FIELDS} else by_label.get(c.lower(), "")
+            if c and c != d["id"] and c.split(".")[0] in ("scene", "me"):
+                d["counts"] = c
+            else:
+                d.pop("counts")
     return out[:24]
 
 
@@ -348,6 +377,10 @@ def _apply(story: dict, new: dict, turn: int) -> list[dict]:
             cur[k] = v
     tr["changes"], tr["turn"] = changes, turn
     changes += derive_levels(story)
+    changes += derive_counters(story, turn)
+    changes += enforce_spent(story)
+    from . import clock
+    changes += clock.advance(story, turn)
     return changes
 
 
@@ -390,8 +423,212 @@ def derive_levels(story: dict) -> list[dict]:
     return out
 
 
+def derive_counters(story: dict, turn: int) -> list[dict]:
+    """A number tracker that "counts replies since [another tracker] last changed" (for example the turn of the day): the app keeps the count, so the narrator's own counting
+    never matters. The first reply under a new value is 1. A second pass over the same reply (the AI's patch after the status line) never counts twice."""
+    tr, out = story.setdefault("tracker", blank()), []
+    cnt = tr.setdefault("_cnt", {})
+    for f in active_fields(story):
+        src = f.get("counts")
+        if f.get("kind") != "number" or not src or "." not in f["id"] or "." not in src:
+            continue
+        sec, k = f["id"].split(".", 1)
+        ssec, sk = src.split(".", 1)
+        if sec not in ("scene", "me") or ssec not in ("scene", "me"):
+            continue
+        w, st = str(tr[ssec].get(sk)), cnt.get(f["id"])
+        if st and st.get("t") == turn:
+            if st["w"] != w:
+                st = {"w": w, "n": 1, "t": turn}
+        elif st is None or st["w"] != w:
+            st = {"w": w, "n": 1, "t": turn}
+        else:
+            st = {"w": w, "n": st["n"] + 1, "t": turn}
+        cnt[f["id"]] = st
+        if tr[sec].get(k) != st["n"]:
+            out.append({"s": sec, "n": None, "k": k, "b": tr[sec].get(k), "a": st["n"]})
+            tr[sec][k] = st["n"]
+    return out
+
+
+def _counter_note(story: dict) -> str:
+    tr, notes = story.get("tracker") or blank(), []
+    for f in active_fields(story):
+        if f.get("kind") == "number" and f.get("counts") and f["id"].split(".")[0] in ("scene", "me"):
+            sec, k = f["id"].split(".")
+            src = next((g["label"] for g in active_fields(story) if g["id"] == f["counts"]), "its tracker")
+            if tr[sec].get(k) is not None:
+                notes.append(f"{f['label']} = {tr[sec][k]} (replies so far since {src} last changed; the reply you write now is number {int(tr[sec][k]) + 1} under the current {src})")
+    return ("[COUNTERS (kept by the app; use these numbers and do not print them): " + "; ".join(notes) + ".]") if notes else ""
+
+
+# ---------------- stat points the player spends with buttons (the app does the arithmetic; the narrator is told the result) ----------------
+def points_field(story: dict) -> dict | None:
+    return next((f for f in active_fields(story) if f.get("kind") == "number" and f.get("spend_on") and f["id"].split(".")[0] in ("scene", "me")), None)
+
+
+def spend_targets(story: dict) -> list[dict]:
+    pf = points_field(story)
+    if not pf:
+        return []
+    by = {f["id"]: f for f in active_fields(story)}
+    return [by[i] for i in pf["spend_on"] if i in by and by[i].get("kind") == "number"]
+
+
+def seed_from_text(story: dict, text: str) -> int:
+    """Starting values for the stats and the points left, read from the avatar sheet ("Strength 8, Reflexes 6 ... Free points to assign at the start: 5"), for the ones the
+    side panel does not hold yet. Returns how many were set."""
+    pf = points_field(story)
+    if not pf or not text:
+        return 0
+    tr, n = story.setdefault("tracker", blank()), 0
+    for f in [pf] + spend_targets(story):
+        sec, k = f["id"].split(".", 1)
+        if tr[sec].get(k) not in (None, ""):
+            continue
+        if f is pf:
+            m = re.search(r"(?i)\b" + re.escape(f["label"]) + r"\b[^0-9\n]{0,60}?(-?\d+)", text) or re.search(r"(?i)\bpoints?\b[^0-9\n]{0,60}?(-?\d+)", text)
+        else:
+            m = re.search(r"(?i)(?<![\w])" + re.escape(f["label"]) + r"\b[ \t]*[:=]?[ \t]*(-?\d+)", text)
+        if m:
+            tr[sec][k] = int(m.group(1)); n += 1
+    return n
+
+
+def spend(story: dict, target_id: str, n: int) -> dict:
+    """Move n points (negative = take back a spend not yet sent to the narrator) from the points tracker to a stat or skill. Raises ValueError with a message for the player."""
+    pf = points_field(story)
+    tgt = next((t for t in spend_targets(story) if t["id"] == target_id), None)
+    if not pf or not tgt or n == 0:
+        raise ValueError("That cannot be spent on.")
+    tr = story.setdefault("tracker", blank())
+    psec, pk = pf["id"].split(".", 1)
+    tsec, tk = tgt["id"].split(".", 1)
+    points, cur = _num(tr[psec].get(pk)), _num(tr[tsec].get(tk)) or 0
+    pend = tr.setdefault("_spent", [])
+    row = next((r for r in pend if r["id"] == tgt["id"]), None)
+    if n > 0:
+        if points is None or points < n:
+            raise ValueError("Not enough points left.")
+        if pf.get("spend_cap") and cur + n > pf["spend_cap"]:
+            raise ValueError(f"{tgt['label']} cannot go above {pf['spend_cap']} by spending points.")
+    else:
+        if not row or row["n"] + n < 0:
+            raise ValueError("Only points spent since your last move can be taken back.")
+    new_t, new_p = cur + n, (points or 0) - n
+    tr["changes"] = [c for c in tr.get("changes", []) if not (c.get("s") == tsec and c.get("k") in (tk, pk) and c.get("spent"))]
+    tr[tsec][tk], tr[psec][pk] = int(new_t) if float(new_t).is_integer() else new_t, int(new_p) if float(new_p).is_integer() else new_p
+    if row:
+        row["n"] += n
+        if row["n"] == 0:
+            pend.remove(row)
+    else:
+        pend.append({"id": tgt["id"], "label": tgt["label"], "n": n})
+    tr["changes"] += [{"s": tsec, "n": None, "k": tk, "b": cur, "a": tr[tsec][tk], "spent": True}, {"s": psec, "n": None, "k": pk, "b": points, "a": tr[psec][pk], "spent": True}]
+    return {"stat": tr[tsec][tk], "points": tr[psec][pk]}
+
+
+def spent_note(story: dict, pending: list[dict]) -> str:
+    """The hidden note for the move that follows a spend: the values are final, the narrator must not change them."""
+    pf, tr = points_field(story), story.get("tracker") or blank()
+    if not pending or not pf:
+        return ""
+    psec, pk = pf["id"].split(".", 1)
+    bits = []
+    for r in pending:
+        tsec, tk = r["id"].split(".", 1)
+        bits.append(f"{r['label']} {r['n']:+d} (now {tr[tsec].get(tk)})")
+    return ("[POINTS SPENT BY THE PLAYER through the app since their last move: " + ", ".join(bits) + f". {pf['label']} left: {tr[psec].get(pk)}. These values are final and already applied: "
+            f"print them in the status line exactly as given, narrate nothing that changes them, and never spend, assign or choose {pf['label'].lower()} yourself.]")
+
+
+def enforce_spent(story: dict) -> list[dict]:
+    """After a reply's numbers are read: stats the player spent points on keep at least the spent value, and the points left are not allowed to stay at the old total
+    (a narrator that ignores the spend or prints the old numbers is put right). Awards the narrator gives on top (higher numbers) are kept."""
+    tr = story.get("tracker") or {}
+    lock = tr.get("_lock")
+    pf = points_field(story)
+    if not lock or not pf:
+        return []
+    out = []
+    for tid, want in (lock.get("stats") or {}).items():
+        sec, k = tid.split(".", 1)
+        have = _num(tr.get(sec, {}).get(k))
+        if have is None or have < want:
+            out.append({"s": sec, "n": None, "k": k, "b": tr[sec].get(k), "a": want})
+            tr[sec][k] = want
+    psec, pk = pf["id"].split(".", 1)
+    have = _num(tr.get(psec, {}).get(pk))
+    if lock.get("points_before") is not None and have is not None and have == lock["points_before"] and lock["points_after"] != lock["points_before"]:
+        out.append({"s": psec, "n": None, "k": pk, "b": tr[psec].get(pk), "a": lock["points_after"]})
+        tr[psec][pk] = lock["points_after"]
+    return out
+
+
+def _clock_note(story: dict) -> str:
+    from . import clock
+    return clock.note(story)
+
+
+# ---------------- quest deadlines ("Deadline: Day 9") read from the quest notification, checked against the Day tracker ----------------
+_QUEST_LINE = re.compile(r"^[ \t>*_]*\[(?:(?:SYSTEM[ _-]*)?NOTIFICATION|QUEST)\][ \t*_]*(?:quest[ \t]*)?(started|updated|new|given|completed|failed)[ \t]*[:\-]?[ \t]*(.+?)[ \t*_]*$", re.IGNORECASE | re.MULTILINE)
+_DEADLINE = re.compile(r"(?:deadline|due|by|before|until)\s*[:\-]?\s*(?:the end of\s+|end of\s+)?day\s*(\d+)", re.IGNORECASE)
+
+
+def _qkey(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(name).lower()).strip()
+
+
+def parse_deadlines(story: dict, reply: str) -> None:
+    """Remember each quest's deadline day from its notification; forget it when the quest is completed or failed."""
+    tr = story.setdefault("tracker", blank())
+    dl = [d for d in tr.get("_deadlines", []) if isinstance(d, dict)]
+    for m in _QUEST_LINE.finditer(reply):
+        verb, line = m.group(1).lower(), m.group(2)
+        name = re.split(r"\s*(?:\(|\.\s|Objectives|Reward|Deadline)", line)[0].strip(" .:*_")
+        if not name:
+            continue
+        if verb in ("completed", "failed"):
+            dl = [d for d in dl if _qkey(d["name"]) != _qkey(name) and _qkey(name) not in _qkey(d["name"])]
+            continue
+        dm = _DEADLINE.search(line)
+        if dm:
+            dl = [d for d in dl if _qkey(d["name"]) != _qkey(name)] + [{"name": name[:60], "day": int(dm.group(1))}]
+    if dl:
+        tr["_deadlines"] = dl[-20:]
+    else:
+        tr.pop("_deadlines", None)
+
+
+def _current_day(story: dict):
+    tr = story.get("tracker") or {}
+    for f in active_fields(story):
+        if f["label"].strip().lower() == "day" and f["id"].split(".")[0] in ("scene", "me"):
+            sec, k = f["id"].split(".", 1)
+            return _num(tr.get(sec, {}).get(k))
+    return None
+
+
+def _deadline_note(story: dict) -> str:
+    dl = (story.get("tracker") or {}).get("_deadlines") or []
+    day = _current_day(story)
+    if not dl or day is None:
+        return ""
+    active = [q for sec in ("me", "scene") for v in (story.get("tracker") or {}).get(sec, {}).values() if isinstance(v, list) for q in v if isinstance(q, dict) and q.get("status", "active") == "active"]
+    out = []
+    for d in dl:
+        if active and not any(_qkey(q["name"]) == _qkey(d["name"]) or _qkey(d["name"]) in _qkey(q["name"]) or _qkey(q["name"]) in _qkey(d["name"]) for q in active):
+            continue                  # a quest the log no longer shows as active
+        if day > d["day"]:
+            out.append(f"'{d['name']}' is OVERDUE (deadline Day {d['day']}; it is now Day {int(day)}): resolve it now as failed unless the story shows it was done, with its Failed notification")
+        elif day == d["day"]:
+            out.append(f"'{d['name']}' is due TODAY (deadline Day {d['day']})")
+    return ("[QUEST DEADLINES, kept by the app: " + "; ".join(out) + ".]") if out else ""
+
+
 def update_from_reply(story: dict, reply: str, turn: int) -> bool:
     """Read the reply's own status panel (or the state block). Returns True if something was read."""
+    parse_deadlines(story, reply)
     sb = story.get("sidebar") or default_sidebar()
     if sb["mode"] == "ai":      # the AI alone keeps this panel up to date (mixing in the narrator's own panel would make values flicker)
         story.setdefault("tracker", blank())["changes"] = []
@@ -547,7 +784,7 @@ def _level_note(story: dict) -> str:
 
 
 def tail_text(story: dict) -> str:
-    v, note = visible(story), "\n\n".join(x for x in (_quest_note(story), _level_note(story)) if x)
+    v, note = visible(story), "\n\n".join(x for x in (_quest_note(story), _level_note(story), _counter_note(story), _deadline_note(story), _clock_note(story)) if x)
     if not v:
         return note
     return ("[SIDE PANEL: the tracked state of the story as the player sees it. Keep it consistent: a value changes only when events in the story cause it, "

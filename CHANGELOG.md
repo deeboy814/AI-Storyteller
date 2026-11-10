@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.5.0
+**Tested on a phone.** Phone and tablet play was checked on a real Android phone over a home network (PIN, remembered device, playing a story) and at phone width in a desktop browser: every screen and dialog (38 of them) was opened with no sideways overflow and no script errors, the phone loads nothing from the internet, and a phone cannot read the PIN, close the app or make a bug report. iPhone, iPad and Windows have not been tested.
+
+**New**
+- **Story beats (📅).** The story's own schedule of key events, read from its prompt (or added by you) and tied to the side panel ("when Day reaches 7"), the move count or "on my next move". When one is due, the app sends it to the narrator hidden, so the story stays on plan without you typing it; the next beats are named as "coming up, do not reveal" so it does not drift. Hidden behind a spoiler blur until you tap it; editable; included in story packages.
+- **Lore (📚).** Facts about your world with trigger words, sent to the narrator hidden only when a trigger word comes up (or always). Editable, with a Test box; included in story packages (the example package ships five entries and a guide section).
+- **Continuity check (🧠 Memory).** The AI reads the whole story for contradictions and proposes the smallest repair for each; you tick which to make, it backs up first, keeps the old wording in the edit history, and checks again.
+- **Stat points you spend with buttons.** A points tracker lists the stats and skills it is spent on; + / − buttons in the side panel, an assign window at the start of a game (values read from the avatar sheet), skills can be added, and the narrator is told the final numbers and never assigns points itself.
+- **Dice checks (🎲).** The app rolls a d20 + (stat − 5) against a difficulty and the narrator must narrate the outcome. Automatic when the story prompt mentions rolls or checks, otherwise only when you press the button, or never.
+- **World clock (optional per story).** The app keeps the in-world time of day (on when the prompt talks about a clock, or by your choice), resets it each Day, and tells the narrator, so the time stops drifting.
+- **Quest deadlines.** "Deadline: Day 9" is remembered: a ⏰ badge, and the narrator is told when a quest is due or overdue.
+- **Turn counter tracker.** A number tracker can count replies since another tracker changes (the turn of the day), kept by the app, never by the narrator.
+- **Story commands.** ▶️ Continue (the narrator carries on by itself), ⚔️ Continue the fight, and, in adult stories, 🔞 Full adult scene for narrator models that fade to black. Sent hidden with your move.
+- **Let the narrator decide some of my character's routine actions** (story option, off by default).
+- **Fill a character's whole sheet from the story**, with a warning not to use it early, and a review of every box before anything is saved.
+- **Action moods.** An Action set (combat, strike, guard, dodge, charge, cast, wounded, victory…) and a separate Adult action set that exists only in adult stories, drawn with the combat framing (upper body, whole picture on click); the narrator prefers them in fights, chases and danger (your choice).
+- **Restart a story from the beginning, as a separate copy** (Home → ⋯). Works on imported saves too.
+- **Report a bug (🐞).** One .zip with how far your game got, the problems the app finds by itself, recent errors and your settings, with personal data removed (keys, PIN, e-mails, phones, links, IP addresses, file paths, your user name and, by default, character names). You read what is in it first; nothing is uploaded.
+- **Import a save works without a story prompt** (the AI writes one from your text), keeps the last paragraphs of plain text word for word, and reads JSON chat exports (ChatGPT, Claude, SillyTavern) and common transcript labels.
+- **Free checks that need no AI:** format and number checks on every reply (a doubled or misplaced status line, Day or XP going backwards, XP past the next level, stat points changed without you spending them), a status-line tidy, a consistency lint (a dead character speaking, a misspelled name, eye or hair colour against the card), key events from notifications (*Level 3 reached*, *Life lost*…), merge suggestions for duplicate characters, and suggested moves in the ⚡ bar. Plus fewer AI calls: free place detection for the automatic background, and optional free "Right now" cards and scene prompts.
+- **Phone:** devices that entered the PIN are remembered (also after a restart), with a Forget button in Settings; a small tab on the right edge (or a swipe) opens the status panel; a slim header with a ☰ menu.
+
+**Improved**
+- The Art screen keeps one size on every tab, and the redundant Picture makers card is gone from its Overview.
+
+**Fixed** (problems in 1.4.0 and earlier)
+- Button rows in dialogs ran off the edge of a narrow screen (for example *Backups…* in Memory); they now wrap.
+
 ## 1.4.0
 **New**
 - **Play from a phone or tablet on your home network (option, off by default).** Settings → Phone & tablet: one switch makes the app open to your home network; the tab shows the address to open and a PIN. Devices enter the PIN once. Requests from outside the home network are refused, the phone loads nothing from the internet (everything comes from this computer), and phones cannot see the PIN or close the app.

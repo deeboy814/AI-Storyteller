@@ -7,6 +7,16 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<script>
+// Errors the page noticed, kept for the bug report (memory only, never sent anywhere by itself)
+window.__bugErr = [];
+(function () {
+  var push = function (a) { try { a.t = Date.now(); window.__bugErr.push(a); if (window.__bugErr.length > 60) window.__bugErr.shift(); } catch (e) { /* ignore */ } };
+  window.addEventListener("error", function (e) { push({ kind: "error", message: String(e.message || ""), source: String(e.filename || "").split("/").pop(), line: e.lineno, col: e.colno }); });
+  window.addEventListener("unhandledrejection", function (e) { push({ kind: "promise", message: String((e.reason && e.reason.message) || e.reason || "") }); });
+  var ce = console.error; console.error = function () { try { push({ kind: "console.error", message: Array.prototype.slice.call(arguments).map(String).join(" ").slice(0, 400) }); } catch (e) { /* ignore */ } ce.apply(console, arguments); };
+})();
+</script>
 <div id="home" class="home hidden"></div>
 <div id="app">
   <header>
@@ -14,7 +24,8 @@
       <div class="titlerow"><div id="title" class="title">AI Storyteller</div><button id="titleEdit" class="tedit hidden" title="Rename this story">✎</button></div>
       <div id="subtitle" class="subtitle"></div>
     </div>
-    <div class="tools">
+    <button class="icon hmenu" id="btnMenu" title="Menu: story tools and settings" aria-expanded="false">☰</button>
+    <div class="tools" id="tools">
       <select id="modelSelect" title="Model"></select>
       <button class="icon" id="btnSide" title="Status panel">ℹ️</button>
       <button class="icon" id="btnHome" title="Home: all your stories">🏠</button>
@@ -22,6 +33,7 @@
       <button class="icon" id="btnArt" title="Art: every picture tool of this story (characters, places, backgrounds, cover, style)">🖼️</button>
       <button class="icon" id="btnCast" title="Cast, portraits &amp; gallery">🎭</button>
       <button class="icon hidden" id="btnEndings" title="Possible endings (spoilers)">🏁</button>
+      <button class="icon" id="btnBeats" title="Story beats: the key events this story schedules, sent to the narrator at the right time (hidden spoilers)">📅</button>
       <button class="icon" id="btnMemory" title="Memory: summary, pinned facts, backups">🧠</button>
       <button class="icon" id="btnSearch" title="Search the story and bookmarks">🔍</button>
       <button class="icon" id="btnPlayer" title="Player: avatar & user notes">👤</button>
@@ -32,6 +44,7 @@
     </div>
   </header>
 
+  <button id="sideTab" class="sidetab" title="Open the status panel" aria-label="Status panel">‹</button>
   <main>
     <section id="narrative"></section>
     <aside id="sidebar"></aside>
@@ -54,6 +67,7 @@
       <button class="icon" id="btnCompare" title="Compare two AIs on your next move">⚖️</button>
       <button class="icon" id="btnQuick" title="Quick instructions for the narrator">⚡</button>
       <button class="icon" id="btnReplies" title="Suggest three replies based on what just happened">💡</button>
+      <button class="icon" id="btnContinue" title="Continue: the narrator carries the story on by itself from the prompt, characters, world lore and the last few turns. Anything you typed is used as a hint.">▶️</button>
       <button class="icon" id="btnIllustrate" title="Illustrate the latest reply">🎨</button>
       <textarea id="input" rows="1" placeholder="What do you do?"></textarea>
       <button class="primary" id="btnSend">Send</button>
@@ -68,6 +82,9 @@
 <script src="/static/creator.js"></script>
 <script src="/static/usage.js"></script>
 <script src="/static/memory.js"></script>
+<script src="/static/beats.js"></script>
+<script src="/static/lore.js"></script>
+<script src="/static/bugreport.js"></script>
 <script src="/static/tools.js"></script>
 <script src="/static/avatars.js"></script>
 <script src="/static/home.js"></script>

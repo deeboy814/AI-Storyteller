@@ -23,7 +23,7 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import backup, characters, images, importer, localrt, portrait_import, prompting, providers, store, tracker, usage
+from . import backup, beats, bugreport, characters, clock, images, lore, rules, importer, localrt, portrait_import, prompting, providers, store, tracker, usage
 
 ROOT = Path(__file__).resolve().parent.parent
 # ---------------- keep-warm: refresh Claude's prompt cache while you're away ----------------
@@ -172,7 +172,70 @@ _pin_fail: dict[str, int] = {}
 LOGIN_HTML = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>AI Storyteller</title>
 <body style="background:#12111c;color:#e8e5f2;font:18px system-ui;display:grid;place-items:center;height:100vh;margin:0"><form method=post action=/pin-login style="display:grid;gap:12px;width:min(320px,90vw)">
 <b>AI Storyteller</b><input name=pin type=password inputmode=numeric placeholder="PIN" autofocus style="font-size:20px;padding:10px;border-radius:8px;border:1px solid #444;background:#1b1a2b;color:inherit">
-<button style="font-size:18px;padding:10px;border-radius:8px;background:#8b6fd6;color:#fff;border:0">Open</button><small style="color:#999">{msg}</small></form>"""
+<button style="font-size:18px;padding:10px;border-radius:8px;background:#8b6fd6;color:#fff;border:0">Open</button><small style="color:#999">@@MSG@@</small></form>
+<script>try{var t=localStorage.getItem("st_dev");if(t)fetch("/pin-login",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"dev="+encodeURIComponent(t)}).then(function(r){if(r.ok)location.reload();else localStorage.removeItem("st_dev")})}catch(e){}</script>"""
+_ENTER_HTML = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><body style="background:#12111c"><script>try{localStorage.setItem("st_dev","@@TOK@@")}catch(e){}location.replace("/")</script>"""
+
+
+def _login(msg: str = "", status: int = 200) -> Response:
+    return Response(LOGIN_HTML.replace("@@MSG@@", msg), media_type="text/html", status_code=status)
+
+
+# Devices that entered the PIN are remembered (data/lan_devices.json, only a hash of each device's token is kept), so a restart never asks again.
+# A new PIN forgets them all; Settings -> Phone & tablet lists them and can forget one.
+_devs: dict | None = None
+
+
+def _dev_load() -> dict:
+    global _devs
+    if _devs is None:
+        try:
+            _devs = json.loads((store.DATA / "lan_devices.json").read_text(encoding="utf-8"))
+        except Exception:
+            _devs = {}
+    return _devs
+
+
+def _dev_save() -> None:
+    try:
+        (store.DATA / "lan_devices.json").write_text(json.dumps(_dev_load(), indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _dev_ok(token: str | None, host: str = "") -> bool:
+    if not token or len(token) > 100:
+        return False
+    d = _dev_load()
+    e = d.get(hashlib.sha256(token.encode()).hexdigest())
+    if not e:
+        return False
+    now = int(time.time())
+    if now - e.get("seen", 0) > 3600:       # note when it was last used (at most once an hour)
+        e["seen"], e["ip"] = now, host
+        _dev_save()
+    return True
+
+
+def _dev_name(ua: str) -> str:
+    os_ = next((n for k, n in (("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android phone/tablet"), ("Windows", "Windows PC"), ("Macintosh", "Mac"), ("Linux", "Linux PC")) if k in ua), "Device")
+    br = next((n for k, n in (("Edg", "Edge"), ("OPR", "Opera"), ("Firefox", "Firefox"), ("Chrome", "Chrome"), ("Safari", "Safari")) if k in ua), "browser")
+    return f"{os_} ({br})"
+
+
+def _dev_add(host: str, ua: str) -> str:
+    import secrets
+    tok = secrets.token_urlsafe(24)
+    now = int(time.time())
+    _dev_load()[hashlib.sha256(tok.encode()).hexdigest()] = {"name": _dev_name(ua), "added": now, "seen": now, "ip": host}
+    _dev_save()
+    return tok
+
+
+def _dev_response(tok: str) -> Response:
+    r = Response(_ENTER_HTML.replace("@@TOK@@", tok), media_type="text/html")
+    r.set_cookie("st_dev", tok, max_age=60 * 60 * 24 * 3650, httponly=False, samesite="lax")     # kept for years; "Forget" in Settings removes it
+    return r
 
 
 def _pin_cookie() -> str:
@@ -228,25 +291,28 @@ async def browser_guard(request: Request, call_next):
 
 @app.middleware("http")
 async def pin_gate(request: Request, call_next):
-    """When STORYTELLER_PIN is set, other computers must enter it first. This computer (localhost) never needs it."""
+    """When STORYTELLER_PIN is set, other computers must enter it first (once: the device is then remembered). This computer (localhost) never needs it."""
     host = request.client.host if request.client else ""
-    if not PIN or host in ("127.0.0.1", "::1", "localhost") or request.cookies.get("st_pin") == _pin_cookie():
+    if not PIN or host in ("127.0.0.1", "::1", "localhost") or request.cookies.get("st_pin") == _pin_cookie() or _dev_ok(request.cookies.get("st_dev"), host):
         return await call_next(request)
     if request.url.path == "/pin-login" and request.method == "POST":
-        if _pin_fail.get(host, 0) >= 10:
-            return Response(LOGIN_HTML.format(msg="Too many wrong tries. Restart the app to reset."), media_type="text/html", status_code=429)
         form = (await request.body()).decode()
+        dev = re.search(r"(?:^|&)dev=([^&]*)", form)
+        if dev and _dev_ok(unquote_plus(dev.group(1)), host):        # a remembered device whose cookie was cleared but kept its backup copy
+            return _dev_response(unquote_plus(dev.group(1)))
+        if dev:
+            return Response("no", status_code=401)
+        if _pin_fail.get(host, 0) >= 10:
+            return _login("Too many wrong tries. Restart the app to reset.", 429)
         given = re.search(r"pin=([^&]*)", form)
         if given and hashlib.sha256(("st|" + unquote_plus(given.group(1))).encode()).hexdigest()[:32] == _pin_cookie():
-            r = Response(status_code=303, headers={"Location": "/"})
-            r.set_cookie("st_pin", _pin_cookie(), max_age=60 * 60 * 24 * 90, httponly=True, samesite="lax")
-            return r
+            return _dev_response(_dev_add(host, request.headers.get("user-agent", "")))
         _pin_fail[host] = _pin_fail.get(host, 0) + 1
         await asyncio.sleep(1)
-        return Response(LOGIN_HTML.format(msg="Wrong PIN."), media_type="text/html", status_code=401)
+        return _login("Wrong PIN.", 401)
     if request.url.path.startswith("/api/"):
         return Response('{"detail":"PIN required"}', media_type="application/json", status_code=401)
-    return Response(LOGIN_HTML.format(msg=""), media_type="text/html")
+    return _login()
 
 
 @app.middleware("http")
@@ -281,6 +347,10 @@ class StoryIn(BaseModel):
     models: dict | None = None            # {story|recaps|images: {provider, model}}
     auto_replies: bool | None = None      # suggest three replies after every narrator reply
     rule_check: bool | None = None        # after every reply, the small helper checks it against the story's own rules
+    clock: dict | None = None             # world clock settings {mode: auto|on|off, start: "06:00", minutes: 30}
+    format_fix: bool | None = None        # the app tidies a stray status line (moves it to the end, drops a duplicate) instead of flagging it
+    code_check: bool | None = None        # the app checks each reply's format and numbers itself (free); on unless switched off
+    narrator_acts: bool | None = None     # the narrator may decide some of the player character's routine actions (the story prompt says how far)
     nsfw: bool | None = None              # adult content setting
     description: str | None = None
     prologue: str | None = None
@@ -308,6 +378,9 @@ class ImportIn(BaseModel):
     status_panel: str = ""              # the latest status panel (copied exactly)
     recent_turns: str = ""              # optional: last few turns, word for word
     into_story_id: str | None = None    # put the save into this unplayed story (e.g. one just imported as a package) instead of making a new one
+    prompt_derived: bool = False        # the story prompt was written by the AI from the text (so a restart can drop its "where the story stands" part)
+    provider: str | None = None         # no prompt given: the AI that writes one from the summary
+    model: str | None = None
 
 
 AVATAR_FIELDS = ("name", "gender", "age", "appearance", "personality", "background", "abilities")
@@ -321,6 +394,46 @@ class TurnIn(BaseModel):
     model: str | None = None
     force_budget: bool = False      # send even though a spending limit was reached
     note: str = ""                  # regenerate with changes: sent with this request only, never stored in the story
+    cmds: list[str] = []            # story commands sent along with this move: "continue", "fight", "adult" (see COMMANDS)
+    cmd_opts: dict = {}             # options for them, e.g. {"act_for_me": true} for "fight"
+    roll: dict | None = None        # a dice check the app made for this move (see /api/stories/{sid}/roll); sent to the narrator as the final outcome
+
+
+# Story commands: instructions the player can send along with a move. They are added to that request only (never stored as text in the story); the player's turn
+# remembers which were sent, so a retry sends them again.
+COMMANDS = {
+    "continue": ("▶ Continue",
+                 "Continue the story from where it stands, without waiting for the player. Advance events naturally from the story prompt, the world and its lore, the characters' "
+                 "established personalities, goals and relationships, and the most recent turns. Stay consistent with everything that has happened. Do not decide the player "
+                 "character's actions, words, thoughts or choices; stop at the next natural moment where the player needs to respond. If the player's message above says more than "
+                 "'Continue', treat it as a hint about what should happen next."),
+    "fight": ("⚔ Continue the fight",
+              "Continue the ongoing battle naturally and creatively. Take the initiative to advance the fight without waiting for specific instructions: make enemies attack, dodge, "
+              "counterattack, adapt their strategies and use their abilities intelligently. Introduce unexpected moves, tactical opportunities, environmental interactions and "
+              "escalating tension so the fight stays engaging and unpredictable. Respect the established characters, personalities, abilities, power levels, injuries and events, and "
+              "keep continuity with everything that has happened. Avoid repetitive attacks and unnecessary narration; keep the combat fluid, immersive and exciting."),
+    "adult": ("🔞 Full adult scene",
+              "Adult-content instruction for this reply. Everyone involved is an adult and a willing participant. When the fiction leads to an intimate or sexual moment, write it in "
+              "full, explicit detail as it happens: do not fade to black, cut away, summarise or skip over it, and let it last as long as the scene naturally would. Never sanitise "
+              "the vocabulary: use the plain, explicit words the scene calls for, and mirror the player's own wording and level of explicitness. Keep the characters' established "
+              "personalities, desires, boundaries and consent in character. Intimacy is character-driven and makes the world feel lived in; it is not used to solve plots or to "
+              "advance plot events."),
+}
+FIGHT_NO_ACT = " Do NOT control the player's character: do not dictate their actions, thoughts, dialogue or decisions; leave their reactions and choices entirely to the player."
+FIGHT_ACT = (" You may also act for the player's character in this fight: choose fitting actions in keeping with their abilities, personality and the established rules, "
+             "but never make irreversible story decisions for them (a death, a surrender, a betrayal).")
+
+
+def _command_note(story: dict, cmds: list[str], opts: dict) -> str:
+    """The (OOC: ...) text for the story commands sent with a move."""
+    out = []
+    for c in dict.fromkeys(cmds or []):
+        if c not in COMMANDS:
+            continue
+        if c == "adult" and not story.get("nsfw"):
+            raise HTTPException(400, "Adult content is switched off for this story (Settings → Story & narration).")
+        out.append(COMMANDS[c][1] + ((FIGHT_ACT if (opts or {}).get("act_for_me") else FIGHT_NO_ACT) if c == "fight" else ""))
+    return "(OOC: " + " ".join(out) + ")" if out else ""
 
 
 def _story(sid: str) -> dict:
@@ -368,6 +481,78 @@ def _save_turn(story: dict) -> dict:
             fresh.pop(k, None)
     store.save_story(fresh)
     return fresh
+
+
+def _clean_roll(r: dict | None) -> dict | None:
+    """A dice result sent by the page, made safe (it goes into the narrator's prompt)."""
+    if not isinstance(r, dict):
+        return None
+    try:
+        out = {"label": " ".join(str(r.get("label", "")).split())[:30], "value": float(r.get("value", 5)), "mod": int(r.get("mod", 0)), "die": int(r["die"]),
+               "rolls": [int(x) for x in (r.get("rolls") or [r["die"]])][:2], "adv": r.get("adv") if r.get("adv") in ("adv", "dis") else "", "total": int(r["total"]),
+               "dc": int(r["dc"]), "difficulty": " ".join(str(r.get("difficulty", "")).split())[:20], "outcome": str(r.get("outcome", "")),
+               "margin": int(r.get("margin", 0)), "auto": bool(r.get("auto"))}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if out["outcome"] not in ("critical success", "success", "partial success, at a cost", "failure", "critical failure") or not (1 <= out["die"] <= 20):
+        return None
+    return out
+
+
+def _hidden_notes(story: dict, beats_note: str, pend_pts: list, roll: dict | None) -> str:
+    """Everything the app adds invisibly to the player's move: due story beats, triggered lore, points the player spent, the dice outcome."""
+    return "\n\n".join(x for x in (beats_note, lore.note(story), tracker.spent_note(story, pend_pts), rules.roll_note(roll) if roll else "") if x)
+
+
+def _notification_events(s: dict, idx: int) -> bool:
+    """Key events announced in the reply's own notifications (Level 3 reached, Life lost, Feat recorded...) go on the player's card, with no AI call."""
+    evs = rules.key_events(s["turns"][idx]["text"])
+    name = prompting.player_name(s)
+    if not evs or not name:
+        return False
+    ch = next((c for c in s.get("cast", []) if c.get("player")), None) or next((c for c in s.get("cast", []) if c["name"].lower() == name.lower()), None)
+    if ch is None:
+        ch = _ensure_char(s, name, "")
+    ch["player"] = True
+    raw = s["turns"][idx]["text"]
+    m = re.search(r"Turn:\s*(\d+)", raw)
+    label = f"Turn {m.group(1)}" if m else f"Reply {(idx + 1) // 2}"
+    lst, changed = ch.setdefault("events", []), False
+    for e in evs:
+        if any(x["text"].lower() == e.lower() for x in lst[-10:]):
+            continue
+        lst.append(_ev(label, e, idx, True)); changed = True
+    del lst[:-MAX_EVENTS]
+    return changed
+
+
+def _after_reply_free(saved: dict) -> None:
+    """Work the app does itself after every reply, with no AI call: the format and number check, and the key events in the reply's notifications."""
+    try:
+        idx = len(saved["turns"]) - 1
+        changed = False
+        if saved.get("code_check", True):
+            issues = rules.check(saved, idx)
+            if issues:
+                saved["turns"][idx]["check"] = {"issues": issues, "code_issues": issues, "ts": time.time()}; changed = True
+        if _notification_events(saved, idx):
+            changed = True
+        if changed:
+            store.save_story(saved)
+    except Exception:
+        pass
+
+
+def _beats_persist(sid: str, story: dict) -> None:
+    """Keep which beats have gone out (their `fired` move) without overwriting anything else the player changed meanwhile."""
+    mine = {i["id"]: i.get("fired") for i in beats.get(story)["items"]}
+    fresh = _story(sid)
+    fb = beats.get(fresh)
+    if any(i.get("fired") != mine.get(i["id"], i.get("fired")) for i in fb["items"]):
+        for i in fb["items"]:
+            if i["id"] in mine:
+                i["fired"] = mine[i["id"]]
+        store.save_story(fresh)
 
 
 def _sse(obj: dict) -> str:
@@ -635,6 +820,19 @@ def create_story(body: StoryIn):
         s["auto_replies"] = body.auto_replies
     if body.rule_check is not None:
         s["rule_check"] = body.rule_check
+    if body.narrator_acts is not None:
+        s["narrator_acts"] = body.narrator_acts
+    if body.code_check is not None:
+        s["code_check"] = body.code_check
+    if body.format_fix is not None:
+        s["format_fix"] = body.format_fix
+    if body.clock is not None:
+        c = body.clock
+        s["clock"] = {"mode": c.get("mode") if c.get("mode") in ("auto", "on", "off") else "auto",
+                      "start": clock.fmt(clock.parse_time(c.get("start"))) if clock.parse_time(c.get("start")) is not None else "06:00",
+                      "minutes": max(1, min(int(c.get("minutes") or 30), 720))}
+        if not clock.is_on(s):
+            (s.get("tracker") or {}).pop("_clock", None)
     _apply_creation_fields(s, body)
     store.save_story(s)
     if body.nsfw:
@@ -676,6 +874,19 @@ def update_story(sid: str, body: StoryIn):
         s["auto_replies"] = body.auto_replies
     if body.rule_check is not None:
         s["rule_check"] = body.rule_check
+    if body.narrator_acts is not None:
+        s["narrator_acts"] = body.narrator_acts
+    if body.code_check is not None:
+        s["code_check"] = body.code_check
+    if body.format_fix is not None:
+        s["format_fix"] = body.format_fix
+    if body.clock is not None:
+        c = body.clock
+        s["clock"] = {"mode": c.get("mode") if c.get("mode") in ("auto", "on", "off") else "auto",
+                      "start": clock.fmt(clock.parse_time(c.get("start"))) if clock.parse_time(c.get("start")) is not None else "06:00",
+                      "minutes": max(1, min(int(c.get("minutes") or 30), 720))}
+        if not clock.is_on(s):
+            (s.get("tracker") or {}).pop("_clock", None)
     if body.nsfw is not None:
         s["nsfw"] = body.nsfw
     cast_before = body.cast
@@ -703,6 +914,27 @@ def update_player(sid: str, body: PlayerIn):
 
 
 @app.post("/api/stories/import")
+async def import_story_route(body: ImportIn):
+    """The same, from a summary. With no prompt and no story to copy it from, the AI writes one from the summary and the recent turns (provider/model pick the AI)."""
+    warnings = []
+    if not (body.base_prompt.strip() or body.source_story_id or body.into_story_id):
+        if not (body.summary.strip() or body.recent_turns.strip()):
+            raise HTTPException(400, "Give the story prompt, or a summary or some text for the AI to write one from.")
+        cfg = store.load_config()
+        prov, model = _pick(cfg, body.provider, body.model) if (body.provider and body.model) else _role(cfg, None, "recaps")
+        try:
+            d = await _derive_prompt(cfg, prov, model, body.summary, "", body.recent_turns[-6000:])
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+        body = body.model_copy(update={"prompt_derived": True, "base_prompt": d["prompt"], "title": body.title.strip() or d["title"], "subtitle": body.subtitle.strip() or d["subtitle"],
+                                       "avatar": {**body.avatar, **({"name": d["player_name"]} if d["player_name"] and not (body.avatar.get("name") or "").strip() else {})}})
+        warnings.append("No story prompt was given, so the AI wrote one from your summary. Read it and fix anything wrong under ✏️ Edit story, because the narrator follows it every turn."
+                        + ("" if (body.avatar.get("name") or "").strip() else " The summary does not say who the player is: set your character under 👤 Player."))
+    res = import_story(body)
+    res["warnings"] = warnings + res["warnings"]
+    return res
+
+
 def import_story(body: ImportIn):
     """Create a story that continues one played elsewhere: memory summary + latest status panel (+ optional recent turns)."""
     if body.into_story_id:
@@ -729,6 +961,8 @@ def import_story(body: ImportIn):
         s["use_state_block"] = src.get("use_state_block", True) if src else False
         _give_default_models(s)
     s["summary"] = body.summary.strip()
+    if body.prompt_derived:
+        s["prompt_derived"] = True
     turns, warnings = importer.parse_turns(body.recent_turns)
     panel = body.status_panel.strip()
     name = prompting.player_name(s)
@@ -898,6 +1132,9 @@ class ArtIn(BaseModel):
     scene_often: bool = False           # opt-in: the narrator adds a scene picture to most replies (Places pictures cover routine room-to-room moves)
     scene_where: str = "reply"          # where scene pictures show: "reply" (under the reply), "banner_top" / "banner_bottom" (a wide strip above / below the narration) or "panel" (the side panel's right-now card)
     extended_moods: bool = False        # opt-in: new characters get the extended set of mood pictures by default, and the narrator is reminded each turn (after the first) to use the full range
+    now_free: bool = False              # the "right now" card is filled from the narrator's portrait tags only (who and their mood): no AI call
+    scene_template: bool = False        # a scene picture's prompt is built from the reply's tags, place and text instead of asking the AI
+    action_moods: bool = True           # the narrator prefers the action mood pictures in fights, chases and (adult stories) intimate scenes
     exact_moods: bool = False           # opt-in: the narrator names the exact mood and only uses a listed one when it is an exact match (more "draw this mood" offers)
 
 
@@ -1467,7 +1704,7 @@ async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None
     prov = _maker_provider(cfg, s, ch, provider)
     mood = mood.strip().lower() or "default"
     look_of_mood = ((cfg.get("mood_looks") or {}).get(re.sub(r"\s*\d+$", "", mood)) or "")
-    if not provider and _is_explicit(mood + " " + look_of_mood, cfg) and (ns := _nsfw_provider(cfg, s)):
+    if not provider and (_is_explicit(mood + " " + look_of_mood, cfg) or (s.get("nsfw") and _mood_base(mood) in characters.ADULT_ONLY)) and (ns := _nsfw_provider(cfg, s)):
         prov = ns                # an explicit picture type (e.g. "nude", "aroused") in an adult story: the adult picture maker draws it
         _model_ctx.set(prov.get("model", ""))
     urls = _portrait_urls(ch, mood)
@@ -1548,6 +1785,7 @@ async def _events_after_turn(sid: str, idx: int, ts: float | None = None) -> Non
         raw = s["turns"][idx]["text"]
         text = _clean_for_scene(raw)
         names = [c["name"] for c in s["cast"] if re.search(rf"\b{re.escape(c['name'].split()[0])}\b", text, re.IGNORECASE)]
+        names = [n for n in names if not next((c.get("player") for c in s["cast"] if c["name"] == n), False)]       # the player's own events come from the notifications (free)
         if not names:
             return
         move = s["turns"][idx - 1]["text"] if idx >= 1 and s["turns"][idx - 1]["role"] == "user" else ""
@@ -1886,6 +2124,69 @@ async def suggest_bio(sid: str, slug: str):
     if not text:
         raise HTTPException(502, "The text model did not return a bio. Try again, or type one in.")
     return {"bio": text}
+
+
+SHEET_MIN_REPLIES = 15      # fewer narrator replies than this, or fewer appearances of the character than SHEET_MIN_MENTIONS: too early to fill a sheet from the story
+SHEET_MIN_MENTIONS = 5
+
+
+def _sheet_stats(s: dict, ch: dict) -> dict:
+    pat = re.compile(rf"\b{re.escape(ch['name'].split()[0])}\b", re.IGNORECASE)
+    replies = [t for t in s.get("turns", []) if t.get("role") == "assistant"]
+    mentions = sum(1 for t in replies if pat.search(t["text"]))
+    reasons = []
+    if len(replies) < SHEET_MIN_REPLIES:
+        reasons.append(f"only {len(replies)} narrator replies so far (at least {SHEET_MIN_REPLIES} are better)")
+    if mentions < SHEET_MIN_MENTIONS:
+        reasons.append(f"{ch['name']} appears in only {mentions} of them (at least {SHEET_MIN_MENTIONS} are better)")
+    return {"replies": len(replies), "mentions": mentions, "too_early": bool(reasons), "reasons": reasons}
+
+
+@app.get("/api/stories/{sid}/cast/{slug}/sheet-info")
+def sheet_info(sid: str, slug: str):
+    """How much story there is to fill a character's whole sheet from (free): the dialog warns when it is too early."""
+    s = _story(sid)
+    return _sheet_stats(s, _char(s, slug))
+
+
+SHEET_SYSTEM = (
+    "You fill in a story character's whole sheet from what the story itself has shown. Use ONLY what the material states or clearly implies; never invent. "
+    "A field the story does not support must be an empty string (or an empty list). Fields: "
+    "'appearance' = a purely visual description for a picture maker: apparent age, build, hair, eyes, face, usual clothing, distinguishing features; safe for work; "
+    "'personality' = one short line on how they act and speak; "
+    "'bio' = 3 to 5 sentences: who they are, their role, motives, history so far and key relationships; "
+    "'address' = who calls them what and how they address others, only if the story shows it (for example 'Most people say Warden; only old friends say Ottilie'); "
+    "'aka' = other names, nicknames or titles the story uses for them (a list); "
+    "'species' = only when they are not human (otherwise an empty string). "
+    "Keep what the CURRENT SHEET already says when the material agrees with it; correct it only when the story clearly shows otherwise. "
+    'Reply with ONLY JSON: {"appearance": "...", "personality": "...", "bio": "...", "address": "...", "aka": ["..."], "species": ""}.')
+
+
+@app.post("/api/stories/{sid}/cast/{slug}/sheet-suggest")
+async def suggest_sheet(sid: str, slug: str):
+    """Suggest every field of a character's sheet from the story so far (one text-model call). Nothing is saved: the player reviews each field first."""
+    s, cfg = _story(sid), store.load_config()
+    ch = _char(s, slug)
+    ctx = _event_context(s, ch["name"], limit=14000) or _context_about(s, ch["name"], limit=6000)
+    if not ctx:
+        raise HTTPException(404, f"The story text doesn't mention {ch['name']} yet, so there is nothing to fill the sheet from.")
+    cur = {k: ch.get(k, "") for k in ("appearance", "personality", "bio", "address", "species")}
+    cur["aka"] = ch.get("aka", [])
+    events = "\n".join(f"- {e.get('when', '')}: {e.get('text', '')}" for e in ch.get("events", [])[:30])
+    lines = "\n".join(prompt_lines(sid, slug)["lines"])
+    user = (f"Character: {ch['name']}\n\nCURRENT SHEET:\n{json.dumps(cur, ensure_ascii=False)}\n\nKEY EVENTS ALREADY LOGGED:\n{events or '(none)'}\n\n"
+            f"WHAT THE STORY PROMPT SAYS ABOUT THEM:\n{lines or '(nothing)'}\n\nWHAT THE STORY HAS SHOWN (passages mentioning them):\n{ctx}")
+    prov, model = _events_model(cfg, s, "character sheet")
+    out = await providers.complete(prov, model, SHEET_SYSTEM, [{"role": "user", "content": user}], temperature=0.2, max_tokens=1500, num_ctx=cfg["num_ctx"], **_extras(cfg))
+    j = _json_in(out)
+    if not isinstance(j, dict):
+        raise HTTPException(502, "The text model did not return a character sheet. Try again.")
+    one = lambda v, n: " ".join(str(v or "").split())[:n]
+    aka = [one(a, 40) for a in (j.get("aka") if isinstance(j.get("aka"), list) else []) if one(a, 40) and one(a, 40).lower() != ch["name"].lower()][:6]
+    species = one(j.get("species"), 40)
+    return {"fields": {"appearance": one(j.get("appearance"), 700), "personality": one(j.get("personality"), 300), "bio": one(j.get("bio"), 1000),
+                       "address": one(j.get("address"), 600), "aka": ", ".join(aka), "species": "" if _is_human(species) else species},
+            "current": {**{k: cur[k] for k in ("appearance", "personality", "bio", "address", "species")}, "aka": ", ".join(cur["aka"])}, **_sheet_stats(s, ch)}
 
 
 @app.get("/api/stories/{sid}/cast/{slug}/prompt-lines")
@@ -2250,7 +2551,7 @@ def discard_candidates(sid: str, slug: str):
 
 
 class DrawSetIn(BaseModel):
-    preset: str = "basic"            # basic / extended (editable in Settings) / match (the moods your other characters have)
+    preset: str = "basic"            # basic / extended / action / action_adult (editable in Settings) / match (the moods your other characters have)
     moods: list[str] | None = None   # or an explicit list
     provider: str | None = None
 
@@ -2265,6 +2566,8 @@ async def draw_mood_set(sid: str, slug: str, body: DrawSetIn):
         wanted = [m.strip().lower() for m in body.moods if m.strip()]
     elif body.preset == "match":
         wanted = characters.vocabulary_from_cast(s, slug)
+    elif body.preset == "action_adult" and not s.get("nsfw"):
+        raise HTTPException(400, "The adult action set is only for stories with adult content switched on (Settings → Story & narration).")
     else:
         wanted = [str(m).strip().lower() for m in (cfg.get("mood_sets") or characters.DEFAULT_SETS).get(body.preset, []) if str(m).strip()]   # the player's own lists: used as written
     todo = [m for m in dict.fromkeys(wanted) if m not in (ch.get("moods") or {})]
@@ -2357,6 +2660,39 @@ async def _describe_scene(s: dict, cfg: dict, turn_text: str) -> tuple[str, list
     return str(j["scene"]), [str(x) for x in j.get("characters", [])], moods
 
 
+_ACTION_WORDS = re.compile(r"\b(walk\w*|run\w*|ran|stand\w*|stood|sit\w*|sat|lean\w*|turn\w*|reach\w*|grab\w*|hold\w*|held|lift\w*|point\w*|smil\w*|frown\w*|glar\w*|laugh\w*|step\w*|kneel\w*|climb\w*|"
+                          r"swing\w*|strike\w*|struck|raise\w*|draw\w*|drew|open\w*|close\w*|push\w*|pull\w*|look\w*|watch\w*|cross\w*|fold\w*)\b", re.IGNORECASE)
+
+
+def _template_scene(s: dict, text: str) -> tuple[str, list[str], dict]:
+    """A scene description with no AI call (art.scene_template): who is shown (the narrator's portrait tags, else cast names in the reply) with their moods, the place (a place
+    tag or the Place tracker) and the most active narration sentence. Simpler than the model's, and free."""
+    tags = [(a.strip(), b.strip().lower()) for a, b in _PORTRAIT_TAG.findall(text)]
+    player = prompting.player_name(s).lower()
+    names, moods = [], {}
+    for n, m in tags:
+        if n.lower() != player and n not in names:
+            names.append(n)
+        moods[n.lower()] = re.sub(r"\s*\d+$", "", m)
+    clean = _clean_for_scene(text)
+    if not names:
+        names = [c["name"] for c in s.get("cast", []) if not c.get("player") and re.search(rf"\b{re.escape(c['name'].split()[0])}\b", clean, re.IGNORECASE)][:3]
+    place = ""
+    pm = re.findall(r"!\[\]\(place:([^)\n]+)\)", text)
+    if pm:
+        p = next((x for x in s.get("places", []) if x["name"].lower() == pm[-1].strip().lower()), None)
+        place = (p.get("description") or p["name"]) if p else pm[-1].strip()
+    else:
+        for f in tracker.active_fields(s):
+            if f["label"].strip().lower() in ("place", "location") and f["id"].split(".")[0] in ("scene", "me"):
+                place = str(((s.get("tracker") or {}).get(f["id"].split(".")[0]) or {}).get(f["id"].split(".")[1]) or "")
+    sents = [x.strip() for x in re.split(r"(?<=[.!?])\s+|\n+", re.sub(r"[\"“”][^\"“”]{0,400}[\"“”]", "", clean)) if 25 <= len(x.strip()) <= 260]
+    act = next((x for x in sents if _ACTION_WORDS.search(x) and any(n.split()[0].lower() in x.lower() for n in names)), None) or next((x for x in sents if _ACTION_WORDS.search(x)), sents[0] if sents else "")
+    who = ", ".join(f"{n}" + (f" ({moods[n.lower()]})" if moods.get(n.lower()) and moods[n.lower()] not in ("normal", "default") else "") for n in names[:3])
+    scene = " ".join(x for x in ((f"In {place}." if place else ""), (f"{who}." if who else ""), act) if x).strip()
+    return scene[:600], names[:3], moods
+
+
 TAG_QUALITY = "masterpiece, high score, great score, absurdres"
 TAG_NEGATIVE = ("lowres, bad anatomy, bad hands, text, error, missing finger, extra digits, cropped, worst quality, "
                 "low quality, low score, bad score, signature, watermark, blurry")
@@ -2377,10 +2713,46 @@ MOOD_LOOKS = {   # what to draw for common mood names (numbers like "angry 2" ar
     "cute": "cute pose, blushing, playful smile, winking or wide sparkling eyes, head tilted, hands near face",
     "dead": "dead: a lifeless body lying limp on the ground, eyes half-open and glassy, slack jaw, pale grey skin, limbs sprawled awkwardly",
     "zombie": "undead, pale grey skin, glowing red eyes, torn uniform, slack jaw, hunched lurching posture",
+    # ---- action moods (one character in the middle of physical action)
+    "strike": "throwing a fierce blow: a punch, kick or sword swing, body twisted into the strike, teeth gritted, eyes locked on the target, motion blur on the strike",
+    "guard": "guarding: bracing behind raised forearms or a shield, feet planted, eyes narrowed, flinching as the blow lands, debris flying",
+    "dodge": "dodging: twisting sharply out of the way of an attack, hair and clothes whipping, wide alert eyes, off-balance but fast",
+    "charge": "charging forward at a run, leaning into the sprint, mouth open in a shout, weapon raised or fists ready, wind in the hair",
+    "leap": "leaping through the air, limbs extended, weapon or fists ready, clothes and hair streaming, the ground far below",
+    "aim": "aiming a ranged weapon (bow, rifle, pistol or spell focus), one eye narrowed, steady grip, intense calm focus",
+    "cast": "casting a spell: hands raised and glowing with magical light, eyes lit, wind lifting hair and clothes, deep concentration",
+    "draw weapon": "drawing a weapon: hand on the hilt or grip, blade half out, narrowed eyes, low ready stance, tense",
+    "wounded": "badly wounded: clutching a bleeding side, grimacing in pain, torn dirty clothes, sweat, bracing on one knee or against a wall",
+    "knocked down": "knocked down: thrown backwards by a blow, mid-fall, mouth open in a gasp, arms flung out, dust and debris around",
+    "defeated": "defeated: on one knee, head bowed, weapon dropped or broken, battered and bruised, panting, hair hanging over the face",
+    "exhausted": "exhausted after the fight: bent forward with hands on knees, panting hard, sweat running down, hair stuck to the face",
+    "flee": "running for their life: sprinting, looking back over a shoulder in fear, hair and clothes streaming, desperate",
+    "sneak": "sneaking: crouched low and silent, one finger to the lips or a hand on a blade, eyes scanning the shadows",
+    "battle cry": "roaring a battle cry: head thrown back, mouth wide open, veins standing out, fist or weapon raised, fierce glare",
+    "victory": "triumphant after winning: fist or weapon raised high, fierce grin, chest heaving, standing over the battlefield",
+    # ---- intimate moods, softened (the adult versions below are used only in stories with adult content on)
+    "aroused": "flustered and blushing, flushed cheeks, nervous quick breathing, shy sideways glance",
+    "seductive": "confident flirtatious pose, sultry half-lidded gaze, soft smile, head tilted, leaning forward",
+    "undressing": "taking off a coat or jacket, hands at the collar, glancing aside",
+    "lingerie": "in a silky robe and sleepwear, hand on hip, soft bedroom light",
+    "showering": "stepping out of a steamy bathroom wrapped in a towel, wet hair, shoulders covered",
+    "bathing": "relaxing in a bubble bath, shoulders above the foam, steam, hair pinned up",
+    "nude": "wrapped in a bedsheet, bare shoulders, tasteful and fully covered",
+    "climaxing": "overwhelmed with joy, eyes shut, head thrown back, radiant smile",
+    "afterglow": "resting in bed, drowsy smile, tousled hair, blanket pulled up",
 }
 
 
 MOOD_LOOKS_ADULT = {   # stories with adult content on: the same picture types, shown without softening
+    "aroused": "aroused: flushed cheeks, parted lips, heavy-lidded eyes, quickened breathing, a hand at the throat or in the hair",
+    "seductive": "seductive pose: sultry half-lidded gaze, a knowing smile, head tilted, one shoulder bared, leaning toward the viewer",
+    "undressing": "undressing: pulling clothes off, shirt or dress half off, bare shoulders and chest, glancing at the viewer",
+    "lingerie": "wearing revealing lingerie, confident pose, hand on hip, soft bedroom light",
+    "showering": "in the shower, wet skin and hair, water running over bare shoulders and chest, steam, eyes closed",
+    "bathing": "relaxing in a bath, wet bare shoulders and chest above the water, steam, flushed cheeks, hair pinned up",
+    "nude": "nude, unclothed upper body, relaxed confident pose, soft light",
+    "climaxing": "in the throes of pleasure: eyes shut or rolled back, mouth open in a gasp, flushed skin, back arched, tangled hair",
+    "afterglow": "in the afterglow: lying back, flushed and tousled, a sheet pulled loosely over the body, drowsy smile, damp hair",
     "dead": "dead: a lifeless body lying in a pool of blood, a visible fatal wound, blood on the face and clothes, eyes half-open and glassy, slack jaw, pale grey skin, limbs sprawled awkwardly",
     "combat": "in the middle of a brutal fight: striking or lunging with a weapon or fists, body twisted in motion, teeth gritted, eyes locked on an enemy, cuts and blood spatter, sweat and dirt, torn clothes, motion on the strike",
 }
@@ -2391,8 +2763,8 @@ MOOD_FRAMING = {   # picture types that need a different frame than a chest-up p
 # Picture types that are a face and a feeling. Anything else (combat, dead, stripping, showering, running, sleeping...) is an ACTION picture: drawn as a
 # three-quarter shot that shows the action, with the face and upper body as the focus (and shown cropped to the upper body in the story).
 EXPRESSION_MOODS = {"default", "normal", "smile", "happy", "laugh", "laughing", "shy", "surprise", "surprised", "sulky", "fear", "scared", "sad", "angry", "scorn",
-                    "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "aroused", "worried", "confused", "bored", "disgusted",
-                    "embarrassed", "blush", "blushing", "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty", "seductive",
+                    "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "worried", "confused", "bored", "disgusted",
+                    "embarrassed", "blush", "blushing", "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty",
                     "calm", "serious", "thinking", "pout", "annoyed", "suspicious", "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie"}
 ACTION_FRAMING = ("Three-quarter shot that shows the whole action and the body, with the face, shoulders and hands as the focus in the upper half of the picture.")
 ACTION_FRAMING_TAGS = "cowboy shot, face focus, dynamic pose"
@@ -2551,8 +2923,42 @@ MOOD_TAGS = {   # the tag-style version of MOOD_LOOKS, so a mood portrait needs 
     "cute": "cute, blush, playful smile, wink, head tilt, hands near face",
     "dead": "dead, corpse, lifeless eyes, empty eyes, half-closed eyes, open mouth, pale skin, limp, sprawled",
     "zombie": "undead, grey skin, glowing red eyes, torn clothes, slack jaw, hunched, lurching",
+    "strike": "attacking, punching, kicking, sword swing, clenched teeth, glaring, dynamic pose, motion lines, motion blur",
+    "guard": "blocking, guarding, raised arms, crossed arms in front, bracing, narrowed eyes, flinching, debris",
+    "dodge": "dodging, leaning back, twisting body, wide eyes, hair flying, dynamic pose, motion lines",
+    "charge": "running, charging, leaning forward, open mouth, shouting, weapon raised, wind, motion lines, dynamic pose",
+    "leap": "jumping, leaping, midair, outstretched limbs, wind, flying hair, dynamic angle",
+    "aim": "aiming, holding weapon, one eye closed, focused, steady stance, serious",
+    "cast": "casting spell, magic, glowing hands, magic circle, glowing eyes, wind, floating hair, concentrating",
+    "draw weapon": "drawing weapon, hand on hilt, unsheathing, narrowed eyes, tense, ready stance",
+    "wounded": "injury, bleeding, clutching side, pain, grimace, torn clothes, dirt, sweat, kneeling on one knee",
+    "knocked down": "falling, knocked back, open mouth, outstretched arms, dust, debris, dynamic angle",
+    "defeated": "kneeling, head down, defeated, bruises, panting, hair over face, broken weapon",
+    "exhausted": "exhausted, panting, hands on knees, bent over, sweat, hair stuck to face, tired",
+    "flee": "running, fleeing, looking back, scared, wide eyes, hair flying, motion lines",
+    "sneak": "crouching, sneaking, finger to lips, shadows, narrowed eyes, tense",
+    "battle cry": "shouting, battle cry, open mouth, roaring, clenched fist, raised weapon, glaring, veins",
+    "victory": "triumphant, victory pose, raised fist, grin, panting, standing, wind",
+    "aroused": "blush, flushed face, shy, looking aside, nervous",
+    "seductive": "smile, half-closed eyes, looking at viewer, head tilt, confident",
+    "undressing": "taking off jacket, hands at collar, looking aside",
+    "lingerie": "robe, pajamas, hand on hip, bedroom",
+    "showering": "towel, wet hair, steam, bathroom, covered",
+    "bathing": "bubble bath, steam, wet hair, foam",
+    "nude": "wrapped in sheet, bedsheet, bare shoulders, tasteful, covered",
+    "climaxing": "happy, laughing, closed eyes, head back, big smile",
+    "afterglow": "lying, bed, blanket, messy hair, smile, half-closed eyes",
 }
-MOOD_TAGS_ADULT = {"dead": "dead, corpse, blood, blood pool, blood on face, wound, injury, lifeless eyes, empty eyes, pale skin, limp, sprawled",
+MOOD_TAGS_ADULT = {"aroused": "blush, flushed face, parted lips, heavy-lidded eyes, panting, looking at viewer",
+                   "seductive": "seductive smile, half-closed eyes, looking at viewer, head tilt, bare shoulder, leaning forward",
+                   "undressing": "undressing, clothes pull, shirt lift, bare shoulders, looking at viewer",
+                   "lingerie": "lingerie, hand on hip, looking at viewer, bedroom",
+                   "showering": "shower, wet, wet hair, steam, water drops, bare shoulders, closed eyes",
+                   "bathing": "bath, bathing, wet, steam, bare shoulders, water, flushed",
+                   "nude": "nude, bare shoulders, looking at viewer, soft lighting",
+                   "climaxing": "ahegao, closed eyes, open mouth, blush, sweat, arched back, flushed",
+                   "afterglow": "lying, bed, blush, sweat, messy hair, sheet, smile, half-closed eyes",
+                   "dead": "dead, corpse, blood, blood pool, blood on face, wound, injury, lifeless eyes, empty eyes, pale skin, limp, sprawled",
                    "combat": "fighting, attacking, lunging, weapon swing, clenched teeth, glaring, blood, blood splatter, cuts, injury, battle damage, torn clothes, dirt, sweat, motion lines"}
 _SUBJECT_TAG = re.compile(r"^(\d+(girl|boy|girls|boys|other|others)|solo|no humans)$")
 _EXPRESSION_TAG = re.compile(r"expression|smil|frown|pout|blush|looking|mouth|upper body|portrait|pose|standing|sitting|arms |hands|framing|close-up|wide shot", re.IGNORECASE)
@@ -2701,6 +3107,9 @@ async def illustrate(sid: str, body: IllustrateIn):
         raise HTTPException(400, "There is no narrator reply to illustrate yet.")
     turn = s["turns"][idx]
     scene, names, hints = (body.scene or turn.get("scene") or "").strip(), body.characters, {}
+    if not scene and (s.get("art") or {}).get("scene_template"):         # no AI call: built from the reply's portrait tags, place and text
+        scene, found, hints = _template_scene(s, turn["text"])
+        names = names or found
     if not scene:
         scene, found, hints = await _describe_scene(s, cfg, turn["text"])
         names = names or found
@@ -3402,6 +3811,7 @@ async def turn(sid: str, body: TurnIn):
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "Empty input")
+    _command_note(story, body.cmds, body.cmd_opts)       # refuses "adult" while the story's adult content is off, before anything starts
 
     async def gen():
         usage.set_ctx(sid, "story narration")
@@ -3427,10 +3837,26 @@ async def turn(sid: str, body: TurnIn):
                 for im in [i for a in pend.get("attempts", []) for i in a.get("images", [])]:
                     _delete_image_file(im.get("url", ""))
                 pend = None
-            story["turns"].append({"role": "user", "text": text, "ts": time.time()})
-            built = prompting.build(story)
+            cmds = [c for c in dict.fromkeys(body.cmds or []) if c in COMMANDS][:3]
+            cmd_note = _command_note(story, cmds, body.cmd_opts)
+            tr_ = story.setdefault("tracker", tracker.blank())
+            pend_pts = tr_.pop("_spent", [])               # points the player spent since the last move: the narrator is told the final numbers
+            tr_.pop("_lock", None)
+            if pend_pts and (pf_ := tracker.points_field(story)):
+                psec_, pk_ = pf_["id"].split(".", 1)
+                after_ = tracker._num(tr_[psec_].get(pk_))
+                tr_["_lock"] = {"stats": {r["id"]: tracker._num(tr_[r["id"].split(".", 1)[0]].get(r["id"].split(".", 1)[1])) for r in pend_pts if r["n"] > 0},
+                                "points_before": (after_ or 0) + sum(r["n"] for r in pend_pts), "points_after": after_}
+            roll = _clean_roll(body.roll) if body.roll else (rules.auto_roll(story, text) if (rules.dice_mode(story) == "auto" and not cmds) else None)
+            story["turns"].append({"role": "user", "text": text, "ts": time.time(), **({"cmds": cmds, "cmd_opts": {"act_for_me": bool((body.cmd_opts or {}).get("act_for_me"))}} if cmds else {}),
+                                   **({"pts": pend_pts} if pend_pts else {}), **({"roll": roll} if roll else {})})
+            beats_note = beats.prepare(story, beats.moves(story))       # story beats that are due (hidden from the player; sent with this request only)
+            _beats_persist(sid, story)
+            built = prompting.build(story, beats_note=_hidden_notes(story, beats_note, pend_pts, roll))
             usage.set_ctx(sid, "story narration", why=_cache_why(sid, built, cfg))
             system, messages = built.request()
+            if cmd_note and messages and messages[-1]["role"] == "user":
+                messages[-1]["content"] += "\n\n" + cmd_note
             if body.note.strip() and messages and messages[-1]["role"] == "user":
                 messages[-1]["content"] += ("\n\n(OOC: This is a rewrite of your previous reply to the message above, which the player discarded. "
                                            "Write the reply again with these changes: " + body.note.strip()[:1500] + ")")
@@ -3451,14 +3877,19 @@ async def turn(sid: str, body: TurnIn):
             if not narration:
                 hint = " It spent its whole reply budget thinking: raise Max reply tokens or turn Claude thinking off in Settings." if use.get("thinking") else ""
                 raise providers.ProviderError("The model returned an empty reply." + hint)
+            untidied, tidy_notes = narration, []
+            if story.get("format_fix", True):
+                narration, tidy_notes = rules.tidy(story, narration)          # a stray or doubled status line is put where the story prompt wants it (free)
             story["turns"].append(
                 {"role": "assistant", "text": narration, "ts": time.time(), "model": f"{prov['id']}/{model}", "before": before, "cast_before": cast_before,
-                 "usage": use, **({"scene": scene} if scene else {}), **({"attempts": pend["attempts"], "attempt_no": 1 + max(a.get("attempt_no", 0) for a in pend["attempts"])} if pend else {})}
+                 "usage": use, **({"tidied": tidy_notes, "untidied": untidied} if tidy_notes else {}), **({"scene": scene} if scene else {}), **({"attempts": pend["attempts"], "attempt_no": 1 + max(a.get("attempt_no", 0) for a in pend["attempts"])} if pend else {})}
             )
             story.pop("retry_pending", None)
             prompting.apply_state(story, upd)
             got_panel = tracker.update_from_reply(story, narration, len(story["turns"]) // 2)
+            clock.advance(story, len(story["turns"]) // 2)        # the world clock moves on (a no-op when it is off, or already moved by the panel update)
             saved = _save_turn(story)
+            _after_reply_free(saved)
             _maybe_track_with_ai(saved, len(saved["turns"]) - 1, got_panel)
             _start_auto_backdrop(saved["id"])
             _start_now(saved["id"])
@@ -3471,6 +3902,7 @@ async def turn(sid: str, body: TurnIn):
             _note_cache_use(saved["id"], prov, model, cfg, use)
             yield _sse({"t": "done", "story": saved})
         except Exception as e:  # shown to the player; the turn is not saved
+            bugreport.note("turn", str(e) or e.__class__.__name__, story=sid, error=e.__class__.__name__)
             yield _sse({"t": "error", "v": str(e) or e.__class__.__name__})
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
@@ -3478,7 +3910,7 @@ async def turn(sid: str, body: TurnIn):
 
 # ---------------- share packs: prompt + cast + art settings, no save ----------------
 PACK_FIELDS = ("title", "subtitle", "description", "base_prompt", "opening", "opening_in_context", "use_state_block", "art", "art_dismissed", "group_cast",
-               "prologue", "opening_options", "endings", "sidebar")
+               "prologue", "opening_options", "endings", "sidebar", "beats", "lore")
 
 
 @app.get("/api/stories/{sid}/pack")
@@ -3487,6 +3919,11 @@ def export_pack(sid: str, pictures: str = "all", avatar: int = 0, webp: int = 0)
     trackers, endings, art settings, cover, intro panels and backdrop. It never contains turns, memory, notes (your avatar sheet only if avatar=1, text only), API keys or usage. pictures = none | normal | all."""
     s = _story(sid)
     meta = {k: s.get(k) for k in PACK_FIELDS}
+    b = beats.get(s)
+    meta["beats"] = {"on": b["on"], "hold": b["hold"], "lookahead": b["lookahead"], "extracted": b["extracted"],
+                     "items": [{k: it.get(k, "") for k in ("id", "title", "text", "field", "op", "value", "source", "off")} for it in b["items"]]}   # never which beats have gone out
+    lb = lore.get(s)
+    meta["lore"] = {"on": lb["on"], "items": [{k: it.get(k, "") for k in ("id", "title", "keys", "text", "always", "on", "priority")} for it in lb["items"]]}
     meta["format"] = "storyteller-pack-2"
     meta["app_version"] = APP_VERSION
     meta["cast"], files = [], []
@@ -3670,7 +4107,7 @@ async def import_pack(request: Request):
     s = store.new_story(meta.get("title") or "Shared story", meta.get("subtitle", ""), meta.get("base_prompt", ""))
     sid = s["id"]
     for k in PACK_FIELDS:
-        if meta.get(k) is not None and k not in ("title", "subtitle", "base_prompt", "sidebar"):
+        if meta.get(k) is not None and k not in ("title", "subtitle", "base_prompt", "sidebar", "beats", "lore"):
             s[k] = meta[k]
     save_file = _pack_saver(z)
     s["cast"] = [_pack_char(c, sid, save_file) for c in meta.get("cast", []) if isinstance(c, dict) and c.get("name")]
@@ -3682,6 +4119,13 @@ async def import_pack(request: Request):
     _pack_places(meta, s, save_file)
     if (sb := _pack_sidebar(meta)):
         s["sidebar"] = sb
+    if isinstance(meta.get("lore"), dict):        # the author's lore entries
+        s["lore"] = {"on": bool(meta["lore"].get("on", True)), "items": lore.clean_list(meta["lore"].get("items"))}
+    if isinstance(meta.get("beats"), dict):       # the author's story beats (a package never says which have gone out)
+        pb, nb = meta["beats"], beats.default()
+        nb.update({"on": bool(pb.get("on", True)), "hold": max(1, min(int(pb.get("hold") or 3), 12)), "lookahead": bool(pb.get("lookahead", True)), "extracted": bool(pb.get("extracted", True))})
+        nb["items"] = [{**beats.clean_item(i), "fired": None} for i in (pb.get("items") or []) if isinstance(i, dict)][:beats.MAX_ITEMS]
+        s["beats"] = nb
     if isinstance(meta.get("starter_avatar"), dict) and (sheet := _clean_sheet(meta["starter_avatar"])):
         s["avatar"], s["player_name"] = sheet, sheet.get("name", "")
     _give_default_models(s)
@@ -3710,6 +4154,13 @@ async def update_from_pack(sid: str, request: Request, parts: str = "text,tracke
             if meta.get(k) is not None:
                 s[k] = meta[k]
         changed.append("story text")
+        if isinstance(meta.get("lore"), dict):        # lore entries the game does not have yet are added (yours are never overwritten)
+            lb = lore.get(s)
+            have = {i["title"].lower() for i in lb["items"]}
+            new = [i for i in lore.clean_list(meta["lore"].get("items")) if i["title"].lower() not in have]
+            if new:
+                lb["items"] += new
+                changed.append(f"{len(new)} lore entries")
     if "trackers" in want and (sb := _pack_sidebar(meta)):
         s["sidebar"] = {**(s.get("sidebar") or {}), **sb}
         changed.append(f"{len(sb['custom'])} trackers")
@@ -4337,9 +4788,30 @@ def lan_status(request: Request):
 
 @app.post("/api/lan/new-pin")
 def lan_new_pin(request: Request):
-    """A new PIN (phones then have to enter it again after the next restart)."""
+    """A new PIN (phones then have to enter it again after the next restart); every remembered device is forgotten."""
     _local_only(request, "The PIN can only be changed")
+    _dev_load().clear()
+    _dev_save()
     return {"pin": _lan_pin(new=True)}
+
+
+@app.get("/api/lan/devices")
+def lan_devices(request: Request):
+    """The devices that entered the PIN and are remembered (this computer only)."""
+    _local_only(request, "Remembered devices can only be seen")
+    return [{"id": k[:12], "name": v.get("name", "Device"), "added": v.get("added", 0), "seen": v.get("seen", 0), "ip": v.get("ip", "")}
+            for k, v in sorted(_dev_load().items(), key=lambda kv: -kv[1].get("seen", 0))]
+
+
+@app.delete("/api/lan/devices/{dev_id}")
+def lan_forget_device(dev_id: str, request: Request):
+    """Forget one remembered device (it has to enter the PIN again)."""
+    _local_only(request, "Remembered devices can only be changed")
+    d = _dev_load()
+    for k in [k for k in d if k.startswith(dev_id)]:
+        del d[k]
+    _dev_save()
+    return {"ok": True}
 
 
 @app.post("/api/quit")
@@ -4805,6 +5277,29 @@ def _set_backdrop(sid: str, url: str, name: str, source: str, base: str = "", mo
     store.save_story(s)
 
 
+def _free_place(s: dict, last: str, places: dict, cache: dict) -> str:
+    """The key of a known location this reply is set in, found without an AI: a place tag, else the Place tracker's value, else the one known place named in the reply's
+    opening words. "" when unsure (then the helper model is asked)."""
+    usable = lambda k: k in places or (k in cache and not cache[k].get("moment") and cache[k].get("url"))
+    for t in reversed(re.findall(r"!\[\]\(place:([^)\n]+)\)", last)):
+        if usable(_bg_key(t.strip())):
+            return _bg_key(t.strip())
+    tr = s.get("tracker") or {}
+    for f in tracker.active_fields(s):
+        if f["label"].strip().lower() in ("place", "location", "where", "setting") and f["id"].split(".")[0] in ("scene", "me"):
+            val = (tr.get(f["id"].split(".")[0]) or {}).get(f["id"].split(".")[1])
+            if val:
+                k = _bg_key(str(val))
+                if usable(k):
+                    return k
+                hits = [x for x in list(places) + list(cache) if usable(x) and (x in k or k in x)]
+                if len(set(hits)) == 1:
+                    return hits[0]
+    head = _clean_for_scene(last)[:300].lower()
+    hits = {k for k in list(places) + list(cache) if usable(k) and k and re.search(r"\b" + re.escape(k) + r"\b", head)}
+    return next(iter(hits)) if len(hits) == 1 else ""
+
+
 async def _auto_backdrop(sid: str) -> None:
     """After a reply (opt-in art.auto_backdrop, and only while the screen backdrop is shown): the helper model reads the reply and says where it takes place.
     A fixed Places picture or an earlier drawn backdrop for that location is used as it is; a new location gets a fresh one from the backdrop maker. With
@@ -4826,6 +5321,14 @@ async def _auto_backdrop(sid: str) -> None:
         cur_base, cur_moment = cur.get("base") or cur.get("name", ""), cur.get("moment", "")
         if _bg_quiet(last, known, cur_base, bool(cur.get("url")), dynamic):
             return                     # nothing in the reply suggests a move or a dramatic moment: no model call
+        if not dynamic and (fk := _free_place(s, last, places, cache)):          # a place tag, the Place tracker or the opening words name a known location: no model call
+            if fk in places:
+                fname, furl, fsrc = places[fk]["name"], places[fk]["url"], "place"
+            else:
+                fname, furl, fsrc = cache[fk]["name"], cache[fk]["url"], "auto"
+            if not (_bg_key(cur_base) == _bg_key(fname) and not cur_moment and cur.get("url")):
+                _set_backdrop(sid, furl, fname, fsrc, base=fname)
+            return
         prov, model = _role(cfg, s, "small", "background")
         ask = ("Known locations: " + (", ".join(known) or "none") + f"\nCurrent location: {cur_base or 'none yet'}"
                + (f" (currently showing the moment: {cur_moment})" if cur_moment else "") + "\n\nLATEST REPLY:\n" + _clean_for_scene(last)[-3500:])
@@ -4949,6 +5452,15 @@ async def _update_now(sid: str) -> None:
             return cast.get(n) or next((v for k, v in cast.items() if k.split()[0] == n.split()[0]), "") if n else ""
         tags = [(canon(a), b.strip()) for a, b in _PORTRAIT_TAG.findall(last)]
         tags = [(n, m) for n, m in tags if n]
+        if (s.get("art") or {}).get("now_free"):          # tags only: who and their mood come from the narrator's own portrait tags, with no AI call
+            if tags:
+                s2 = _story(sid)
+                old_now = s2.get("now") or {}
+                same = old_now.get("name") == tags[-1][0]
+                s2["now"] = {"name": tags[-1][0], "mood": tags[-1][1].lower().strip()[:30], "doing": old_now.get("doing", "") if same else "", "wearing": old_now.get("wearing", "") if same else "",
+                             "turn": len(s2["turns"]), **{k: old_now[k] for k in ("image", "image_key") if old_now.get(k)}}
+                store.save_story(s2)
+            return
         hint = f"Hint from the narrator's portrait tags (the last one is the latest): {tags[-1][0]} looks {tags[-1][1]}." if tags else ""
         prev = s.get("now") or {}
         prov, model = _role(cfg, s, "small", "side panel card")
@@ -5113,7 +5625,8 @@ async def _rule_check(sid: str, idx: int, ts: float | None) -> None:
         issues = [" ".join(str(x).split())[:240] for x in (j.get("issues") or [])][:3] if isinstance(j, dict) else []
         s = _story(sid)        # freshest copy
         if idx < len(s["turns"]) and s["turns"][idx].get("ts") == ts:
-            s["turns"][idx]["check"] = {"issues": issues, "ts": time.time()}
+            code = (s["turns"][idx].get("check") or {}).get("code_issues", [])
+            s["turns"][idx]["check"] = {"issues": (code + [i for i in issues if i not in code])[:6], "code_issues": code, "ts": time.time()}
             store.save_story(s)
     except Exception:
         pass
@@ -5605,12 +6118,21 @@ class ImportTextIn(BaseModel):
 
 
 def _chunks(text: str, size: int = 14000) -> list[str]:
+    """Cut text into parts of about `size` characters at paragraph breaks (a paragraph that is too long is cut at a line end or a sentence end)."""
+    def cut(para: str) -> int:
+        window = para[:size]
+        for sep in ("\n", ". ", "! ", "? ", " "):
+            k = window.rfind(sep, size // 2)
+            if k > 0:
+                return k + len(sep)
+        return size
     out, cur = [], ""
     for para in re.split(r"\n\s*\n", text):
-        while len(para) > size:             # one enormous paragraph
+        while len(para) > size:             # one enormous paragraph (or a text with no blank lines)
             if cur:
                 out.append(cur); cur = ""
-            out.append(para[:size]); para = para[size:]
+            k = cut(para)
+            out.append(para[:k]); para = para[k:]
         if len(cur) + len(para) + 2 > size and cur:
             out.append(cur); cur = ""
         cur += ("\n\n" if cur else "") + para
@@ -5621,21 +6143,46 @@ def _chunks(text: str, size: int = 14000) -> list[str]:
 
 _INFO_RE = re.compile(r"```info\b.*?```", re.IGNORECASE | re.DOTALL)
 
+DERIVE_PROMPT_SYSTEM = (
+    "You are given a story that was played elsewhere (an interactive story narrated by an AI, or a story told as plain text): a summary of what happened, the beginning, and the most recent text. "
+    "It comes without a story prompt. Write the story prompt a narrator AI needs to continue it well, in second person to the narrator, with short headings and bullet points: "
+    "the opening line (who the narrator is and who the player is; write {user} for the player's character), World (concrete facts the text shows: places, rules, powers, technology, tone), "
+    "Main characters (name, role, how they talk, what they want, their relationship to {user}; only characters in the text), The player ({user}'s role and situation now), "
+    "Rules (rules and consistency facts the text clearly establishes, secrets and open plot threads), Writing style (person, tense, typical reply length, tone, how dialogue is set out, "
+    "and any recurring status line or format used in the text, copied exactly), and Where the story stands (one short paragraph). "
+    "Use ONLY what the text shows; never invent plot, characters or rules. Never describe what {user} says, thinks or does. About 600 to 1500 words. "
+    "Also choose a title (two to five words), a one-line subtitle, and the player character's name if the text makes it clear (otherwise an empty string). "
+    'Reply with ONLY JSON: {"title": "...", "subtitle": "...", "player_name": "...", "prompt": "..."}.')
+
+
+async def _derive_prompt(cfg: dict, prov, model, summary: str, opening: str, recent: str) -> dict:
+    """A story prompt written from the story itself (for a save brought over from another app that has none)."""
+    usage.set_ctx(None, "import prompt")
+    user = f"SUMMARY OF WHAT HAPPENED:\n{summary[:14000] or '(none)'}\n\nTHE BEGINNING:\n{opening}\n\nTHE MOST RECENT TEXT:\n{recent}"
+    out = await providers.complete(prov, model, DERIVE_PROMPT_SYSTEM, [{"role": "user", "content": user}], temperature=0.3, max_tokens=4000, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+    j = _json_in(out)
+    if not isinstance(j, dict) or len(str(j.get("prompt", "")).strip()) < 200:
+        raise RuntimeError("The AI could not write a story prompt from this text. Paste a prompt yourself, or pick a different AI and try again.")
+    return {"prompt": str(j["prompt"]).strip(), "title": " ".join(str(j.get("title", "")).split())[:80] or "Imported story", "subtitle": " ".join(str(j.get("subtitle", "")).split())[:160],
+            "player_name": " ".join(str(j.get("player_name", "")).split())[:60]}
+
 
 @app.post("/api/stories/import-text")
 async def import_story_text(body: ImportTextIn):
     """Import a whole story played elsewhere. A background job summarizes it in parts with the chosen AI, then builds the story."""
     cfg = store.load_config()
     src = _story(body.source_story_id) if body.source_story_id else None
-    if not (body.base_prompt.strip() or src or body.into_story_id):
-        raise HTTPException(400, "Give the story prompt directly or pick a story to copy it from")
+    derive = not (body.base_prompt.strip() or src or body.into_story_id)       # no prompt at all (text brought from another app): the AI writes one from the text
     if len(body.text.strip()) < 20:
         raise HTTPException(400, "Paste the story text first.")
     prov, model = _pick(cfg, body.provider, body.model)
-    text = body.text.strip()
-    recent, warnings = [], []
-    if importer._LABEL.search(text):                       # labelled PLAYER:/NARRATOR: transcript
-        turns, warnings = importer.parse_turns(text)
+    text, export_notes = importer.normalize_export(body.text.strip())          # a JSON / JSONL chat export (ChatGPT, Claude, SillyTavern...) becomes a PLAYER:/NARRATOR: transcript
+    text = text.strip()
+    recent, warnings = [], list(export_notes)
+    synthetic_tail = False
+    if importer.is_labelled(text):                         # labelled PLAYER:/NARRATOR: transcript (also You:/Assistant:, Human:/AI: ... as other apps write them)
+        turns, parse_warnings = importer.parse_turns(text)
+        warnings = list(export_notes) + parse_warnings
         keep = max(2, min(body.keep_last, len(turns)))
         keep -= keep % 2
         if keep and len(turns) > keep and turns[-keep]["role"] != "user":
@@ -5643,7 +6190,9 @@ async def import_story_text(body: ImportTextIn):
         older, recent = turns[:-keep] if keep else turns, turns[-keep:] if keep else []
         source = "\n\n".join(("PLAYER: " if t["role"] == "user" else "NARRATOR: ") + t["text"] for t in older)
     else:
-        source = text
+        source, tail = importer.split_tail(text)           # plain prose: the last paragraphs stay word for word as the scene in progress, the rest is summarized
+        if tail:
+            recent, synthetic_tail = [{"role": "assistant", "text": tail}], True
     panel = body.status_panel.strip()
     if not panel:
         found = _INFO_RE.findall(text)
@@ -5659,11 +6208,21 @@ async def import_story_text(body: ImportTextIn):
             summary = (await providers.complete(prov, model, prompting.summary_system(), [{"role": "user", "content": f"EXISTING SUMMARY:\n{summary or '(none yet)'}\n\nNEW EVENTS:\n{part}\n\nWrite the updated summary."}],
                                                 temperature=0.3, max_tokens=3500, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})).strip()
             j["done"] = i + 1
+        title, subtitle, avatar, base_prompt, notes = body.title, body.subtitle, dict(body.avatar), body.base_prompt, []
+        if derive:
+            j["current"] = "Writing a story prompt from the text"
+            d = await _derive_prompt(cfg, prov, model, summary, text[:5000], text[-6000:])
+            base_prompt, title, subtitle = d["prompt"], title.strip() or d["title"], subtitle.strip() or d["subtitle"]
+            if d["player_name"] and not (avatar.get("name") or "").strip():
+                avatar["name"] = d["player_name"]
+            notes.append("No story prompt was given, so the AI wrote one from your text. Read it and fix anything wrong under ✏️ Edit story, because the narrator follows it every turn."
+                         + ("" if avatar.get("name") else " The text does not say who the player is: set your character under 👤 Player."))
         j["current"] = "Building the story"
-        res = import_story(ImportIn(title=body.title, subtitle=body.subtitle, source_story_id=body.source_story_id, into_story_id=body.into_story_id, base_prompt=body.base_prompt,
-                                    avatar=body.avatar, user_notes=body.user_notes, summary=summary, status_panel=panel,
+        res = import_story(ImportIn(prompt_derived=derive, title=title, subtitle=subtitle, source_story_id=body.source_story_id, into_story_id=body.into_story_id, base_prompt=base_prompt,
+                                    avatar=avatar, user_notes=body.user_notes, summary=summary, status_panel=panel,
                                     recent_turns="\n\n".join(("PLAYER: " if t["role"] == "user" else "NARRATOR: ") + t["text"] for t in recent)))
-        j["result"] = {"story_id": res["story"]["id"], "warnings": warnings + res["warnings"], "summary_chars": len(summary)}
+        rw = [w for w in res["warnings"] if not (synthetic_tail and w.startswith("Recent turns started with a narrator message"))]
+        j["result"] = {"story_id": res["story"]["id"], "warnings": notes + warnings + rw, "summary_chars": len(summary), "prompt_written": derive}
 
     async def run() -> None:
         try:
@@ -5688,3 +6247,646 @@ def index():
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 app.mount("/portraits", StaticFiles(directory=store.PORTRAITS), name="portraits")
 app.mount("/images", StaticFiles(directory=store.IMAGES), name="images")
+
+
+# ---------------- continuity check: audit the whole story for contradictions, repair them minimally ----------------
+CONTINUITY_SYSTEM = (
+    "You are the continuity editor of an interactive story. You are given the story's rules (prompt), character cards, pinned facts, the memory summary and the story's "
+    "turns, each marked [#n NARRATOR] or [#n PLAYER]. Audit EVERY turn you are given, not just the latest. Track characters, names, appearances, ages, personalities, "
+    "relationships, locations, the timeline, events, powers, items, factions, lore, secrets, who knows what, injuries, deaths and the story's rules. "
+    "Find ALL real contradictions: accidental retcons, timeline or location errors, impossible knowledge, character conflicts, broken cause and effect, "
+    "and violations of the story's own rules or pinned facts. "
+    "PRESERVE intentional changes (a death, a healed wound, new clothes, ageing, a revealed secret, a deliberate correction). "
+    "When two statements conflict, prefer: explicit canon (the story prompt, pinned facts, character cards), then later deliberate corrections, then earlier established facts. "
+    "Do NOT flag style, taste, pacing or things the story never stated. "
+    "Repair each conflict with the SMALLEST logical change, and keep important content. A repair edits one NARRATOR turn: give 'find', a short passage copied EXACTLY, "
+    "character for character, from that turn (it must occur in that turn exactly once, 5 to 300 characters), and 'replace', its corrected wording. "
+    "If a repair would need a change to a PLAYER turn, to several turns, or to a rule or card, set fix to null (the player decides). "
+    "If the conflict is in the memory summary, use target \"summary\" with 'find'/'replace' copied from the summary. "
+    "Optionally give 'canon': one short sentence stating the corrected fact, to be pinned so it stays true. "
+    'Reply with ONLY JSON: {"issues": [{"turns": [n, ...], "kind": "<character|timeline|location|knowledge|item|injury|relationship|rule|other>", '
+    '"severity": "<major|minor>", "problem": "<one or two sentences naming what conflicts with what>", '
+    '"fix": {"target": "turn", "turn": n, "find": "...", "replace": "..."} or null, "canon": "<optional>"}], "notes": "<one short sentence>"} '
+    "(at most 25 issues, most important first; an empty list when the story is consistent).")
+
+_cont_jobs: dict[str, str] = {}      # story id -> running job id
+
+
+def _continuity_parts(s: dict, budget: int) -> tuple[str, list[str]]:
+    """The fixed context (rules, cards, pinned facts, summary) and the turns cut into parts of about `budget` characters (the last two turns of a part repeat in the next)."""
+    cast = "\n".join(f"- {c.get('name', '')}" + (f" ({c['species']})" if c.get("species") else "") + f": {c.get('appearance', '')[:400]} {c.get('bio', '')[:500]}".rstrip() for c in s.get("cast", []))
+    head = (f"STORY RULES (the story prompt):\n{s.get('base_prompt', '')[:14000]}\n\nCHARACTER CARDS:\n{cast or '(none)'}\n\n"
+            f"PINNED FACTS:\n" + ("\n".join(s.get("pinned_facts") or []) or "(none)") + (f"\n\nLORE ENTRIES (the story's own world notes; flag text that contradicts them):\n" + "\n".join(f"- {i['title']}: {i['text']}" for i in lore.get(s)["items"] if i.get("on", True))[:6000] if lore.get(s)["items"] else "") + (f"\n\nPLANNED STORY BEATS (the story's own schedule; flag a story that contradicts or has clearly drifted from it):\n{beats.prompt_context(s)}" if beats.prompt_context(s) else "") + f"\n\nMEMORY SUMMARY (older events; it may itself contain errors):\n{(s.get('summary') or '(none)')[:9000]}")
+    lines = [f"[#{i} {'NARRATOR' if t['role'] == 'assistant' else 'PLAYER'}] {t['text']}" for i, t in enumerate(s["turns"])]
+    parts, cur, size = [], [], 0
+    for ln in lines:
+        if cur and size + len(ln) > budget:
+            parts.append("\n\n".join(cur))
+            cur = cur[-2:] if len(cur) > 2 else []
+            size = sum(len(x) for x in cur)
+        cur.append(ln[:budget]); size += len(cur[-1])
+    if cur:
+        parts.append("\n\n".join(cur))
+    return head, parts
+
+
+def _continuity_budget(prov: dict, cfg: dict, head: str) -> int:
+    if prov.get("type") == "ollama":        # a local model has a small window: cut the turns to fit it
+        return max(6000, int(cfg.get("num_ctx", 8192)) * 3 - len(head) - 9000)
+    return 300000
+
+
+@app.get("/api/stories/{sid}/continuity/estimate")
+def continuity_estimate(sid: str, role: str = "story"):
+    s, cfg = _story(sid), store.load_config()
+    prov, model = _role(cfg, s, "story" if role != "recaps" else "recaps", "continuity check")
+    head, parts = _continuity_parts(s, 300000)
+    head, parts = _continuity_parts(s, _continuity_budget(prov, cfg, head))
+    chars = sum(len(p) + len(head) for p in parts)
+    return {"model": f"{prov.get('name', prov['id'])}: {model}", "parts": len(parts), "tokens": chars // 4, "turns": len(s["turns"])}
+
+
+class ContinuityIn(BaseModel):
+    role: str = "story"
+
+
+@app.post("/api/stories/{sid}/continuity/audit")
+async def continuity_audit(sid: str, body: ContinuityIn):
+    """Read the whole story (in parts when it is long) and list real contradictions with a minimal repair for each (a background job; poll /api/jobs/<id>).
+    Nothing is changed by this; /continuity/apply makes the repairs the player ticks."""
+    s, cfg = _story(sid), store.load_config()
+    if len(s["turns"]) < 2:
+        raise HTTPException(400, "There is nothing to check yet: play a few turns first.")
+    if _cont_jobs.get(sid) and _jobs.get(_cont_jobs[sid], {}).get("status") == "running":
+        raise HTTPException(409, "A continuity check is already running for this story.")
+    prov, model = _role(cfg, s, "story" if body.role != "recaps" else "recaps", "continuity check")
+    head, _ = _continuity_parts(s, 300000)
+    head, parts = _continuity_parts(s, _continuity_budget(prov, cfg, head))
+    job = _new_job("continuity", sid, len(parts))
+    _cont_jobs[sid] = job["id"]
+
+    async def run() -> None:
+        usage.set_ctx(sid, "continuity check")
+        try:
+            issues, notes = [], []
+            for n, part in enumerate(parts):
+                job["current"] = f"Reading part {n + 1} of {len(parts)}"
+                out = await providers.complete(prov, model, CONTINUITY_SYSTEM, [{"role": "user", "content": f"{head}\n\nTURNS (part {n + 1} of {len(parts)}):\n{part}"}],
+                                               temperature=0.1, max_tokens=7000, num_ctx=cfg["num_ctx"], **_extras(cfg))
+                j = _json_in(out)
+                if not isinstance(j, dict):
+                    raise RuntimeError("The AI's answer could not be read. Try again, or pick a different model.")
+                issues += [x for x in (j.get("issues") or []) if isinstance(x, dict)]
+                if j.get("notes"):
+                    notes.append(str(j["notes"])[:300])
+                job["done"] = n + 1
+            fresh, clean, seen = _story(sid), [], set()
+            for x in issues:
+                turns = sorted({int(t) for t in (x.get("turns") or []) if str(t).lstrip("-").isdigit() and 0 <= int(t) < len(fresh["turns"])})
+                prob = " ".join(str(x.get("problem", "")).split())[:500]
+                if not prob or (tuple(turns), prob[:60]) in seen:
+                    continue
+                seen.add((tuple(turns), prob[:60]))
+                fix, f = None, x.get("fix")
+                if isinstance(f, dict) and str(f.get("find", "")).strip() and "replace" in f:
+                    tgt = "summary" if f.get("target") == "summary" else "turn"
+                    src, ti = (fresh.get("summary", ""), None) if tgt == "summary" else (None, None)
+                    if tgt == "turn":
+                        ti = int(f["turn"]) if str(f.get("turn", "")).lstrip("-").isdigit() else None
+                        src = fresh["turns"][ti]["text"] if ti is not None and 0 <= ti < len(fresh["turns"]) and fresh["turns"][ti]["role"] == "assistant" else None
+                    find = str(f["find"])
+                    if src is not None and src.count(find) == 1 and str(f["replace"]) != find:
+                        fix = {"target": tgt, "turn": ti, "find": find, "replace": str(f["replace"])}
+                clean.append({"id": len(clean), "turns": turns, "kind": str(x.get("kind", "other"))[:20], "severity": "major" if x.get("severity") == "major" else "minor",
+                              "problem": prob, "fix": fix, "canon": " ".join(str(x.get("canon", "")).split())[:240]})
+            job["result"] = {"issues": clean[:40], "notes": " ".join(notes)[:600], "parts": len(parts), "turns": len(fresh["turns"]), "ts": time.time()}
+            job["status"] = "done"
+        except Exception as e:
+            job["status"], job["error"] = "error", str(e)[:300] or e.__class__.__name__
+        job["current"] = ""
+
+    asyncio.create_task(run())
+    return job
+
+
+class ContinuityFix(BaseModel):
+    target: str = "turn"
+    turn: int | None = None
+    find: str
+    replace: str
+
+
+class ContinuityApplyIn(BaseModel):
+    fixes: list[ContinuityFix] = []
+    canon: list[str] = []
+
+
+@app.post("/api/stories/{sid}/continuity/apply")
+def continuity_apply(sid: str, body: ContinuityApplyIn):
+    """Make the repairs the player ticked: each edits one narrator turn (the old wording is kept in its edit history) or the memory summary, only where the text still
+    matches exactly once. The corrected facts are pinned so they stay true. A backup is saved first."""
+    s = _story(sid)
+    store.snapshot_story(sid, "before continuity repairs")
+    applied, skipped = 0, []
+    for f in body.fixes:
+        if f.target == "summary":
+            if (s.get("summary") or "").count(f.find) == 1:
+                s["summary"] = s["summary"].replace(f.find, f.replace); applied += 1
+            else:
+                skipped.append({"turn": None, "reason": "the summary changed since the check"})
+            continue
+        if f.turn is None or not 0 <= f.turn < len(s["turns"]) or s["turns"][f.turn]["role"] != "assistant":
+            skipped.append({"turn": f.turn, "reason": "not a narrator turn"}); continue
+        t = s["turns"][f.turn]
+        if t["text"].count(f.find) != 1:
+            skipped.append({"turn": f.turn, "reason": "the text changed since the check"}); continue
+        new = t["text"].replace(f.find, f.replace)
+        if not new.strip():
+            skipped.append({"turn": f.turn, "reason": "would leave the turn empty"}); continue
+        t.setdefault("versions", []).insert(0, {"text": t["text"], "ts": time.time()})
+        del t["versions"][10:]
+        t["text"], t["edited"] = new, True
+        applied += 1
+    pins = s.setdefault("pinned_facts", [])
+    for c in body.canon:
+        c = " ".join(c.split())[:240]
+        if c and c.lower() not in [p.lower() for p in pins]:
+            pins.append(c)
+    store.save_story(s)
+    return {"applied": applied, "skipped": skipped, "story": s}
+
+
+# ---------------- story beats (the story's own schedule of key events; see app/beats.py) ----------------
+_beats_running: set[str] = set()
+_beats_tried: set[str] = set()
+
+
+async def _extract_beats(sid: str) -> tuple[int, int]:
+    """Read the story prompt for scheduled key events and merge them into the story's beats. Raises when the AI's answer cannot be used."""
+    if sid in _beats_running:
+        raise HTTPException(409, "The story prompt is already being read.")
+    _beats_running.add(sid)
+    try:
+        s, cfg = _story(sid), store.load_config()
+        events = []
+        if s.get("base_prompt", "").strip():
+            prov, model = _role(cfg, s, "recaps", "story beats")
+            out = await providers.complete(prov, model, beats.EXTRACT_SYSTEM, [{"role": "user", "content": beats.extract_user(s)}], temperature=0.1, max_tokens=6000,
+                                           num_ctx=cfg["num_ctx"], **_extras(cfg))
+            j = _json_in(out)
+            if not isinstance(j, dict) or not isinstance(j.get("events"), list):
+                raise RuntimeError("The AI's answer could not be read. Try again, or pick a different helper model.")
+            events = j["events"]
+        fresh = _story(sid)
+        res = beats.merge(fresh, events)
+        store.save_story(fresh)
+        return res
+    finally:
+        _beats_running.discard(sid)
+
+
+async def _ensure_beats(sid: str) -> None:
+    try:
+        await _extract_beats(sid)
+    except Exception as e:      # shown in the dialog; tried again next time the story is opened or when the player asks
+        try:
+            s = _story(sid)
+            beats.get(s)["error"] = (e.detail if isinstance(e, HTTPException) else str(e))[:200] or e.__class__.__name__
+            store.save_story(s)
+        except Exception:
+            pass
+
+
+def _beats_view(sid: str) -> dict:
+    return {**beats.view(_story(sid)), "running": sid in _beats_running}
+
+
+@app.get("/api/stories/{sid}/beats")
+def get_beats(sid: str):
+    return _beats_view(sid)
+
+
+class BeatsSettingsIn(BaseModel):
+    on: bool | None = None
+    hold: int | None = None
+    lookahead: bool | None = None
+
+
+@app.put("/api/stories/{sid}/beats")
+def put_beats(sid: str, body: BeatsSettingsIn):
+    s = _story(sid)
+    b = beats.get(s)
+    if body.on is not None:
+        b["on"] = body.on
+    if body.hold is not None:
+        b["hold"] = max(1, min(int(body.hold), 12))
+    if body.lookahead is not None:
+        b["lookahead"] = body.lookahead
+    store.save_story(s)
+    return _beats_view(sid)
+
+
+@app.post("/api/stories/{sid}/beats/ensure")
+async def ensure_beats(sid: str):
+    """Called when a story is opened: the first time (beats on, never read), the story prompt is read for key events in the background."""
+    s = _story(sid)
+    b = beats.get(s)
+    if b["on"] and not b["extracted"] and s.get("base_prompt", "").strip() and sid not in _beats_tried and sid not in _beats_running:
+        _beats_tried.add(sid)
+        asyncio.create_task(_ensure_beats(sid))
+        return {"started": True}
+    return {"started": False}
+
+
+@app.post("/api/stories/{sid}/beats/read")
+async def read_beats(sid: str):
+    """Read the story prompt again: new events are added, ones you have not edited are refreshed, your own and edited ones are left alone."""
+    _story(sid)
+    try:
+        added, updated = await _extract_beats(sid)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, str(e)[:300] or e.__class__.__name__)
+    return {**_beats_view(sid), "added": added, "updated": updated}
+
+
+class BeatIn(BaseModel):
+    title: str | None = None
+    text: str | None = None
+    field: str | None = None
+    op: str | None = None
+    value: str | int | float | None = None
+    off: bool | None = None
+
+
+def _beat(s: dict, iid: str) -> dict:
+    it = next((i for i in beats.get(s)["items"] if i["id"] == iid), None)
+    if not it:
+        raise HTTPException(404, "No such story beat")
+    return it
+
+
+@app.post("/api/stories/{sid}/beats/items")
+def add_beat(sid: str, body: BeatIn):
+    s = _story(sid)
+    b = beats.get(s)
+    if len(b["items"]) >= beats.MAX_ITEMS:
+        raise HTTPException(400, f"A story can have up to {beats.MAX_ITEMS} beats.")
+    it = beats.clean_item({**body.model_dump(exclude_none=True), "source": "player"})
+    if not (it["title"] or it["text"]):
+        raise HTTPException(400, "Give the event a title or a description.")
+    it["title"] = it["title"] or it["text"][:60]
+    it["edited"] = True
+    b["items"].append(it)
+    store.save_story(s)
+    return _beats_view(sid)
+
+
+@app.put("/api/stories/{sid}/beats/items/{iid}")
+def edit_beat(sid: str, iid: str, body: BeatIn):
+    s = _story(sid)
+    it = _beat(s, iid)
+    new = beats.clean_item({**it, **body.model_dump(exclude_none=True)}, old=it)
+    new["edited"] = True
+    if body.field is not None or body.value is not None or body.op is not None:
+        new["fired"] = None          # a changed trigger starts over
+    it.update(new)
+    store.save_story(s)
+    return _beats_view(sid)
+
+
+@app.delete("/api/stories/{sid}/beats/items/{iid}")
+def delete_beat(sid: str, iid: str):
+    s = _story(sid)
+    it = _beat(s, iid)
+    beats.get(s)["items"].remove(it)
+    store.save_story(s)
+    return _beats_view(sid)
+
+
+@app.post("/api/stories/{sid}/beats/items/{iid}/reset")
+def reset_beat(sid: str, iid: str):
+    """Make a beat wait for its trigger again (it goes out again when due)."""
+    s = _story(sid)
+    it = _beat(s, iid)
+    it["fired"], it["off"], it["why"] = None, False, ""
+    store.save_story(s)
+    return _beats_view(sid)
+
+
+# ---------------- stat points the player spends, dice, lore, duplicate characters (all done by the app itself, no AI) ----------------
+def _points_view(s: dict) -> dict:
+    pf = tracker.points_field(s)
+    tr = s.get("tracker") or tracker.blank()
+    pend = {r["id"]: r["n"] for r in tr.get("_spent", [])}
+    if not pf:
+        return {"on": False}
+    psec, pk = pf["id"].split(".", 1)
+    return {"on": True, "id": pf["id"], "label": pf["label"], "points": tracker._num(tr[psec].get(pk)) or 0, "cap": pf.get("spend_cap"),
+            "targets": [{"id": t["id"], "label": t["label"], "value": tracker._num(tr[t["id"].split(".", 1)[0]].get(t["id"].split(".", 1)[1])) or 0, "pending": pend.get(t["id"], 0)}
+                        for t in tracker.spend_targets(s)]}
+
+
+@app.get("/api/stories/{sid}/points")
+def get_points(sid: str):
+    """The points the player can spend and what they can be spent on. The first time, starting values are read from the avatar sheet ("Strength 8 ... Free points: 5")."""
+    s = _story(sid)
+    if tracker.points_field(s):
+        av = s.get("avatar") or {}
+        text = " ".join(str(v) for v in av.values())
+        if tracker.seed_from_text(s, text):
+            store.save_story(s)
+    return _points_view(s)
+
+
+class SpendIn(BaseModel):
+    id: str
+    n: int = 1
+
+
+@app.post("/api/stories/{sid}/spend")
+def spend_points(sid: str, body: SpendIn):
+    """Spend (n > 0) or take back (n < 0, only since the last move) points on a stat or skill. The narrator is told the final numbers with the player's next move."""
+    s = _story(sid)
+    if not tracker.points_field(s):
+        raise HTTPException(400, "This story has no points to spend (set up a Points tracker under Settings → Story & narration → Side panel).")
+    try:
+        tracker.spend(s, body.id, max(-20, min(body.n, 20)))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.save_story(s)
+    return {"points": _points_view(s), "story": s}
+
+
+class DiceSettingsIn(BaseModel):
+    mode: str | None = None          # auto | manual | off ("" = let the story prompt decide)
+    difficulty: str | None = None
+
+
+@app.get("/api/stories/{sid}/dice")
+def get_dice(sid: str):
+    s = _story(sid)
+    d = s.get("dice") or {}
+    return {"mode": d.get("mode", ""), "effective": rules.dice_mode(s), "prompt_calls_for_checks": rules.prompt_calls_for_checks(s), "difficulty": d.get("difficulty", "medium"),
+            "stats": rules.check_stats(s), "difficulties": rules.DIFFICULTY}
+
+
+@app.put("/api/stories/{sid}/dice")
+def put_dice(sid: str, body: DiceSettingsIn):
+    s = _story(sid)
+    d = s.setdefault("dice", {})
+    if body.mode is not None:
+        if body.mode in ("auto", "manual", "off"):
+            d["mode"] = body.mode
+        else:
+            d.pop("mode", None)
+    if body.difficulty is not None and body.difficulty in rules.DIFFICULTY:
+        d["difficulty"] = body.difficulty
+    store.save_story(s)
+    return get_dice(sid)
+
+
+class RollIn(BaseModel):
+    id: str = ""                    # the stat or skill (a number tracker of the player); empty = a plain d20
+    difficulty: str = "medium"
+    dc: int | None = None
+    adv: str = ""                   # adv | dis | ""
+
+
+@app.post("/api/stories/{sid}/roll")
+def roll_dice(sid: str, body: RollIn):
+    """The app rolls a d20 + (stat - 5) against a difficulty. The page then sends the result with the player's move; the narrator must narrate that outcome."""
+    s = _story(sid)
+    st = next((x for x in rules.check_stats(s) if x["id"] == body.id), None)
+    if body.id and not st:
+        raise HTTPException(400, "That cannot be rolled against.")
+    return rules.roll(st["value"] if st else None, body.difficulty, body.dc, body.adv, st["label"] if st else "")
+
+
+class LoreIn(BaseModel):
+    on: bool | None = None
+    items: list[dict] | None = None
+
+
+@app.get("/api/stories/{sid}/lore")
+def get_lore(sid: str):
+    return lore.get(_story(sid))
+
+
+@app.put("/api/stories/{sid}/lore")
+def put_lore(sid: str, body: LoreIn):
+    """Replace the story's lore entries (the page sends the whole edited list)."""
+    s = _story(sid)
+    lb = lore.get(s)
+    if body.on is not None:
+        lb["on"] = body.on
+    if body.items is not None:
+        lb["items"] = lore.clean_list(body.items)
+    store.save_story(s)
+    return lb
+
+
+class LorePreviewIn(BaseModel):
+    text: str | None = None
+
+
+@app.post("/api/stories/{sid}/lore/preview")
+def preview_lore(sid: str, body: LorePreviewIn):
+    """What would be sent to the narrator right now (or for a sample text): lets the player test their trigger words."""
+    s = _story(sid)
+    return {"note": lore.note(s, body.text), "matched": [i["title"] for i in lore.triggered(s, body.text)]}
+
+
+@app.get("/api/stories/{sid}/cast/duplicates")
+def cast_duplicates(sid: str):
+    """Characters that are probably the same person (free): the page offers to merge them."""
+    return characters.find_duplicates(_story(sid))
+
+
+class SkillIn(BaseModel):
+    name: str
+
+
+@app.post("/api/stories/{sid}/points/skill")
+def add_skill(sid: str, body: SkillIn):
+    """A new skill (for example one a class gives) that points can be spent on: it becomes a number tracker of the player, listed under the points tracker's spend list."""
+    s = _story(sid)
+    pf = tracker.points_field(s)
+    name = " ".join(body.name.split())[:30]
+    if not pf or not name:
+        raise HTTPException(400, "Give the skill a name (and set up a Points tracker first).")
+    sb = s.setdefault("sidebar", tracker.default_sidebar())
+    custom = [dict(f) for f in (sb.get("custom") or [])]
+    if any(f["label"].lower() == name.lower() for f in custom):
+        raise HTTPException(400, f"There is already a tracker called {name}.")
+    if len(custom) >= 24:
+        raise HTTPException(400, "A story can have up to 24 side-panel trackers.")
+    for f in custom:
+        if f["id"] == pf["id"]:
+            f["spend_on"] = list(f.get("spend_on") or []) + [name]
+    custom.append({"label": name, "kind": "number", "scope": "me", "note": "A skill: ranks are bought with points."})
+    sb["custom"] = tracker.clean_custom(custom, sb.get("custom") or [])
+    tr = s.setdefault("tracker", tracker.blank())
+    new = next((f for f in sb["custom"] if f["label"].lower() == name.lower()), None)
+    if new and tr["me"].get(new["id"].split(".", 1)[1]) in (None, ""):
+        tr["me"][new["id"].split(".", 1)[1]] = 0
+    store.save_story(s)
+    return {"points": _points_view(s), "story": s}
+
+
+# ---------------- world clock (optional per story; see app/clock.py) ----------------
+def _clock_view(s: dict) -> dict:
+    c = clock.settings(s)
+    m = clock.current(s)
+    return {"mode": c["mode"], "start": c["start"], "minutes": c["minutes"], "detected": clock.prompt_uses_clock(s), "on": clock.is_on(s),
+            "time": clock.fmt(m) if m is not None else "", "part": clock.part_of_day(m) if m is not None else ""}
+
+
+class ClockIn(BaseModel):
+    mode: str | None = None          # auto | on | off
+    start: str | None = None         # "06:00": where a new day starts
+    minutes: int | None = None       # how far each reply moves time on
+
+
+@app.get("/api/stories/{sid}/clock")
+def get_clock(sid: str):
+    return _clock_view(_story(sid))
+
+
+@app.put("/api/stories/{sid}/clock")
+def put_clock(sid: str, body: ClockIn):
+    s = _story(sid)
+    c = s.setdefault("clock", {})
+    if body.mode in ("auto", "on", "off"):
+        c["mode"] = body.mode
+    if body.start is not None and clock.parse_time(body.start) is not None:
+        c["start"] = clock.fmt(clock.parse_time(body.start))
+    if body.minutes is not None:
+        c["minutes"] = max(1, min(int(body.minutes), 720))
+    if not clock.is_on(s):
+        (s.get("tracker") or {}).pop("_clock", None)
+    store.save_story(s)
+    return _clock_view(s)
+
+
+class ClockSetIn(BaseModel):
+    time: str
+
+
+@app.post("/api/stories/{sid}/clock/set")
+def set_clock(sid: str, body: ClockSetIn):
+    """Set the in-world time by hand (for example after a time skip the narrator did not mention). The narrator is told the new time with the next move."""
+    s = _story(sid)
+    m = clock.parse_time(body.time)
+    if m is None:
+        raise HTTPException(400, "Type a time like 14:30 or 2:30 pm.")
+    if not clock.is_on(s):
+        raise HTTPException(400, "The world clock is off for this story (✏️ Edit story → Options).")
+    tr = s.setdefault("tracker", tracker.blank())
+    st = tr.get("_clock") or {"day": clock._day(s), "t": len(s["turns"]) // 2, "shown": None}
+    st["min"] = m
+    tr["_clock"] = st
+    tf = clock._field(s, ("time", "clock", "time of day"))
+    if tf:
+        sec, k = tf["id"].split(".", 1)
+        tr.setdefault(sec, {})[k] = clock.fmt(m); st["shown"] = clock.fmt(m)
+    store.save_story(s)
+    return {"clock": _clock_view(s), "story": s}
+
+
+# ---------------- restart a story from the beginning (as a separate copy) ----------------
+class RestartIn(BaseModel):
+    title: str = ""
+
+
+@app.post("/api/stories/{sid}/restart")
+def restart_story(sid: str, body: RestartIn):
+    """A fresh copy of this story that starts at the beginning. It keeps the setup (story prompt, prologue, opening, options, trackers, art settings, places, species, lore,
+    story beats, your character, and the cast with their pictures) and drops everything that came from playing: turns, memory, side-panel values, key events, pinned
+    facts, notes' progress, bookmarks and characters the story introduced. The original is untouched."""
+    s = _story(sid)
+    nid = uuid.uuid4().hex[:12]
+    new = json.loads(json.dumps(s))
+    first = next((t for t in s["turns"] if t.get("role") == "assistant"), None)
+    original = set(first["cast_before"]) if first and isinstance(first.get("cast_before"), list) else None     # who was in the cast before the story began
+    old_folder = store.PORTRAITS / sid
+    if old_folder.exists():
+        shutil.copytree(old_folder, store.PORTRAITS / nid)
+    new = json.loads(json.dumps(new).replace(f"/portraits/{sid}/", f"/portraits/{nid}/"))
+    new["id"], new["title"], new["created"] = nid, body.title.strip() or f"{s['title']} (restarted)", time.time()
+    keep, gone = [], []
+    for c in new.get("cast", []):
+        (keep if (original is None or c.get("slug") in original or c.get("player")) else gone).append(c)
+        c["events"] = []
+    for c in gone:
+        shutil.rmtree(store.PORTRAITS / nid / "chars" / c.get("slug", "_"), ignore_errors=True)
+    new["cast"] = keep
+    imported = bool(s.get("prompt_derived")) or any(t.get("imported") for t in s["turns"]) or bool(s.get("summary_upto") and not s["turns"])
+    trimmed = False
+    if imported:       # an imported save: a prompt the AI wrote from the text ends with where the story stood; a restart must not start from there
+        cut = re.sub(r"(?ims)^[ \t]*#{1,6}[ \t]*where the story stands[^\n]*\n.*?(?=^[ \t]*#{1,6}[ \t]|\Z)", "", new.get("base_prompt", ""))
+        if cut != new.get("base_prompt", ""):
+            new["base_prompt"], trimmed = cut.rstrip() + "\n", True
+    new.update(turns=[], state={}, summary="", summary_upto=0, suggestions=[], pinned_facts=[], reply_options={}, now={}, tracker=tracker.blank())
+    for k in ("retry_pending", "undone", "target_ending", "cache_why"):
+        new.pop(k, None)
+    if new.get("opening"):
+        new["opening_in_context"] = True           # an imported save skipped the opening: the new game begins with it
+    for it in beats.get(new)["items"]:
+        it["fired"] = None
+        if it.get("off") and "passed" in str(it.get("why", "")):
+            it["off"], it["why"] = False, ""
+    store.save_story(new)
+    return {"story": new, "removed_characters": [c["name"] for c in gone], "imported": imported, "prompt_trimmed": trimmed}
+
+
+# ---------------- bug report: one .zip a player can attach to a problem report (see app/bugreport.py) ----------------
+@app.middleware("http")
+async def bug_trace(request: Request, call_next):
+    """Remember failed requests and unhandled errors, for the next bug report (memory only)."""
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        bugreport.note("exception", f"{e.__class__.__name__}: {e}", path=request.url.path, method=request.method)
+        raise
+    if response.status_code >= 400 and response.status_code != 401 and request.url.path.startswith("/api/") and not request.url.path.startswith("/api/bug-report"):
+        bugreport.note("http", f"{request.method} {request.url.path} -> {response.status_code}")
+    return response
+
+
+class BugReportIn(BaseModel):
+    story_id: str | None = None
+    description: str = ""
+    include_text: bool = True          # the story's prompt, memory and replies (the recent ones); left out, the report has structure and problems only
+    last_turns: int = 10
+    hide_names: bool = True            # the player's and the characters' names become Player / Character A, B...
+    include_logs: bool = True
+    client: dict = {}                  # what the page saw: browser, errors
+
+
+_bug_reports: dict[str, tuple[float, bytes, dict]] = {}
+
+
+@app.post("/api/bug-report/preview")
+def bug_report_preview(body: BugReportIn, request: Request):
+    """Build the report and return what is in it, for the player to read before downloading. Nothing leaves this computer."""
+    _local_only(request, "A bug report can only be made")
+    s = _story(body.story_id) if body.story_id else None
+    data, manifest = bugreport.build(s, store.load_config(), APP_VERSION, body.description, body.include_text, body.last_turns, body.hide_names, body.include_logs, body.client or {}, list(_jobs.values()))
+    for k in [k for k, v in _bug_reports.items() if time.time() - v[0] > 900]:
+        _bug_reports.pop(k)
+    while len(_bug_reports) >= 5:
+        _bug_reports.pop(next(iter(_bug_reports)))
+    rid = uuid.uuid4().hex[:10]
+    _bug_reports[rid] = (time.time(), data, manifest)
+    return {"id": rid, **manifest, "filename": f"storyteller-bug-report-{time.strftime('%Y%m%d-%H%M%S')}.zip"}
+
+
+@app.get("/api/bug-report/{rid}/download")
+def bug_report_download(rid: str, request: Request):
+    _local_only(request, "A bug report can only be downloaded")
+    if rid not in _bug_reports:
+        raise HTTPException(404, "That report has expired. Make it again.")
+    return Response(_bug_reports[rid][1], media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="storyteller-bug-report-{time.strftime("%Y%m%d-%H%M%S")}.zip"'})

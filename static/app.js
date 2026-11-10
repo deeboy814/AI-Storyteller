@@ -9,7 +9,7 @@ async function api(path, opts = {}) {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (!r.ok) { let t = (await r.text()) || r.statusText; try { t = JSON.parse(t).detail || t; } catch (e) { /* plain text */ } throw new Error(t); }
+  if (!r.ok) { let t = (await r.text()) || r.statusText; try { t = JSON.parse(t).detail || t; } catch (e) { /* plain text */ } try { (window.__bugErr = window.__bugErr || []).push({ kind: "api", t: Date.now(), message: `${opts.method || "GET"} ${path.split("?")[0]} -> ${r.status}: ${String(t).slice(0, 160)}` }); } catch (e) { /* ignore */ } throw new Error(t); }
   return r.json();
 }
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -94,7 +94,8 @@ function renderNarrative(streamText = null, scroll = "bottom") {   // scroll: "b
     const sw = (story.art || {}).scene_where, sc = t.role === "user" ? "" : sceneHtml(t, i);
     const chk = t.role === "assistant" && i === lastAi && t.check && (t.check.issues || []).length
       ? `<div class="rulechk">⚠ <b>Possible rule slips</b><ul>${t.check.issues.map((x) => `<li>${esc(x)}</li>`).join("")}</ul><button class="rcfix">Fix this reply</button> <button class="rcok">Ignore</button></div>` : "";
-    const inner = t.role === "user" ? `<div class="player">${md(t.text)}</div>` : (sw === "banner_top" ? sc + md(t.text) : md(t.text) + sc) + (i === lastAi ? usageLine(t.usage) : "") + chk;
+    const tidy = t.role === "assistant" && (t.tidied || []).length ? `<div class="tidynote" title="The app tidied this reply. The original wording is kept in the turn's data.">✓ Tidied: ${t.tidied.map(esc).join("; ")}</div>` : "";
+    const inner = t.role === "user" ? `<div class="player">${md(t.text)}${t.roll ? `<div class="rolltag" title="Rolled by the app: d20 + (stat − 5) against the difficulty. The narrator must narrate this outcome.">🎲 ${esc(rollText(t.roll))}</div>` : ""}${(t.cmds || []).length && !Object.values(CMD_LABEL).includes(t.text) ? `<div class="cmdtags">${t.cmds.map((c) => esc(CMD_LABEL[c] || c)).join(" · ")}</div>` : ""}</div>` : (sw === "banner_top" ? sc + md(t.text) : md(t.text) + sc) + (i === lastAi ? usageLine(t.usage) : "") + tidy + chk;
     html += `<div class="turn ${t.role}${t.bookmark ? " bm" : ""}" data-i="${i}">${t.bookmark ? `<div class="bmlabel">★ ${esc(t.bookmark)}</div>` : ""}${inner}${turnBar(t, i, lastAi)}</div>`;
   });
   if (streamText !== null) html += `<div class="typing" style="min-height:${Math.max(200, box.clientHeight - 40)}px">${md(stripState(streamText)) || ""}</div>`;   // room below, so your move can sit at the top of the page while the reply grows
@@ -215,21 +216,33 @@ function setBusy(b) {
 }
 
 // ---------- playing a turn ----------
-async function send(text, override, forceBudget = false, note = "", redraw = false) {
+const rollText = (r) => `${r.label ? r.label + " " + (r.mod >= 0 ? "+" : "") + r.mod + ": " : ""}d20 ${r.die}${r.rolls && r.rolls.length > 1 ? " (" + r.rolls.join(", ") + ")" : ""} = ${r.total} vs ${r.dc} (${r.difficulty}): ${r.outcome}${r.auto ? " · automatic" : ""}`;
+// Story commands (▶ Continue, ⚔ Continue the fight, 🔞 Full adult scene) are sent with a move; the adult one can be "armed" so it goes with the next move(s)
+const CMD_LABEL = { continue: "▶ Continue", fight: "⚔ Continue the fight", adult: "🔞 Full adult scene" };
+let armed = false, armedFor = "";
+const cmdKeep = () => { try { return localStorage.getItem("adultKeep") === "1"; } catch (e) { return false; } };
+function setArmed(on) { armed = !!on && !!(story && story.nsfw); armedFor = armed ? story.id : ""; document.querySelectorAll("[data-cmd='adult']").forEach((b) => b.classList.toggle("armed", armed)); const i = $("btnQuick"); if (i) i.classList.toggle("armed", armed); }
+function sendCommand(cmd, opts = {}) {
+  const typed = $("input").value.trim();
+  send(typed || CMD_LABEL[cmd], undefined, false, "", false, [cmd], opts);
+}
+async function send(text, override, forceBudget = false, note = "", redraw = false, cmds = [], cmdOpts = {}, roll = null) {
   text = (text || "").trim();
   if (!text || busy || !story) return;
+  if (armed && story.nsfw && armedFor === story.id && !cmds.includes("adult")) cmds = [...cmds, "adult"];       // the armed adult instruction goes with this move
+  if (!cmdKeep()) setArmed(false);
   const own = story.models && story.models.story;   // the story's own choice is used by the server; the header menu only matters for older stories
   const [provider, model] = override ? override.split("|") : own ? [undefined, undefined] : ($("modelSelect").value || "|").split("|");
   $("input").value = ""; autosize();
   setBusy(true); renderChips();
   // optimistic display of the player's line + streaming reply
-  story.turns.push({ role: "user", text });
+  story.turns.push({ role: "user", text, ...(cmds.length ? { cmds, cmd_opts: cmdOpts } : {}), ...(roll ? { roll } : {}) });
   let acc = "", failed = null;
   renderNarrative("", "anchor"); genStatus("writing", 0);
   try {
     const r = await fetch(`/api/stories/${story.id}/turn`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, provider, model, force_budget: forceBudget, note }),
+      body: JSON.stringify({ text, provider, model, force_budget: forceBudget, note, cmds, cmd_opts: cmdOpts, roll }),
     });
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.getReader(), dec = new TextDecoder();
@@ -256,7 +269,7 @@ async function send(text, override, forceBudget = false, note = "", redraw = fal
       story.turns.pop();
       failed = /not found/i.test(e.message) ? "This story no longer exists on this computer (it may have been deleted, or the app is using a different data folder). Go Home and open or create it again." : e.message;
     }
-    $("input").value = text; genStatus(null);
+    $("input").value = Object.values(CMD_LABEL).includes(text) ? "" : text; genStatus(null);
   }
   const words = failed ? 0 : stripState(acc).split(/\s+/).filter(Boolean).length;
   setBusy(false); renderAll(failed ? false : true); refreshCache(); refreshArtSuggestions();
@@ -346,8 +359,8 @@ function showImport(list, opts = {}) {
     <div id="iStoryBox"${opts.into ? ' class="hidden"' : ""}><h3>Story</h3>
     <label>Title</label><input id="iTitle" placeholder="e.g. My Story (turn 40)">
     <label>Story prompt: copy it from one of your stories, or paste it below</label>
-    <select id="iSource" style="width:100%"><option value="">Paste a prompt below</option>${list.map((x) => `<option value="${x.id}" ${story && story.id === x.id ? "selected" : ""}>${esc(x.title)}</option>`).join("")}</select>
-    <textarea class="short" id="iPrompt" style="min-height:70px" placeholder="Only needed when you don't copy it from a story"></textarea>
+    <select id="iSource" style="width:100%"><option value="">Paste a prompt below (or leave it empty: the AI writes one from your text)</option>${list.map((x) => `<option value="${x.id}" ${story && story.id === x.id ? "selected" : ""}>${esc(x.title)}</option>`).join("")}</select>
+    <textarea class="short" id="iPrompt" style="min-height:70px" placeholder="Only needed when you don't copy it from a story. Left empty, the AI writes a prompt from your summary or text, which you can edit afterwards."></textarea>
     </div>
     <h3>Your character</h3>
     <label>Name</label><input id="iName">
@@ -358,10 +371,10 @@ function showImport(list, opts = {}) {
       <textarea class="short" id="iSummary" style="min-height:160px"></textarea>
     </div>
     <div id="pFull" class="hidden">
-      <label>The story so far: paste it, or load a text file. Labelled <code>PLAYER:</code> / <code>NARRATOR:</code> text keeps the last few turns word for word; anything else is summarized entirely.</label>
+      <label>The story so far: paste it, or load a text file. Text labelled <code>PLAYER:</code> / <code>NARRATOR:</code> (or You / Assistant, Human / AI, Me / GM…) keeps the last few turns word for word; plain prose keeps its last few paragraphs as the scene in progress; JSON chat exports (ChatGPT, Claude, SillyTavern…) are read directly; everything before that is summarized.</label>
       <textarea class="short" id="iFull" style="min-height:160px"></textarea>
-      <div class="actions" style="justify-content:flex-start"><label class="btnlike">Load a .txt / .md file…<input type="file" id="iFile" accept=".txt,.md,text/plain,text/markdown" hidden></label><span class="hint" id="iCount"></span></div>
-      <label>Which AI writes the summary?</label><select id="iModel" style="width:100%">${modelOpts}</select>
+      <div class="actions" style="justify-content:flex-start"><label class="btnlike">Load a .txt / .md / .json file…<input type="file" id="iFile" accept=".txt,.md,.json,.jsonl,text/plain,text/markdown,application/json" hidden></label><span class="hint" id="iCount"></span></div>
+      <label>Which AI writes the summary (and the story prompt, when you give none)?</label><select id="iModel" style="width:100%">${modelOpts}</select>
       <p class="hint">The text is cut into parts of about 14,000 characters and summarized one part at a time, each building on the last. A cheaper model is fine; a stronger one keeps more detail. You can edit the result afterwards (👤 Player → Memory).</p>
     </div>
     <label>Latest status panel (optional; if you leave it empty, the last status panel found in the text is used)</label>
@@ -387,7 +400,9 @@ function showImport(list, opts = {}) {
     try {
       let r;
       if (mode === "summary") {
-        r = await api("/stories/import", { method: "POST", body: { ...base, summary: $("iSummary").value, recent_turns: $("iTurns").value } });
+        const [sp, sm] = ($("iModel") ? $("iModel").value : "|").split("|");
+        $("iProg").textContent = !base.base_prompt.trim() && !base.source_story_id && !base.into_story_id ? "Writing a story prompt from your summary…" : "";
+        r = await api("/stories/import", { method: "POST", body: { ...base, summary: $("iSummary").value, recent_turns: $("iTurns").value, provider: sp || null, model: sm || null } });
         story = r.story;
       } else {
         const [provider, model] = $("iModel").value.split("|");
@@ -578,6 +593,9 @@ async function showSettings(tab = "AI") {
       <div id="lanBox" class="aiBox"><span class="hint">Loading…</span></div>
     </div>
     <div class="stpane hidden" data-p="Backup">
+      <h3>Something went wrong?</h3>
+      <div class="hint">Make a bug report file (how far your game got, the problems the app can find, recent errors) with personal data removed, to attach to a problem report.</div>
+      <div class="actions" style="justify-content:flex-start"><button id="sBugReport">🐞 Report a bug…</button></div>
       <h3>Reuse across stories</h3>
       <div class="hint">Both are off by default and work independently.</div>
       <label class="chk top"><input type="checkbox" id="sAvLib" ${config.avatar_library ? "checked" : ""}><span><b>Avatar library</b><span class="hint">Create several player avatars (a sheet and a picture each) and reuse them in any story. Each story uses exactly one, as its own copy. Adds a 🧑 Avatars button on the Home screen and a library row in Player → Avatar.</span></span></label>
@@ -633,10 +651,18 @@ async function showSettings(tab = "AI") {
         : want ? `<b>Restart the app to turn it on.</b> <button id="lanRestart">Save and restart now</button>` : `<span class="hint">Off: only this computer can open the app.</span>`)
       + (l.active && !want ? `<div class="hint">Turned off: save and restart to stop phones from connecting. <button id="lanRestart">Save and restart now</button></div>` : "")
       + `<div class="hint" style="margin-top:6px">If the phone cannot connect, this computer's firewall may be blocking it. Allow only your home network, once, in a terminal: <code>sudo ufw allow from ${esc(((l.urls[0] || "http://192.168.0.1").split("//")[1] || "").split(":")[0].replace(/\.\d+$/, ".0"))}/24 to any port ${l.port} proto tcp</code></div>`;
-    if ($("lanPin")) $("lanPin").onclick = async () => { if (!confirm("Make a new PIN? Devices will have to enter it again after the next restart.")) return; await api("/lan/new-pin", { method: "POST" }); lanFill(); };
+    if (l.active || l.pin) {      // devices that entered the PIN are remembered, also after a restart
+      let devs = []; try { devs = await api("/lan/devices"); } catch (e) {}
+      box.insertAdjacentHTML("beforeend", `<div class="hint" style="margin-top:8px"><b>Remembered devices</b> (they enter the PIN once, never again, not even after a restart):</div>` + (devs.length
+        ? devs.map((d) => `<div class="optrow"><span style="flex:1">${esc(d.name)} <small class="hint">· ${esc(d.ip)} · last used ${new Date(d.seen * 1000).toLocaleDateString()}</small></span><button data-forget="${esc(d.id)}">Forget</button></div>`).join("")
+        : `<div class="hint">None yet.</div>`));
+      box.querySelectorAll("[data-forget]").forEach((b) => b.onclick = async () => { await api("/lan/devices/" + b.dataset.forget, { method: "DELETE" }); lanFill(); });
+    }
+    if ($("lanPin")) $("lanPin").onclick = async () => { if (!confirm("Make a new PIN? Every remembered device is forgotten and has to enter the new PIN.")) return; await api("/lan/new-pin", { method: "POST" }); lanFill(); };
     if ($("lanRestart")) $("lanRestart").onclick = async () => { $("mSave").click(); setTimeout(() => restartApp(), 1500); };
   };
   $("sLan").onchange = lanFill; lanFill();
+  $("sBugReport").onclick = () => showBugReport();
   onModalClose = () => { applyTheme(config); onModalClose = null; };   // Cancel / click-away undoes the colour preview
   $("sBudAct").value = config.budget_action || "warn"; $("sCharMemSize").value = config.char_memory_size || "medium";
   api("/budget").then((b) => { $("sBudNow").textContent = `Spent so far: $${b.daily.spent.toFixed(2)} today` + (b.monthly.limit > 0 ? ` · $${b.monthly.spent.toFixed(2)} this month` : "") + " (estimated)."; }).catch(() => {});
@@ -711,7 +737,7 @@ async function showSettings(tab = "AI") {
     if (story) story.models = await api(`/stories/${story.id}/models`, { method: "PUT", body: chosen });
     if (story && $("sbMode")) {
       const mode = $("sbMode").value, fields = [...document.querySelectorAll("#sbFields input:checked")].map((i) => i.dataset.f), old = story.sidebar || {};
-      const custom = sbTrk ? sbTrk.get() : (old.custom || []), strip = (l) => JSON.stringify((l || []).map((f) => [f.label, f.scope || f.id.split(".")[0], f.kind, f.min ?? null, f.max ?? null, String(Array.isArray(f.options) ? f.options.join(",") : f.options || ""), f.unit || "", f.note || "", String(Array.isArray(f.levels) ? f.levels.join(",") : f.levels || "").replace(/\s+/g, ""), String(f.max_level ?? "")]));
+      const custom = sbTrk ? sbTrk.get() : (old.custom || []), strip = (l) => JSON.stringify((l || []).map((f) => [f.label, f.scope || f.id.split(".")[0], f.kind, f.min ?? null, f.max ?? null, String(Array.isArray(f.options) ? f.options.join(",") : f.options || ""), f.unit || "", f.note || "", String(Array.isArray(f.levels) ? f.levels.join(",") : f.levels || "").replace(/\s+/g, ""), String(f.max_level ?? ""), String(((l || []).find((h) => h.id && h.id === f.counts) || {}).label || f.counts || "").toLowerCase(), (Array.isArray(f.spend_on) ? f.spend_on.map((x) => ((l || []).find((h) => h.id === x) || {}).label || x).join(",") : String(f.spend_on || "")).toLowerCase().replace(/\s+/g, ""), String(f.spend_cap ?? "")]));
       if (mode !== old.mode || JSON.stringify(fields) !== JSON.stringify(old.fields || []) || strip(custom) !== strip(old.custom)) story = await api(`/stories/${story.id}/sidebar`, { method: "PUT", body: { mode, fields, custom } });
     }
     if (story && styleChanged) story = await api(`/stories/${story.id}/art`, { method: "PUT", body: { ...story.art, direction: styleDir, setting: (story.art || {}).setting ?? null } });
@@ -751,6 +777,8 @@ async function openStory(id) {
   story = await api("/stories/" + id);
   localStorage.setItem("story", id);
   syncModelSelect(); hideHome(); renderAll(false); applyTheme(config); refreshCache(); refreshArtSuggestions(); runtimeSelect(); refreshBudget();
+  api(`/stories/${id}/beats/ensure`, { method: "POST" }).catch(() => {});
+  setTimeout(() => maybeAskPoints(), 600);        // stat points waiting at the start of a story: offer the assign dialog once      // the first time: read the story prompt for scheduled events (background)
 }
 function runtimeSelect() {   // local-model auto-management (Settings → Local models): load what this story needs, release the rest
   if (story && config && (config.rt_text || config.rt_comfy)) api("/runtime/select", { method: "POST", body: { story_id: story.id } }).catch(() => {});
@@ -782,7 +810,7 @@ async function retryTurn(model, note) {   // steps back, keeping the discarded r
   if (!text) return;
   closeModal();
   story = await api(`/stories/${story.id}/retry`, { method: "POST", body: keep }); renderAll();
-  send(text.text, model, false, note, !!note || had);
+  send(text.text, model, false, note, !!note || had, text.cmds || [], text.cmd_opts || {}, text.roll || null);
 }
 $("btnRetry").onclick = () => {
   if (busy || !story || !story.turns.length) return;
@@ -795,7 +823,28 @@ $("btnRetry").onclick = () => {
 };
 $("btnHome").onclick = showHome;
 bindTools();
-$("btnSide").onclick = () => $("sidebar").classList.toggle("open");
+// side panel on a phone: a small tab on the right edge (or a swipe from the edge) slides it over the story; tap the tab, the story or swipe back to close
+{ const sb = $("sidebar"), tab = $("sideTab");
+  const setSide = on => { sb.classList.toggle("open", on); document.body.classList.toggle("sideopen", on); tab.textContent = on ? "›" : "‹"; tab.title = on ? "Close the status panel" : "Open the status panel"; };
+  $("btnSide").onclick = () => setSide(!sb.classList.contains("open"));
+  tab.onclick = () => setSide(!sb.classList.contains("open"));
+  document.addEventListener("click", e => { if (sb.classList.contains("open") && !e.target.closest("#sidebar, #sideTab, #btnSide, .modal, #modal")) setSide(false); });
+  let sx = 0, sy = 0, st = 0;
+  document.addEventListener("touchstart", e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st = Date.now(); }, { passive: true });
+  document.addEventListener("touchend", e => {
+    if (innerWidth > 760 || Date.now() - st > 700) return;
+    const t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+    const open = sb.classList.contains("open");
+    if (!open && dx < 0 && sx > innerWidth - 40) setSide(true);        // swipe left from the right edge
+    else if (open && dx > 0) setSide(false);                            // swipe right to put it away
+  }, { passive: true }); }
+// phone: the header buttons fold into a ☰ drop-down so they stay out of the way while reading
+{ const tools = $("tools"), menu = $("btnMenu");
+  const setMenu = on => { tools.classList.toggle("open", on); menu.setAttribute("aria-expanded", on ? "true" : "false"); menu.textContent = on ? "✕" : "☰"; };
+  menu.onclick = () => setMenu(!tools.classList.contains("open"));
+  tools.addEventListener("click", e => { if (e.target.closest("button")) setMenu(false); });
+  document.addEventListener("click", e => { if (tools.classList.contains("open") && !e.target.closest("#tools, #btnMenu")) setMenu(false); }); }
 $("btnEdit").onclick = () => story ? editStory(story) : editStory(null);
 $("btnSettings").onclick = () => showSettings();
 $("btnPlayer").onclick = showPlayer;
@@ -805,6 +854,8 @@ $("btnCast").onclick = () => showCast();
 $("btnArt").onclick = () => showArtHub();
 $("btnIllustrate").onclick = () => illustrate();
 $("btnReplies").onclick = () => fetchReplies(true);
+$("btnBeats").onclick = () => showBeats();
+$("btnContinue").onclick = () => { if (busy || !story || !story.turns.length) return; sendCommand("continue"); };
 $("narrative").addEventListener("scroll", () => { const at = narrativeAtBottom(); if (at && !wasAtBottom) maybeShowReplies(); wasAtBottom = at; });
 $("modelSelect").onchange = async (e) => {
   localStorage.setItem("model", e.target.value);

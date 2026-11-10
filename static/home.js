@@ -32,7 +32,7 @@ async function showHome() {
       <p>${esc(blurb(s)) || '<i>No description yet. Use ⋯ to add one.</i>'}</p>
       <small>${s.turns} turn${s.turns === 1 ? "" : "s"}${s.player ? " · " + esc(s.player) : ""}${s.cast ? " · " + s.cast + " characters" : ""}</small></div></div>`;
   home.innerHTML = `<div class="hwrap">
-    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label>${config && config.avatar_library ? '<button id="hAv" title="Your saved player avatars">🧑 Avatars</button>' : ""}<button id="hStore" title="Disk use, clean-up, and stories you deleted (restore them)">🗂 Storage</button><button id="hUse" title="Usage and estimated cost">💲 Usage</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close or restart AI Storyteller">🚪 Quit</button></div>
+    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label>${config && config.avatar_library ? '<button id="hAv" title="Your saved player avatars">🧑 Avatars</button>' : ""}<button id="hStore" title="Disk use, clean-up, and stories you deleted (restore them)">🗂 Storage</button><button id="hUse" title="Usage and estimated cost">💲 Usage</button><button id="hBug" title="Make a bug report file (personal data removed) to attach to a problem report">🐞 Report a bug</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close or restart AI Storyteller">🚪 Quit</button></div>
     <div class="hgrid">
       ${list.map(card).join("")}
       <button class="hcard hnew" id="hNew"><div class="hplus">＋</div><b>New story</b><small>Write or paste a prompt and start playing</small></button>
@@ -54,6 +54,7 @@ async function showHome() {
   $("hSet").onclick = () => showSettings();
   $("hQuit").onclick = () => quitApp();
   $("hUse").onclick = () => showUsage();
+  $("hBug").onclick = () => showBugReport(() => showHome());
   $("hStore").onclick = () => showStorage();
   if ($("hAv")) $("hAv").onclick = () => showAvatarLibrary();
   $("hPack").onchange = async (e) => {
@@ -84,7 +85,7 @@ function showCardEditor(s, nav = {}) {   // nav.back: where to go when closed in
     <label>Description (shown on the card)</label>
     <textarea class="short" id="cvDesc" style="min-height:70px" maxlength="400">${esc(s.description || "")}</textarea>
     <div class="actions" style="justify-content:flex-start"><button id="cvWrite">✨ Write it for me</button></div>
-    <div class="actions"><button id="cvBk">Backups…</button><button id="cvPack" title="Export this story (prompt, cast with pictures, prologue, opening, trackers, endings, media) as a package. No turns, memory or notes.">Export story…</button><button class="danger" id="cvRm">Delete story</button><span style="flex:1"></span><button id="cvClose">Close</button><button class="primary" id="cvSave">Save</button></div>`);
+    <div class="actions"><button id="cvBk">Backups…</button><button id="cvPack" title="Export this story (prompt, cast with pictures, prologue, opening, trackers, endings, media) as a package. No turns, memory or notes.">Export story…</button><button id="cvRestart" title="Start this story again from the beginning as a separate copy. Your current game stays as it is.">↺ Restart from the beginning…</button><button class="danger" id="cvRm">Delete story</button><span style="flex:1"></span><button id="cvClose">Close</button><button class="primary" id="cvSave">Save</button></div>`);
   const done = async () => { closeModal(); if (nav.back) await nav.back(); else await showHome(); };
   const busyNote = (t) => { $("cvNote").textContent = t; };
   $("cvClose").onclick = done;
@@ -142,6 +143,13 @@ function showCardEditor(s, nav = {}) {   // nav.back: where to go when closed in
     } catch (err) { busyNote("Upload failed: " + err.message); }
   };
   if ($("cvDel")) $("cvDel").onclick = async () => { await api(`/stories/${s.id}/cover`, { method: "DELETE" }); done(); };
+  $("cvRestart").onclick = async () => {
+    const t = prompt(`Start “${s.title}” again from the beginning as a separate copy?\n\nYour current game stays exactly as it is. The copy keeps the story prompt, cast and pictures, places, trackers, art settings and your character, but none of the turns, memory, side-panel values or key events. For an imported save only the setup carries over, not the imported history.\n\nName for the new copy:`, `${s.title} (restarted)`);
+    if (t === null) return;
+    $("cvRestart").disabled = true;
+    try { const r = await api(`/stories/${s.id}/restart`, { method: "POST", body: { title: t.trim() } }); closeModal(); await showHome(); alert(`Created “${r.story.title}”. It is on the Home screen: open it to begin.` + (r.prompt_trimmed ? `\n\nThe story prompt was written from your imported text; its “Where the story stands” part was left out, so the copy does not start from where you ended. Read the rest under ✏️ Edit story.` : "") + (r.removed_characters.length ? `\n\nLeft out because the story introduced them later: ${r.removed_characters.join(", ")}.` : "")); }
+    catch (err) { alert(err.message); $("cvRestart").disabled = false; }
+  };
   $("cvPack").onclick = () => { window.location = `/api/stories/${s.id}/pack?pictures=all`; };
   $("cvBk").onclick = () => showBackups(s.id);
   $("cvRm").onclick = async () => {
