@@ -119,6 +119,9 @@ def load_config() -> dict:
         cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     for k, v in DEFAULT_CONFIG.items():
         cfg.setdefault(k, v)
+    if isinstance(cfg.get("mood_sets"), dict):      # sets added after the config was saved (for example "action") are filled in; the player's own lists stay as written
+        for k, v in DEFAULT_SETS.items():
+            cfg["mood_sets"].setdefault(k, list(v))
     have = {p["id"] for p in cfg["providers"]}
     cfg["providers"] += [json.loads(json.dumps(p)) for p in DEFAULT_CONFIG["providers"] if p["id"] not in have]   # new built-in providers
     # one key serves both the text and the picture side of the same company
@@ -173,7 +176,7 @@ def new_story(title: str, subtitle: str, base_prompt: str, player_name: str = ""
         "models": {},          # this story's AI choices: story / recaps / images -> {"provider", "model"} (empty = use app defaults)
         "user_notes": "",      # standing instructions from the player, sent every turn
         "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
+                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "action_moods": True, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
         "art_dismissed": [],   # names the player said never to ask about
         "cast": [],            # characters: name, appearance (for image prompts), moods {mood: portrait url}
         "opening": "",         # the story's first scene (markdown), shown before the first move; ![](intro:It1) shows an intro panel
@@ -204,7 +207,7 @@ STORY_DEFAULTS = {
     "cover": "", "description": "",
     "auto_replies": False, "reply_options": {}, "group_cast": True, "models": {}, "avatar": {}, "avatar_image": "", "user_notes": "", "cast": [], "opening": "", "opening_in_context": True, "intro_images": [],
     "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
+            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "action_moods": True, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
     "art_dismissed": [],
 }
 

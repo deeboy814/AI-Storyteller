@@ -42,8 +42,8 @@ const newMoodSeen = new Set();   // one "Draw new" button per character+mood per
 let drawingNew = null;             // "slug|mood" being drawn right now
 // Same list as the server's EXPRESSION_MOODS: any other picture type is an action picture (drawn three-quarter, shown cropped to the upper body).
 const EXPRESSION_MOODS = new Set(["default", "normal", "smile", "happy", "laugh", "laughing", "shy", "surprise", "surprised", "sulky", "fear", "scared", "sad", "angry", "scorn",
-  "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "aroused", "worried", "confused", "bored", "disgusted", "embarrassed", "blush", "blushing",
-  "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty", "seductive", "calm", "serious", "thinking", "pout", "annoyed", "suspicious",
+  "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "worried", "confused", "bored", "disgusted", "embarrassed", "blush", "blushing",
+  "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty", "calm", "serious", "thinking", "pout", "annoyed", "suspicious",
   "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie"]);
 function isActionMood(m) { return !!m && !EXPRESSION_MOODS.has(String(m).toLowerCase().replace(/\s*\d+$/, "").trim()); }
 function portraitInfo(spec) {
@@ -249,6 +249,8 @@ function artTabHtml() {
     <label class="chk"><input type="checkbox" id="artNewchar" ${a.newchar ? "checked" : ""}> Let the narrator flag new named characters as they appear, so the app can offer to draw them (off by default; works with the offer above)</label>
     <label class="chk"><input type="checkbox" id="artPort" ${a.portraits !== false ? "checked" : ""}> Show character mood portraits above their lines (set them up in 🎭 Cast)</label>
     <label class="chk"><input type="checkbox" id="artExtMoods" ${a.extended_moods ? "checked" : ""}> Use the extended set of mood pictures: new characters get the extended set by default (not just the basic one), and from the second turn on the narrator is reminded each turn to use the whole range of a character's moods instead of mostly normal and smile (off by default).</label>
+    <label class="chk"><input type="checkbox" id="artSceneTpl" ${a.scene_template ? "checked" : ""}> Build scene picture prompts in the app (free): from the reply's portrait tags, the place and the most active sentence, instead of asking the AI. Simpler than the AI's, but costs no model call per picture (a scene frame the narrator wrote itself is always used first).</label>
+    <label class="chk"><input type="checkbox" id="artAction" ${a.action_moods !== false ? "checked" : ""}> Action moods: in fights, chases and danger${story.nsfw ? " (and, because this story allows adult content, intimate scenes)" : ""} the narrator prefers the action pictures (strike, guard, dodge, charge, cast, wounded, victory… draw them from a character's page → Draw the set → Action set) over calm expressions. On by default; untick to keep the narrator to ordinary moods.</label>
     <label class="chk"><input type="checkbox" id="artExact" ${a.exact_moods ? "checked" : ""}> Ask for exact moods: the narrator names the real feeling (mischievous, worried, teasing, shocked…) and only uses a listed mood when it is an exact match, so you are offered a new picture for each new mood (more drawing offers; off by default)</label>
     </details>
     <details class="sub"><summary>Scene pictures</summary>
@@ -259,6 +261,7 @@ function artTabHtml() {
     <details class="sub"><summary>Side panel card</summary>
     <label class="chk"><input type="checkbox" id="artNow" ${a.now_card ? "checked" : ""}> Show who you are talking to in the side panel: their picture, mood and what they are wearing, in place of your avatar (the helper model updates it after each reply; off by default).</label>
     <div class="field" style="margin-left:24px"><label>Its picture</label><select id="artNowPic"><option value="portrait" ${a.now_pic !== "live" ? "selected" : ""}>Their saved picture for the mood (no extra drawing)</option><option value="live" ${a.now_pic === "live" ? "selected" : ""}>A new picture each turn: what they are doing and wearing right now</option></select>
+      <label class="chk"><input type="checkbox" id="artNowFree" ${a.now_free ? "checked" : ""}> Fill the card from the narrator's portrait tags only (free): who and their mood, with no AI call. It then shows no "doing" or "wearing" (and cannot draw a new picture each turn).</label>
       <div class="hint">A new picture each turn uses their saved pictures for the face and is drawn in the background after the reply, only when what they are doing or wearing changes. It uses your picture maker once per change (on a local ComfyUI, a few seconds of GPU each time).</div></div>
     </details>
     <p class="hint">Both switches add a short instruction for the narrator. Changing them makes the next Claude turn rewrite the prompt cache once.</p>
@@ -268,7 +271,7 @@ function artTabInit() { const a = (story && story.art) || {}; if ($("artSceneWhe
   $("artSettingGen").onclick = async (e) => { e.target.disabled = true; $("artSettingNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/art/setting`, { method: "POST" }); $("artSetting").value = r.art.setting; $("artSettingNote").textContent = "Done. Edit if you like, then Save."; } catch (err) { $("artSettingNote").textContent = err.message; } e.target.disabled = false; }; $("artSize").value = a.size || "portrait"; $("artPsize").value = a.portrait_size || "medium"; $("artPshape").value = a.portrait_shape || "landscape"; }
 async function artTabSave() {
   story = await api(`/stories/${story.id}/art`, { method: "PUT", body: {
-    direction: $("artDir").value, setting: $("artSetting").value, negative: $("artNeg").value, size: $("artSize").value, portrait_size: $("artPsize").value, portrait_shape: $("artPshape").value, auto: $("artAuto").checked, suggest: $("artSuggest").checked, newchar: $("artNewchar").checked, exact_moods: $("artExact").checked, extended_moods: $("artExtMoods").checked, scene_often: $("artOften").checked, scene_where: $("artSceneWhere").value, now_card: $("artNow").checked, now_pic: $("artNowPic").value, portraits: $("artPort").checked } });
+    direction: $("artDir").value, setting: $("artSetting").value, negative: $("artNeg").value, size: $("artSize").value, portrait_size: $("artPsize").value, portrait_shape: $("artPshape").value, auto: $("artAuto").checked, suggest: $("artSuggest").checked, newchar: $("artNewchar").checked, exact_moods: $("artExact").checked, action_moods: $("artAction").checked, scene_template: $("artSceneTpl").checked, extended_moods: $("artExtMoods").checked, scene_often: $("artOften").checked, scene_where: $("artSceneWhere").value, now_card: $("artNow").checked, now_free: $("artNowFree").checked, now_pic: $("artNowPic").value, portraits: $("artPort").checked } });
 }
 
 // ---------- Cast: character cards, and a character view with Bio / Key events / Images ----------
@@ -355,6 +358,12 @@ function showCast(tab = "Characters") {
       <div class="gallery">${(story.intro_images || []).map((p) => `<figure><a href="${p.url}" target="_blank"><img loading="lazy" src="${thumbUrl(p.url, 360)}" alt=""></a><figcaption>${esc(p.name)} <button class="x idel" data-url="${esc(p.url)}" title="Remove this panel">×</button></figcaption></figure>`).join("") || '<p class="hint">No panels yet.</p>'}</div>
       <label>Add panels (you can pick several; the file name becomes the panel name)</label><input type="file" id="iAdd" multiple accept="image/png,image/jpeg,image/webp,image/gif"></div>
     <div class="actions"><button id="mClose">Close</button></div>`);
+  api(`/stories/${story.id}/cast/duplicates`).then((dups) => {       // characters that are probably one person (free, no AI)
+    const host = $("cTabCharacters"); if (!host || !dups.length) return;
+    host.insertAdjacentHTML("afterbegin", `<div class="dupbox"><b>Possibly the same person</b>${dups.map((d, i) => `<div class="lrow" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:4px 0"><span>${esc(d.names[0])} and ${esc(d.names[1])} <small class="hint">(${esc(d.reason)})</small></span><button class="dupmerge" data-i="${i}">Merge ${esc(d.names[0])} into ${esc(d.names[1])}</button></div>`).join("")}</div>`);
+    host.querySelectorAll(".dupmerge").forEach((b) => b.onclick = async () => { const d = dups[+b.dataset.i]; if (!confirm(`Merge ${d.names[0]} into ${d.names[1]}? ${d.names[0]} stops being a separate character; the name is kept as an “also called” name.`)) return;
+      try { story = await api(`/stories/${story.id}/cast/${d.fold}/merge`, { method: "POST", body: { into: d.into } }); renderAll(); showCast("Characters"); } catch (e) { alert(e.message); } });
+  }).catch(() => {});
   const show = (n) => {
     document.querySelectorAll(".ctab").forEach((b) => b.classList.toggle("on", b.dataset.tab === n));
     for (const t of ["Characters", "Relationships", "Gallery", "Intro"]) $("cTab" + t).classList.toggle("hidden", t !== n);
@@ -442,7 +451,7 @@ function showCharacter(slug, tab = "Bio") {
       <label>Personality <small class="hint">(traits, how they speak, what they want)</small></label><input id="chPers" value="${esc(c.personality || "")}">
       <label>Bio <small class="hint">(who they are in your story: role, history, relationships)</small></label><textarea class="short" id="chBioText" rows="5">${esc(c.bio || "")}</textarea>
       <label class="chk top"><input type="checkbox" id="chAuthor" ${c.author ? "checked" : ""}><span><b>Tell the narrator about them</b><span class="hint">Sends this character's looks, personality and bio to the narrator every turn. Off: the bio is only shown here.</span></span></label>
-      <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button id="chBioSuggest" ${isNew ? "disabled" : ""}>Suggest a bio from the story</button></div>
+      <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button id="chBioSuggest" ${isNew ? "disabled" : ""}>Suggest a bio from the story</button><button id="chSheetFill" ${isNew ? "disabled" : ""} title="Read the story so far and suggest every box of this character's sheet. Not for early in a story.">✨ Fill the whole sheet from the story…</button></div>
       <div id="chPromptLines"></div><div class="aStatus hint" id="chStatus"></div>
       ${isNew || (story.cast || []).length < 2 ? "" : `<div class="aiBox"><b>Same person as another character?</b> <small class="muted">If the story ended up with this character twice (for example under a nickname and under their full name), fold this entry into the right one: its name becomes an “also called” name there, and its pictures, key events and side-panel row move over.</small>
         <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><select id="chMergeSel">${(story.cast || []).filter((x) => x.slug !== slug).map((x) => `<option value="${esc(x.slug)}">${esc(x.name)}</option>`).join("")}</select><button id="chMerge">Merge ${esc(c.name)} into them</button></div></div>`}
@@ -457,7 +466,7 @@ function showCharacter(slug, tab = "Bio") {
     <div id="chImages" class="hidden">
       <p class="hint">The card shows the <b>normal</b> picture. Other pictures are moods the narrator can pick above this character's lines. ↻ draws another version and keeps the old one as an earlier version; every picture helps keep their face consistent.</p>
       <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="imOpts">Draw options…</button>
-        <select id="imSet"><option value="basic">Basic set</option><option value="extended">Extended set</option><option value="match">Moods my other characters have</option></select><button id="imSetGo">Draw the set</button></div>
+        <select id="imSet"><option value="basic">Basic set</option><option value="extended">Extended set</option><option value="action">Action set (fights, chases, danger)</option>${story.nsfw ? '<option value="action_adult">Adult action set (intimate scenes)</option>' : ""}<option value="match">Moods my other characters have</option></select><button id="imSetGo">Draw the set</button></div>
       <div class="castact" style="margin:6px 0"><input id="imMood" value="normal 1" size="12" title="Picture name / mood"><button id="imDraw">Draw this one with AI</button><input type="file" id="imFile" accept="image/png,image/jpeg,image/webp,image/gif"></div>
       <div class="aStatus hint" id="imStatus"></div>
       <div class="moods" id="imGrid">${moodChips()}</div>
@@ -537,6 +546,7 @@ function showCharacter(slug, tab = "Bio") {
       catch (err) { status("chStatus", err.message); }
       e.target.disabled = false;
     };
+    $("chSheetFill").onclick = () => sheetFill(slug, () => showCharacter(slug, "Bio"));
     $("chBioSuggest").onclick = async (e) => {
       e.target.disabled = true; status("chStatus", "Reading what the story says about them…");
       try { const r = await api(`/stories/${story.id}/cast/${slug}/bio-suggest`, { method: "POST" }); $("chBioText").value = r.bio; status("chStatus", "Edit it if it isn't right, then Save."); }
@@ -687,7 +697,9 @@ function imageSettingsHtml(cfg) {
     <h3>Pictures drawn for a new character</h3>
     <div class="hint">After you pick a face for a new character, the app can draw more pictures of them from these lists, one picture type per line. Add your own anywhere: type a name (<code>blushing</code>) or a name with what to draw (<code>blushing: embarrassed, red cheeks, hand over mouth</code>). The narrator is told to use the pictures in these sets before asking for anything new; if it does ask for a new one and you draw it, it is added to the end of the Extended set automatically. Built-in types: normal, smile, shy, surprise, sulky, fear, sad, angry, scorn, despair, combat, cute, dead, zombie. Numbers (<code>smile 2</code>) make a second version.</div>
     <div class="grid2" style="grid-template-columns:1fr 1fr"><div class="field"><label>Basic set</label><textarea class="short" id="msBasic" rows="6">${esc(((cfg.mood_sets || {}).basic || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>
-      <div class="field"><label>Extended set</label><textarea class="short" id="msExt" rows="6">${esc(((cfg.mood_sets || {}).extended || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div></div>
+      <div class="field"><label>Extended set</label><textarea class="short" id="msExt" rows="6">${esc(((cfg.mood_sets || {}).extended || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>
+      <div class="field"><label>Action set <small class="hint">(fights, chases, danger; the narrator prefers these in action scenes)</small></label><textarea class="short" id="msAction" rows="6">${esc(((cfg.mood_sets || {}).action || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>
+      ${typeof story !== "undefined" && story && story.nsfw ? `<div class="field"><label>Adult action set <small class="hint">(intimate scenes; shown and drawn only in stories with adult content on)</small></label><textarea class="short" id="msAdult" rows="6">${esc(((cfg.mood_sets || {}).action_adult || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>` : ""}</div>
     <h3>Picture services</h3>
     <div class="hint">Click a service to open its settings. The model you pick here is the same one chosen under <b>AI &amp; story</b> (changing either changes both). Model names change often: if one stops working, pick another from the list, then use Test.</div>
     <div id="iprovs">${[...provs.keys()].sort((x, y) => { const o = ["gemini", "xai", "openai", "comfyui"], f = (k) => { const n = o.indexOf(provs[k].id); return n < 0 ? 9 : n; }; return f(x) - f(y); }).map((i) => imgProvCard(provs[i], i)).join("")}</div>
@@ -879,7 +891,7 @@ function collectImageSettings(cfg) {
     if (i >= 0 && x.slice(i + 1).trim()) looks[name.replace(/\s*\d+$/, "")] = x.slice(i + 1).trim();
     return name;
   }).filter(Boolean);
-  cfg.mood_sets = { basic: lines("msBasic"), extended: lines("msExt") };
+  cfg.mood_sets = { basic: lines("msBasic"), extended: lines("msExt"), action: lines("msAction"), action_adult: $("msAdult") ? lines("msAdult") : ((cfg.mood_sets || {}).action_adult || []) };
   cfg.mood_looks = looks;
   cfg.image_max_refs = +$("imgRefs").value || 0;
   if ($("imgBgOn")) cfg.image_bg = { on: $("imgBgOn").checked, model: $("imgBgModel").value, workflow: $("imgBgFlow").value.trim() };
@@ -968,7 +980,7 @@ async function showArtDialog(opts = {}) {
   const showCandidates = (el, name) => {
     const urls = cands[name] || [];
     el.querySelector(".aResult").innerHTML = urls.length ? `<div class="gallery">${urls.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="aUse primary" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div>
-      <label>After you pick one, also draw</label><select class="aSet"><option value="none">No more pictures (just this one)</option><option value="basic" ${(story.art || {}).extended_moods ? "" : "selected"}>The basic set</option><option value="extended" ${(story.art || {}).extended_moods ? "selected" : ""}>The extended set</option><option value="match">The moods my other characters have</option></select>
+      <label>After you pick one, also draw</label><select class="aSet"><option value="none">No more pictures (just this one)</option><option value="basic" ${(story.art || {}).extended_moods ? "" : "selected"}>The basic set</option><option value="extended" ${(story.art || {}).extended_moods ? "selected" : ""}>The extended set</option><option value="action">The action set (fights, chases, danger)</option>${story.nsfw ? '<option value="action_adult">The adult action set (intimate scenes)</option>' : ""}<option value="match">The moods my other characters have</option></select>
       <div class="actions" style="justify-content:flex-start"><button class="aMore">Draw 4 more options</button></div>` : "";
   };
 
@@ -1138,4 +1150,49 @@ function showPlaces(nav = {}) {   // nav.back: where to go when closed (the Art 
       story = await r.json(); places = story.places.map((x) => ({ ...x })); renderAll(); rerender();
     } catch (err) { el.querySelector(".plStatus").textContent = err.message; }
   });
+}
+
+
+// Fill a character's whole sheet from the story: a warning first (not for early in a story), then the AI's suggestion for each box, which you review before anything is saved.
+const SHEET_FIELDS = [["appearance", "How they look", 3], ["personality", "Personality", 1], ["bio", "Bio", 4], ["address", "Names and forms of address", 2], ["aka", "Also called (separated by commas)", 1], ["species", "Species (empty = human)", 1]];
+async function sheetFill(slug, back) {
+  const c = (story.cast || []).find((x) => x.slug === slug); if (!c) return;
+  let info; try { info = await api(`/stories/${story.id}/cast/${slug}/sheet-info`); } catch (e) { alert(e.message); return; }
+  modal(`<h2>✨ Fill ${esc(c.name)}'s whole sheet from the story</h2>
+    <div class="trow" style="border-color:#e8b04a"><b>⚠ Do not use this early in a story.</b>
+      <p class="hint" style="margin:4px 0 0">The AI can only use what the story has shown so far. Early on there is too little, so it guesses, and a guess you save becomes a fact the narrator repeats every turn. Use it once the character has appeared in many scenes. Nothing is saved until you have read and approved each box.</p></div>
+    <p><b>${info.replies}</b> narrator replies so far; ${esc(c.name)} appears in <b>${info.mentions}</b> of them.</p>
+    ${info.too_early ? `<p style="color:#e8b04a"><b>Too early:</b> ${info.reasons.map(esc).join("; ")}.</p><label class="chk"><input type="checkbox" id="sfSure"> I understand the risk, do it anyway</label>` : `<p class="hint">That is enough for a reasonable first draft.</p>`}
+    <label>Which boxes?</label><select id="sfMode"><option value="empty">Only the empty boxes (keep what I wrote)</option><option value="all">Every box (suggest a change for everything)</option></select>
+    <label class="chk"><input type="checkbox" id="sfEvents"> Also rebuild ${esc(c.name)}'s key-event log (one more call; your own entries are kept)</label>
+    <div class="hint" id="sfMsg"></div>
+    <div class="actions"><button id="sfBack">Cancel</button><span style="flex:1"></span><button class="primary" id="sfGo">Read the story and suggest</button></div>`);
+  $("sfBack").onclick = back;
+  if (info.too_early) $("sfGo").disabled = true;
+  if ($("sfSure")) $("sfSure").onchange = () => { $("sfGo").disabled = !$("sfSure").checked; };
+  $("sfGo").onclick = async (e) => {
+    e.target.disabled = true; $("sfMsg").textContent = "Reading what the story says about them…";
+    let r; try { r = await api(`/stories/${story.id}/cast/${slug}/sheet-suggest`, { method: "POST" }); } catch (err) { $("sfMsg").textContent = err.message; e.target.disabled = false; return; }
+    const rebuild = $("sfEvents").checked, all = $("sfMode").value === "all";
+    modal(`<h2>${esc(c.name)}: suggested sheet</h2><p class="hint">Edit anything, untick what you do not want. Nothing is saved until you press Apply.</p>
+      ${SHEET_FIELDS.map(([k, label, rows]) => {
+        const now = r.current[k] || "", sug = r.fields[k] || "", on = sug && (all || !now);
+        return `<div class="trow"><label class="chk"><input type="checkbox" data-sf="${k}" ${on ? "checked" : ""} ${sug ? "" : "disabled"}> <b>${label}</b></label>
+          ${rows > 1 ? `<textarea class="short" data-sv="${k}" rows="${rows}" ${sug ? "" : "disabled"}>${esc(sug)}</textarea>` : `<input data-sv="${k}" value="${esc(sug)}" ${sug ? "" : "disabled"}>`}
+          <div class="hint">${now ? "Now: " + esc(oneLine(now, 240)) : "Now: empty"}${sug ? "" : " · the story does not say enough"}</div></div>`;
+      }).join("")}
+      <div class="hint" id="sfMsg2"></div><div class="actions"><button id="sfBack2">Cancel</button><span style="flex:1"></span><button class="primary" id="sfApply">Apply the ticked boxes</button></div>`);
+    $("sfBack2").onclick = back;
+    $("sfApply").onclick = async (e2) => {
+      const edit = { name: c.name, appearance: c.appearance || "", slug };
+      document.querySelectorAll("[data-sf]").forEach((cb) => { if (cb.checked) edit[cb.dataset.sf] = document.querySelector(`[data-sv="${cb.dataset.sf}"]`).value; });
+      if (Object.keys(edit).length <= 3) { $("sfMsg2").textContent = "Nothing is ticked."; return; }
+      e2.target.disabled = true;
+      try {
+        story = await api(`/stories/${story.id}/cast`, { method: "PUT", body: { cast: (story.cast || []).map((x) => x.slug === slug ? edit : { name: x.name, appearance: x.appearance, slug: x.slug }) } });
+        if (rebuild) { $("sfMsg2").textContent = "Rebuilding the key events…"; story = await api(`/stories/${story.id}/cast/${slug}/events/rebuild`, { method: "POST" }); }
+        renderAll(); back();
+      } catch (err) { $("sfMsg2").textContent = err.message; e2.target.disabled = false; }
+    };
+  };
 }

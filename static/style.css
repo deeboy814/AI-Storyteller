@@ -467,3 +467,75 @@ img.npcpic.upper { aspect-ratio: 3 / 2; object-fit: cover; object-position: cent
 button.icon { display: inline-flex; align-items: center; justify-content: center; line-height: 1; font-family: "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", system-ui, sans-serif; }
 .tsep { width: 1px; height: 24px; background: var(--line); margin: 0 2px; flex: none; align-self: center; }
 .tbar button { font-family: "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", system-ui, sans-serif; }
+
+/* phone: slim header (title + ☰), tools in a drop-down panel */
+button.icon.hmenu { display: none; }
+@media (max-width: 760px) {
+  header { position: relative; flex-wrap: nowrap; align-items: center; padding: 6px 10px; gap: 8px; }
+  .titles { flex: 1 1 auto; }
+  .title { font-size: 16px; }
+  .subtitle { display: none; }
+  button.icon.hmenu { display: inline-flex; flex: none; width: 38px; height: 38px; }
+  .tools { display: none; position: absolute; left: 0; right: 0; top: 100%; z-index: 9; flex-wrap: wrap; gap: 8px; padding: 10px; background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: 0 10px 24px rgba(0,0,0,.45); }
+  .tools.open { display: flex; }
+  .tools select { flex: 1 1 100%; max-width: none; }
+}
+
+/* phone: a small tab on the right edge opens the status panel over the story */
+.sidetab { display: none; }
+@media (max-width: 760px) {
+  .sidetab { display: flex; align-items: center; justify-content: center; position: fixed; right: 0; top: 48%; z-index: 9; width: 22px; height: 64px; padding: 0; border-radius: 10px 0 0 10px; border: 1px solid var(--line); border-right: 0; background: var(--panel2); color: var(--text, #e8e5f2); font-size: 20px; line-height: 1; opacity: .55; }
+  .sidetab:active, body.sideopen .sidetab { opacity: .95; }
+  body.sideopen .sidetab { right: min(86vw, 320px); }
+  #sidebar { z-index: 10; padding-top: 14px; }
+  body:has(#home:not(.hidden)) .sidetab { display: none; }
+}
+@media (max-width: 760px) { body #sidebar, body.seethru #sidebar { background: var(--panel) !important; } }   /* the slide-over panel is always solid, whatever the see-through setting */
+
+/* story commands (continue, fight, adult scene) */
+.quickbar { flex-direction: column; align-items: stretch; }
+.quickbar .qcmds { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+.quickbar .qnotes { display: flex; flex-wrap: wrap; gap: 6px; }
+.quickbar .qact { font-size: 12.5px; color: var(--muted); margin: 0 6px 0 0; }
+button.armed { background: var(--accent); color: #fff; border-color: var(--accent); }
+#btnQuick.armed { box-shadow: 0 0 0 2px var(--accent) inset; }
+.cmdtags { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.quickbar .qcmds { flex-direction: column; align-items: stretch; gap: 6px; }
+.quickbar .qrow { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+@media (max-width: 760px) { .inputrow { gap: 4px; } .inputrow button.icon { width: 35px; height: 38px; font-size: 18px; } }
+
+/* story beats */
+.beat { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin: 8px 0; background: var(--panel2); }
+.beat .bhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.beat .bwhen { font-weight: 600; font-size: 13px; }
+.beat .bstat { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.beat.s-active .bstat { color: #fff; background: var(--accent); border-color: var(--accent); }
+.beat.s-done, .beat.s-off { opacity: .62; }
+.beat.s-notrigger .bstat { color: #e8b04a; border-color: #e8b04a; }
+.beat .spoil { margin: 6px 0; cursor: pointer; filter: blur(7px); user-select: none; transition: filter .15s; }
+.beat .spoil.on { filter: none; user-select: text; }
+.beat .bacts { display: flex; gap: 8px; align-items: center; }
+button.mini { font-size: 12px; padding: 2px 8px; }
+
+/* stat points, dice, lore */
+.ptsbanner { margin: 4px 0 6px; padding: 6px 8px; border: 1px solid var(--accent); border-radius: 8px; background: color-mix(in srgb, var(--accent) 14%, transparent); font-size: 13px; }
+.ptsbanner button { margin-left: 6px; font-size: 12px; padding: 2px 8px; }
+.spendbtns { margin-left: 6px; white-space: nowrap; }
+button.spend { width: 22px; height: 22px; padding: 0; line-height: 1; font-weight: 700; margin-left: 3px; border-radius: 6px; }
+.ptsleft { font-size: 18px; font-weight: 600; margin: 6px 0 10px; }
+.ptsrow { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.ptsrow .ptsname { flex: 1; } .ptsrow .ptsval { min-width: 28px; text-align: center; font-size: 17px; } .ptsrow button { width: 34px; height: 30px; font-size: 18px; padding: 0; }
+.rolltag { margin-top: 4px; font-size: 12.5px; color: var(--muted); }
+.loreitem { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin: 8px 0; background: var(--panel2); }
+.loreitem.off { opacity: .6; } .loreitem textarea { min-height: 70px; } .loreitem .lrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0; }
+.dupbox { border: 1px solid #e8b04a; border-radius: 10px; padding: 8px 10px; margin: 8px 0; }
+.qmoves { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; } .qdice.hidden { display: none; }
+
+/* the Art screen keeps one size on every tab (Picture makers used to be shorter than the rest) */
+.card:has(.hubtab) { height: 90vh; }
+@media (max-width: 760px) { .card:has(.hubtab) { height: 100%; } }
+.tidynote { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.clockpill { cursor: pointer; } .clockpill b { font-size: 15px; }
+.dlbadge { font-size: 11px; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; margin-left: 4px; color: var(--muted); } .dlbadge.over { color: #fff; background: #c0504d; border-color: #c0504d; }
+/* button rows in dialogs wrap instead of running off the edge (a phone is narrow) */
+.card .actions { flex-wrap: wrap; }

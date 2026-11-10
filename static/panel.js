@@ -17,6 +17,10 @@ function panelSidebarHtml() {
   const tr = story && story.tracker; if (!tr) return "";
   const F = activeFields(), byId = Object.fromEntries(F.map((f) => [f.id, f])), changes = tr.changes || [];
   const find = (s, n, k) => changes.find((c) => c.s === s && (c.n || null) === (n || null) && c.k === k);
+  // stat points the player spends with buttons (a number tracker with a "spend on" list)
+  const pf = F.find((f) => f.kind === "number" && (f.spend_on || []).length && /^(me|scene)\./.test(f.id));
+  const spendIds = new Set(pf ? pf.spend_on : []), pointsNow = pf ? Number((tr[pf.id.split(".")[0]] || {})[pf.id.split(".")[1]]) || 0 : 0;
+  const pendingOf = (id) => ((tr._spent || []).find((r) => r.id === id) || {}).n || 0;
   const tipOf = (c) => `Before: ${fmtVal(c.b)}  →  After: ${fmtVal(c.a)}`;
   const mark = (c) => (c ? ` chg" title="${esc(tipOf(c))}` : "");
   const chip = (v, c) => `<span class="stchip st-${STATUS_WORDS[v] ? v : "other"}${mark(c)}">${esc(STATUS_WORDS[v] || v)}</span>`;
@@ -34,13 +38,18 @@ function panelSidebarHtml() {
       }
       if (f.custom && f.kind === "text" && String(v).includes(" | ")) return `<div class="kv${mark(c)}"><small>${esc(f.label)}</small>${String(v).split(" | ").map((x) => `<div>• ${esc(x)}</div>`).join("")}</div>`;
       const nxt = f.levels && f.levels.length ? nextLevelAt(f.levels, v, f.max_level) : null;
-      return `<div class="kv${mark(c)}"><small>${esc(f.label)}</small> ${esc(String(v))}${nxt ? ` <span class="muted">/ ${nxt}</span>` : ""}${f.kind === "number" && f.unit ? " " + esc(f.unit) : ""}</div>`;
+      const spendBtns = spendIds.has(f.id) ? ` <span class="spendbtns">${pendingOf(f.id) > 0 ? `<button class="spend" data-id="${esc(f.id)}" data-n="-1" title="Take back a point you just spent">−</button>` : ""}${pointsNow > 0 && !(pf.spend_cap && Number(v) >= pf.spend_cap) ? `<button class="spend" data-id="${esc(f.id)}" data-n="1" title="Spend a point on ${esc(f.label)}">+</button>` : ""}</span>` : "";
+      return `<div class="kv${mark(c)}"><small>${esc(f.label)}</small> ${esc(String(v))}${nxt ? ` <span class="muted">/ ${nxt}</span>` : ""}${f.kind === "number" && f.unit ? " " + esc(f.unit) : ""}${spendBtns}</div>`;
     }).join("");
   let info = "", chars = "", qh = "", qn = 0, artN = 0;
-  const scene = kv("scene");
+  const clk = tr._clock && Number.isFinite(tr._clock.min) ? tr._clock.min : null;
+  const hhmm = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+  const clockPill = clk == null ? "" : `<div class="kv clockpill" title="The in-world time, kept by the app. Click to set it."><small>Clock</small> <b>${hhmm(clk)}</b> <span class="muted">${["night", "dawn", "morning", "midday", "afternoon", "evening"][(() => { const h = clk / 60; return h < 5 || h >= 21 ? 0 : h < 7 ? 1 : h < 11 ? 2 : h < 14 ? 3 : h < 17 ? 4 : 5; })()]}</span></div>`;
+  const scene = clockPill + kv("scene");
   if (scene) info += `<h4>Scene${tr.turn ? ` · turn ${tr.turn}` : ""}</h4>${scene}`;
+  const pointsBanner = pf && pointsNow > 0 ? `<div class="ptsbanner">⭐ <b>${pointsNow}</b> ${esc(pf.label.toLowerCase())} to spend <button class="ptsopen">Assign…</button></div>` : "";
   const meStatus = byId["me.status"] && tr.me && tr.me.status ? `<div>${chip(tr.me.status, find("me", null, "status"))}</div>` : "";
-  const me = meStatus + kv("me");
+  const me = pointsBanner + meStatus + kv("me");
   if (me) info += `<h4>${esc((tr.me && tr.me.name) || "You")}</h4>${me}`;
   const cf = F.filter((f) => f.id.startsWith("chars."));
   const names = Object.keys(tr.chars || {}).filter((n) => cf.some((f) => tr.chars[n][f.id.split(".")[1]] != null));
@@ -71,8 +80,11 @@ function panelSidebarHtml() {
     qh += `<div class="qhead"><b>${esc(f.label)}</b> <small>${act} active</small></div>` + (list.length ? list.map((q) => {
       const old = same(q), isNew = ch && !old, changed = ch && old && JSON.stringify(old) !== JSON.stringify(q), done = q.status === "completed", fail = q.status === "failed";
       const ob = q.objectives || [], dn = ob.filter((o) => o.done).length, open = openQuests.has(q.name) || done;
+      const qk = (x) => String(x).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(), dlr = (tr._deadlines || []).find((d) => qk(d.name) === qk(q.name) || qk(q.name).includes(qk(d.name)) || qk(d.name).includes(qk(q.name)));
+      const dayF = F.find((x) => /^day$/i.test(x.label) && /^(scene|me)\./.test(x.id)), dayNow = dayF ? Number((tr[dayF.id.split(".")[0]] || {})[dayF.id.split(".")[1]]) : NaN;
+      const dlBadge = dlr && q.status === "active" ? ` <span class="dlbadge${dayNow > dlr.day ? " over" : ""}" title="Deadline: Day ${dlr.day}">⏰ ${dayNow > dlr.day ? "overdue" : "Day " + dlr.day}</span>` : "";
       const tip = isNew ? "New this turn" : changed ? `Before: ${old.status}${old.objectives && old.objectives.length ? ", " + old.objectives.filter((o) => o.done).length + "/" + old.objectives.length + " objectives" : ""}  →  After: ${q.status}${ob.length ? ", " + dn + "/" + ob.length + " objectives" : ""}` : "";
-      return `<details class="quest ${q.status}${isNew || changed ? " chg" : ""}" data-q="${esc(q.name)}"${open ? " open" : ""}${tip ? ` title="${esc(tip)}"` : ""}><summary><span class="qn">${esc(q.name)}</span>${isNew ? ` <span class="newtag">new</span>` : ""}
+      return `<details class="quest ${q.status}${isNew || changed ? " chg" : ""}" data-q="${esc(q.name)}"${open ? " open" : ""}${tip ? ` title="${esc(tip)}"` : ""}><summary><span class="qn">${esc(q.name)}${dlBadge}</span>${isNew ? ` <span class="newtag">new</span>` : ""}
         <span class="stchip ${done ? "st-immune" : fail ? "st-dead" : "st-other"}">${done ? "✓ Completed" : fail ? "Failed" : ob.length ? `${dn}/${ob.length}` : "Active"}</span></summary>
         <div class="qbody">${ob.length ? `<ul class="qobj">${ob.map((o) => `<li class="${o.done ? "done" : ""}">${o.done ? "✓" : "○"} ${esc(o.text)}</li>`).join("")}</ul>` : ""}
         ${q.reward ? `<div class="qrew"><small>${done ? "Reward granted" : "Reward"}</small> ${esc(q.reward)}</div>` : ""}<div class="qstat"><small>Status</small> ${esc(q.status)}</div></div></details>`;
@@ -96,6 +108,9 @@ function bindPanel(el) {   // tab clicks, minimize, quest rows (called after the
   const keep = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* not saved */ } };
   el.querySelectorAll(".ptab").forEach((b) => b.onclick = () => { panelTab = b.dataset.tab; panelMin = false; keep("panelTab", panelTab); keep("panelMin", "0"); renderSidebar(); });
   const m = el.querySelector(".pmin"); if (m) m.onclick = () => { panelMin = !panelMin; keep("panelMin", panelMin ? "1" : "0"); renderSidebar(); };
+  el.querySelectorAll(".spend").forEach((b) => b.onclick = () => spendPoint(b.dataset.id, +b.dataset.n));
+  const cp = el.querySelector(".clockpill"); if (cp) cp.onclick = async () => { const t = prompt("Set the in-world time (for example 14:30 or 2:30 pm):"); if (!t) return; try { const r = await api(`/stories/${story.id}/clock/set`, { method: "POST", body: { time: t } }); story = r.story; renderSidebar(); } catch (e) { alert(e.message); } };
+  const po = el.querySelector(".ptsopen"); if (po) po.onclick = () => showPoints();
   el.querySelectorAll("details.quest").forEach((d) => d.addEventListener("toggle", () => { if (d.open) openQuests.add(d.dataset.q); else openQuests.delete(d.dataset.q); }));
 }
 
@@ -128,7 +143,7 @@ function trackerEditor(el, initial, ctx) {
       f.label = g("label"); f.scope = g("scope"); f.kind = g("kind"); f.note = g("note");
       if (f.kind === "slider") { f.min = g("min"); f.max = g("max"); }
       if (f.kind === "status") f.options = g("options");
-      if (f.kind === "number") { f.unit = g("unit"); f.levels = g("levels"); f.max_level = g("max_level"); }
+      if (f.kind === "number") { f.unit = g("unit"); f.levels = g("levels"); f.max_level = g("max_level"); f.counts = g("counts"); f.spend_on = g("spend_on"); f.spend_cap = g("spend_cap"); }
     });
   };
   const draw = () => {
@@ -143,7 +158,10 @@ function trackerEditor(el, initial, ctx) {
           ${k === "status" ? `<input data-k="options" placeholder="Labels, separated by commas (e.g. calm, tense, panicked)" value="${esc(Array.isArray(f.options) ? f.options.join(", ") : f.options || "")}">` : ""}
           ${k === "number" ? `<label>unit <input data-k="unit" maxlength="12" placeholder="optional, e.g. gold" value="${esc(f.unit || "")}"></label>
             <label title="Optional, for an XP tracker: the XP totals where each level begins (level 2 at the first number, level 3 at the second…). The app then keeps a tracker named “Level” in step with the XP, shows the next goal (XP 160 / 300) and tells the narrator the level.">levels at <input data-k="levels" placeholder="optional, e.g. 50, 150, 300" value="${esc(Array.isArray(f.levels) ? f.levels.join(", ") : f.levels || "")}"></label>
-            <label title="Optional: the highest level there is. At this level the XP shows no next goal and the narrator is told there are no more level-ups.">max level <input data-k="max_level" type="number" min="2" style="width:80px" placeholder="none" value="${esc(String(f.max_level ?? ""))}"></label>` : ""}
+            <label title="Optional: the highest level there is. At this level the XP shows no next goal and the narrator is told there are no more level-ups.">max level <input data-k="max_level" type="number" min="2" style="width:80px" placeholder="none" value="${esc(String(f.max_level ?? ""))}"></label>
+            <label title="Optional: the app counts the narrator's replies since another tracker (for example Day) last changed, so you get a turn-of-the-day counter that never depends on the narrator counting. The narrator is told the number each turn.">counts replies since <select data-k="counts" style="max-width:150px"><option value="">(not a counter)</option>${list.filter((g, n) => n !== i && (g.label || "").trim() && ["number", "text", "status"].includes(g.kind || "")).map((g) => { const cur = (list.find((h) => h.id && h.id === f.counts) || {}).label || f.counts || ""; return `<option value="${esc(g.label)}" ${String(g.label).toLowerCase() === String(cur).toLowerCase() ? "selected" : ""}>${esc(g.label)}</option>`; }).join("")}</select> changes</label>
+            <label title="Optional, for a points tracker (unspent stat or skill points): the stats and skills the player may spend them on, separated by commas. The side panel then shows + buttons, the app does the arithmetic, and the narrator is told the final numbers and never assigns points itself.">spend points on <input data-k="spend_on" style="min-width:170px" placeholder="optional, e.g. Strength, Stamina" value="${esc(Array.isArray(f.spend_on) ? f.spend_on.map((x) => (list.find((h) => h.id === x) || {}).label || x).join(", ") : f.spend_on || "")}"></label>
+            <label title="Optional: the most a stat can reach by spending points">max <input data-k="spend_cap" type="number" min="1" style="width:70px" placeholder="none" value="${esc(String(f.spend_cap ?? ""))}"></label>` : ""}
           <input data-k="note" class="tnote" maxlength="200" placeholder="What it means / what changes it (helps the AI)" value="${esc(f.note || "")}"></div><div class="hint tmsg"></div></div>`;
       }).join("") + `<div class="actions" style="justify-content:flex-start"><button class="tadd">＋ Add a tracker</button></div>`;
     el.querySelectorAll(".trow").forEach((r, i) => {
@@ -206,4 +224,43 @@ async function watchNow() {
       r = await api(`/stories/${id}/now`); story.now = r.now; renderSidebar();
     }
   } catch (e) { /* keep what is shown */ }
+}
+
+
+// ---- stat points: spend with buttons (the app does the arithmetic and tells the narrator the final numbers with your next move)
+async function spendPoint(id, n) {
+  if (!story || busy) return;
+  try { const r = await api(`/stories/${story.id}/spend`, { method: "POST", body: { id, n } }); story = r.story; renderSidebar(); if ($("ptsList")) fillPoints(r.points); }
+  catch (e) { alert(e.message); }
+}
+function fillPoints(p) {
+  const box = $("ptsList"); if (!box) return;
+  $("ptsLeft").textContent = `${p.points} ${p.label.toLowerCase()} left`;
+  box.innerHTML = p.targets.map((t) => `<div class="ptsrow"><span class="ptsname">${esc(t.label)}</span><button data-id="${esc(t.id)}" data-n="-1" ${t.pending > 0 ? "" : "disabled"} title="Take back a point you just spent">−</button><b class="ptsval">${t.value}</b>
+    <button data-id="${esc(t.id)}" data-n="1" ${p.points > 0 && !(p.cap && t.value >= p.cap) ? "" : "disabled"} title="Spend a point on ${esc(t.label)}">+</button>${t.pending ? `<small class="hint"> +${t.pending} now</small>` : ""}</div>`).join("");
+  box.querySelectorAll("button").forEach((b) => b.onclick = () => spendPoint(b.dataset.id, +b.dataset.n));
+}
+async function showPoints() {
+  if (!story) return;
+  let p; try { p = await api(`/stories/${story.id}/points`); story = await api("/stories/" + story.id); renderSidebar(); } catch (e) { alert(e.message); return; }
+  if (!p.on) { alert("This story has no points to spend. Set up a Points tracker with a “spend points on” list under Settings → Story & narration → Side panel."); return; }
+  modal(`<h2>⭐ Spend your ${esc(p.label.toLowerCase())}</h2>
+    <p class="hint">Spend them on the stats and skills below. The narrator is told the final numbers with your next move and cannot assign points itself. You can take back points you spent since your last move.${p.cap ? ` A stat cannot go above ${p.cap} this way.` : ""}</p>
+    <div class="ptsleft" id="ptsLeft"></div><div id="ptsList"></div>
+    <div class="trow"><b>＋ A skill</b> <small class="hint">(for example one your class gives)</small><div class="actions" style="justify-content:flex-start"><input id="ptsSkill" maxlength="30" placeholder="Skill name, e.g. Brace"><button id="ptsAddSkill">Add the skill</button></div><div class="hint" id="ptsMsg"></div></div>
+    <div class="actions"><span style="flex:1"></span><button class="primary" id="ptsDone">Done</button></div>`);
+  fillPoints(p);
+  $("ptsDone").onclick = () => { try { localStorage.setItem("pointsAsked:" + story.id, "1"); } catch (e) { /* not saved */ } closeModal(); };
+  $("ptsAddSkill").onclick = async () => {
+    const name = $("ptsSkill").value.trim(); if (!name) return;
+    try { const r = await api(`/stories/${story.id}/points/skill`, { method: "POST", body: { name } }); story = r.story; renderSidebar(); fillPoints(r.points); $("ptsSkill").value = ""; $("ptsMsg").textContent = `Added ${name}.`; }
+    catch (e) { $("ptsMsg").textContent = e.message; }
+  };
+}
+// when a story with points to spend is opened at its start, offer the dialog once
+async function maybeAskPoints() {
+  if (!story || (story.turns || []).length > 2) return;
+  try { if (localStorage.getItem("pointsAsked:" + story.id)) return; } catch (e) { /* ask */ }
+  if (!activeFields().some((f) => (f.spend_on || []).length)) return;
+  try { const p = await api(`/stories/${story.id}/points`); if (p.on && p.points > 0) showPoints(); } catch (e) { /* optional */ }
 }

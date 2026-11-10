@@ -119,6 +119,31 @@ A ready-made player character that fits the world: name, gender, age, looks, per
 
 Turns, memory, notes, usage and API keys are never included.
 
+## 12. Lore entries (📚 Lore, in the 🧠 Memory screen)
+
+**What they are:** facts about your world that the app keeps and sends to the narrator **only when they matter**. Each entry has a title, **trigger words**, and the text the narrator should know. When one of its trigger words appears in the player's move or the last two turns, the entry is added to the narrator's instructions, hidden from the player. An entry ticked **Always send** goes out every turn. No AI is involved, so it costs nothing.
+
+**Use them for** things that are too long or too situational for the prompt: a place's layout, a faction's customs, a rule you only need when it comes up, a character's history. The prompt stays short, and the narrator is still reminded at the right moment.
+
+| Part | What to write | Example from The Lantern Market |
+|---|---|---|
+| Title | A short name (for you; the narrator sees it as a label). | Mothfolk manners |
+| Trigger words | The words that should bring the entry up, separated by commas. Whole words, any capitalisation. Include names and nicknames. | Mothfolk, Kesh, antennae, wings |
+| Text | 1 to 4 sentences of facts, written as plain statements. Say what must stay true; do not write instructions about style. | "Mothfolk speak softly and never raise their voices…" |
+| Importance | 0 to 9: when many entries trigger at once, higher ones are sent first. | 7 |
+| Always send | For a few short facts that should never be forgotten (tone, a core rule). | the "Tone" entry |
+
+**For best results**
+- Keep each entry to **one topic** and **short** (the app sends at most 8 entries and about 3,500 characters per move).
+- Put the **secret** facts here too: the narrator is told them only when the clue words come up.
+- Use the **Test** box in the dialog: type a sentence a player might write and see which entries it would trigger.
+- Lore entries are **included in the story package** when you export it, and imported with it. (*Update this game from a package* adds entries the game does not have yet and never overwrites yours.)
+
+## 13. Stat points and dice (optional, for stories with stats)
+
+- **Points the player spends:** give your Points tracker a **spend points on** list (Settings → Story & narration → Side panel; for example `Strength, Stamina`) and an optional **max**. The side panel then shows **+** buttons, the app does the arithmetic, a window opens at the start of a new game to place starting points (read from the avatar sheet: "Strength 8, … Free points: 5"), and the narrator is told the final numbers and never assigns points itself. Players can add skills (for example a class's) in that window.
+- **Dice:** the 🎲 button in ⚡ rolls a d20 + (stat − 5) against a difficulty and sends the outcome to the narrator as final. If your story prompt mentions rolls, checks or dice, the app also rolls **automatically** for risky actions; otherwise rolls happen only when the player presses 🎲. The player can change this in the same window.
+
 ## Checklist
 
 - [ ] Prompt: world, player, characters, rules (with the secret), style, status line.
@@ -128,3 +153,4 @@ Turns, memory, notes, usage and API keys are never included.
 - [ ] Species described (if any), places with pictures, art direction, cover, backdrop.
 - [ ] Trackers matching the status line labels exactly.
 - [ ] A starter avatar, then export with the avatar box ticked.
+- [ ] Lore entries for places, factions and secrets that are too long for the prompt (each with trigger words).

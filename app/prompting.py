@@ -3,7 +3,7 @@ import copy
 import json
 import re
 
-from . import store, tracker
+from . import characters, store, tracker
 
 ENGINE_CORE = """\
 === ENGINE RULES (added by the app; always follow) ===
@@ -13,6 +13,11 @@ player character's actions or words beyond what the player stated. Keep the worl
 the story so far. Use the exact response format the story prompt above defines (fill in real values; never copy
 placeholders or templates literally).
 """
+
+# Story option "narrator_acts": the story prompt lets the narrator decide some of the player character's routine, in-character actions (it says how far).
+ACTS_RULE = ("You may decide some of the player character's routine, in-character actions, thoughts and short lines, as the story prompt above allows, based on their "
+             "backstory, key events, stats, skills, quests and the story so far. Always follow what the player stated and build around it, and never make a major or "
+             "irreversible decision for the player character, or spend or assign points, unless the story prompt says otherwise.")
 
 # Optional extra: lets the app fill its sidebar. Turn off per story when the prompt has its own status panel.
 ENGINE_STATE = """\
@@ -147,6 +152,7 @@ def images_block(story: dict) -> str:
             "Directly above each line of dialogue from a listed character, output one image tag on its own line: "
               "[[Name/mood]], choosing the mood that best fits what they feel or do in that line. "
             + mood_rule
+            + (action_rule(story) + " " if action_moods_on(story) else "")
             + "Skip the tag for anyone not listed. If the story prompt above asks for portraits more often (for example for silent reactions "
               "or first appearances), follow it: the tag format is the same."
         )
@@ -200,7 +206,7 @@ def opening_for_model(story: dict) -> str:
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)\s*", "", story["opening"])
     text = re.sub(r"^\[//\]:.*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text.replace("{user}", player_name(story))
+    return text.replace("{{user}}", player_name(story)).replace("{user}", player_name(story))
 
 
 def player_name(story: dict) -> str:
@@ -215,7 +221,8 @@ def avatar_block(story: dict) -> str:
     return (
         "=== PLAYER AVATAR (the player's own character; this is {user}) ===\n"
         + "\n".join(lines)
-        + "\nKeep this character consistent. Only the player decides what this character does, says or thinks."
+        + ("\nKeep this character consistent. The player decides what this character does, says or thinks; the narrator may fill in routine, in-character actions as the story prompt allows."
+           if story.get("narrator_acts") else "\nKeep this character consistent. Only the player decides what this character does, says or thinks.")
     )
 
 
@@ -331,6 +338,48 @@ def _fancy_moods(story: dict) -> list[str]:
     return [m for m, _ in sorted(out.items(), key=lambda kv: -kv[1])][:8]
 
 
+def action_moods_on(story: dict) -> bool:
+    """Art → Style & options → "Action moods" (on unless the player switched it off): in action scenes the narrator prefers the action mood pictures."""
+    art = story.get("art") or {}
+    return bool(art.get("action_moods", True) and art.get("portraits", True))
+
+
+def _action_names(story: dict, short: bool = False) -> str:
+    base = []
+    for m in characters.ACTION_MOODS:
+        b = re.sub(r"\s*\d+$", "", m)
+        if b not in base:
+            base.append(b)
+    if story.get("nsfw"):
+        base += [m for m in characters.ADULT_ACTION_MOODS if m not in base]
+    return ", ".join(base)
+
+
+def action_rule(story: dict) -> str:
+    """The standing rule (stable text, so it does not disturb prompt caching)."""
+    adult = " and, because adult content is allowed in this story, intimate scenes" if story.get("nsfw") else ""
+    return ("ACTION SCENES: during fights, chases, danger and other physical action" + adult + ", prefer the ACTION moods over calm expression moods in the portrait tags of the "
+            "characters involved, choosing the one that matches what that character is physically doing in that line. The standard action moods are: " + _action_names(story) + ". "
+            "Use one the character already has (see the PICTURES AVAILABLE note); if they have none that fits, use the standard name from this list (the player will be offered to draw it). "
+            "Keep using action moods through the whole action sequence, and return to expression moods (smile, sad, angry...) when it is over.")
+
+
+_ACTION_RE = re.compile(r"\b(fight\w*|attack\w*|struck|strikes?|striking|slash\w*|stab\w*|punch\w*|kick\w*|dodg\w*|parr(?:y|ied|ies)|block\w*|charg\w*|chas(?:e|ed|es|ing)|flee\w*|fled|"
+                        r"battle\w*|combat|duel\w*|ambush\w*|explo\w+|gunfire|shoot\w*|shot|arrows?|spells?|blood\w*|wound\w*|sword|blade|knife|weapons?|ambush|brawl\w*|clash\w*|lunge\w*|swing\w*|"
+                        r"tackle\w*|grappl\w*|collaps\w*|screams?|roar\w*)\b", re.IGNORECASE)
+_ADULT_SCENE_RE = re.compile(r"\b(kiss\w*|undress\w*|naked|nude|moan\w*|gasp\w*|caress\w*|arous\w*|lust\w*|intimate|intimacy|sex\w*|bed|lingerie|shower\w*|bath\w*|stripp?\w*|climax\w*|thrust\w*|embrac\w*)\b", re.IGNORECASE)
+
+
+def _in_action_scene(story: dict) -> bool:
+    """A cheap guess from the player's last move and the narrator's last reply: is the story in an action scene (or, in an adult story, an intimate one) right now?"""
+    turns = story.get("turns") or []
+    recent = " ".join(t.get("text", "")[-1800:] for t in turns[-2:])
+    hits = len(_ACTION_RE.findall(recent))
+    if story.get("nsfw"):
+        hits += len(_ADULT_SCENE_RE.findall(recent))
+    return hits >= 3
+
+
 def picture_reminder(story: dict) -> str:
     """A short per-turn reminder placed right before the narrator writes (the long rules sit far back and a long history of replies that
     followed the listed moods pulls the narrator toward repeating them). Only for stories with "Ask for exact moods" and/or "Scene picture most turns" on, or with Places pictures."""
@@ -345,6 +394,9 @@ def picture_reminder(story: dict) -> str:
         ex = _fancy_moods(story)
         lines.append("The characters have an extended range of mood pictures (see PICTURES AVAILABLE). Use the whole range: for every portrait tag pick the most specific mood that fits that line"
                      + (f" (for example {', '.join(ex[:6])})" if ex else "") + " instead of falling back on normal or smile, and vary the moods from line to line.")
+    if action_moods_on(story) and any(c.get("moods") for c in story.get("cast") or []) and _past_first_turn(story) and _in_action_scene(story):
+        lines.append("The story is in an action scene right now: for the portrait tags of the characters involved use ACTION moods (" + _action_names(story) + ") that match what each is physically "
+                     "doing, not calm expression moods, until the action is over.")
     if art.get("auto") and art.get("scene_often"):
         has_places = any(p.get("url") for p in story.get("places") or [])
         lines.append("End this reply with a <scene>…</scene> frame unless it is only a short back-and-forth" + (" or only moves the characters into a listed place" if has_places else "")
@@ -354,9 +406,10 @@ def picture_reminder(story: dict) -> str:
     return ("[PICTURE REMINDER, for the narrator only] " + " ".join(lines)) if lines else ""
 
 
-def build(story: dict) -> Built:
+def build(story: dict, beats_note: str = "") -> Built:
     use_state = story.get("use_state_block", True)
-    rules = ENGINE_CORE + ("\n" + ENGINE_STATE if use_state else "")
+    core_rules = ENGINE_CORE.replace("Never decide the\nplayer character's actions or words beyond what the player stated.", ACTS_RULE) if story.get("narrator_acts") else ENGINE_CORE
+    rules = core_rules + ("\n" + ENGINE_STATE if use_state else "")
     name = player_name(story)
     core = "\n\n".join(p for p in (story.get("base_prompt", "").strip(), avatar_block(story), cast_block(story), names_block(story), endings_block(story), images_block(story), rules, content_block(story)) if p)
     extras = []
@@ -377,6 +430,8 @@ def build(story: dict) -> Built:
     panel = tracker.tail_text(story)   # what the side panel shows, so the narrator keeps it consistent
     if panel:
         tail = (tail + "\n\n" if tail else "") + panel
+    if beats_note:     # story beats that are due (the app's schedule); hidden from the player
+        tail = (tail + "\n\n" if tail else "") + beats_note
     pic = pictures_available(story)
     if pic:
         tail = (tail + "\n\n" if tail else "") + pic
@@ -392,7 +447,7 @@ def build(story: dict) -> Built:
     if opening and start == 0:   # the opening is the story's first message (older, summarized stories no longer need it)
         messages = [{"role": "user", "content": "(The story begins.)"}, {"role": "assistant", "content": opening}] + messages
     # Prompts written for other platforms use {user} for the player's character.
-    sub = lambda t: t.replace("{user}", name)
+    sub = lambda t: t.replace("{{user}}", name).replace("{user}", name)          # {{user}} is how other apps write it
     return Built(sub(core), sub("\n\n".join(extras)), messages, sub(tail))
 
 
