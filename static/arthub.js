@@ -29,7 +29,7 @@ function showArtHub(tab = "Overview") {
       ${card("🎬", "Scene pictures", `Auto-illustrate: ${onoff(a.auto)} · a picture most turns: ${onoff(a.scene_often)} · shown ${({ panel: "in the side panel", banner_top: "as a banner above the narration", banner_bottom: "as a banner below the narration" })[a.scene_where] || "under the reply"}`, `<button id="hIllus" ${busy ? "disabled" : ""}>Illustrate the latest reply</button><button id="hStyle1">Options…</button>`)}
     </div>
     <div id="hubStyle" class="hidden">${artTabHtml().replace('id="tabArt" class="hidden"', 'id="tabArt"')}
-      <div class="actions"><span class="hint" id="hubStyleNote"></span><span style="flex:1"></span><button class="primary" id="hubStyleSave">Save</button></div></div>
+      <div class="actions sticky"><span class="hint" id="hubStyleNote"></span><span style="flex:1"></span><button class="primary" id="hubStyleSave">Save</button></div></div>
     <div id="hubBackgrounds" class="hidden"></div>
     <div id="hubMakers" class="hidden"></div>
     <div class="actions" style="margin-top:8px"><button id="mClose">Close</button></div>`);
@@ -113,11 +113,13 @@ async function mountMakers(box) {
   config = await api("/config");
   box.innerHTML = `<h3>Which AI draws pictures${story ? ` in “${esc(story.title)}”` : ""}</h3><div id="mkPick"></div>
     ${imageSettingsHtml(config)}
-    <div class="actions"><span class="hint" id="mkNote"></span><span style="flex:1"></span><button class="primary" id="mkSave">Save</button></div>`;
+    <div class="actions sticky"><span class="hint" id="mkNote"></span><span style="flex:1"></span><button class="primary" id="mkSave">Save</button></div>`;
   collapsify(box);
   let sync = null;
   const picker = mountAIChooser($("mkPick"), { initial: currentChoices(), roles: ["images"], onChange: () => { if (sync) sync(); } });
   sync = bindImageSettings(config, picker);
+  const dirty = () => { if ($("mkNote") && $("mkNote").textContent !== "Saving…") $("mkNote").textContent = "● Unsaved changes: press Save."; };
+  box.addEventListener("input", dirty); box.addEventListener("change", dirty);
   $("mkSave").onclick = async (e) => {
     e.target.disabled = true; $("mkNote").textContent = "Saving…";
     try {
@@ -146,6 +148,7 @@ function collapsify(pane, openFirst = true) {
   if (!pane) return;
   let cur = null, first = true;
   for (const k of [...pane.children]) {
+    if (k.classList.contains("actions") && k === pane.lastElementChild) break;   // a closing Save row stays outside the folded sections, so it is always visible
     if (k.tagName === "H3") {
       cur = document.createElement("details"); cur.className = "sub"; cur.open = first && openFirst; first = false;
       const sm = document.createElement("summary"); sm.innerHTML = k.innerHTML; cur.appendChild(sm); pane.replaceChild(cur, k);
