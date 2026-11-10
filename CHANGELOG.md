@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.1
+**Fixed**
+- **The Save button on 🖼 Art → Picture makers was hidden.** The tab folds its settings into sections, and the folding put the Save row inside the last (closed) section, so changes there could not be saved. Save now stays outside the sections and sticks to the bottom of the window (also on the Style tab), and the tab shows "Unsaved changes" until you press it. Checked on desktop and at phone width, including that a saved change persists.
+
 ## 1.5.0
 **Tested on a phone.** Phone and tablet play was checked on a real Android phone over a home network (PIN, remembered device, playing a story) and at phone width in a desktop browser: every screen and dialog (38 of them) was opened with no sideways overflow and no script errors, the phone loads nothing from the internet, and a phone cannot read the PIN, close the app or make a bug report. iPhone, iPad and Windows have not been tested.
 
