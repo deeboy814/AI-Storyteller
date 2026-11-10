@@ -1,5 +1,6 @@
 """AI Storyteller: local FastAPI server. Run with ./run.sh"""
 import asyncio
+import contextvars
 import hashlib
 import os
 import io
@@ -7,6 +8,7 @@ import zipfile
 import json
 import re
 import shutil
+import subprocess
 import signal
 import time
 import uuid
@@ -124,6 +126,30 @@ async def lifespan(_app):
 
 app = FastAPI(title="AI Storyteller", lifespan=lifespan)
 
+APP_DIR = Path(__file__).resolve().parent
+
+
+def _code_fp(folder: Path, pattern: str) -> str:
+    """A fingerprint of the app's own files (names, sizes, change times), to notice when the files on disk are newer than what is running."""
+    h = hashlib.sha1()
+    for f in sorted(folder.glob(pattern)):
+        try:
+            st = f.stat()
+            h.update(f"{f.name}:{st.st_size}:{int(st.st_mtime)}".encode())
+        except OSError:
+            continue
+    return h.hexdigest()[:12]
+
+
+RUNNING_FP = _code_fp(APP_DIR, "*.py")      # the server code this process loaded
+
+
+@app.get("/api/code-status")
+def code_status():
+    """restart: the server's code changed on disk since it started (a restart loads it). page: a fingerprint of the page's files (the page compares it with
+    the one it loaded with, and offers a reload when they differ)."""
+    return {"restart": _code_fp(APP_DIR, "*.py") != RUNNING_FP, "page": _code_fp(APP_DIR.parent / "static", "*")}
+
 
 @app.exception_handler(providers.ProviderError)
 async def _provider_error(_request: Request, exc: providers.ProviderError):
@@ -132,7 +158,16 @@ async def _provider_error(_request: Request, exc: providers.ProviderError):
 
 
 # ---------------- optional access PIN for other devices on your network (see run-lan.sh) ----------------
-PIN = os.environ.get("STORYTELLER_PIN", "")
+def _lan_pin(new: bool = False) -> str:
+    """The 6-digit PIN phones and tablets enter (data/lan_pin, made on first use)."""
+    import secrets
+    f = store.DATA / "lan_pin"
+    if new or not (f.exists() and f.read_text(encoding="utf-8").strip()):
+        f.write_text("".join(secrets.choice("0123456789") for _ in range(6)) + "\n", encoding="utf-8")
+    return f.read_text(encoding="utf-8").strip()
+
+
+PIN = os.environ.get("STORYTELLER_PIN", "") or (_lan_pin() if store.load_config().get("lan_access") else "")
 _pin_fail: dict[str, int] = {}
 LOGIN_HTML = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>AI Storyteller</title>
 <body style="background:#12111c;color:#e8e5f2;font:18px system-ui;display:grid;place-items:center;height:100vh;margin:0"><form method=post action=/pin-login style="display:grid;gap:12px;width:min(320px,90vw)">
@@ -145,6 +180,30 @@ def _pin_cookie() -> str:
 
 
 _LOCAL_NAMES = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def _home_network(host: str) -> bool:
+    """This computer or a device on the home network (private addresses only: 192.168.x.x, 10.x.x.x, 172.16-31.x.x, link-local)."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host.split("%")[0])
+    except ValueError:
+        return host == "localhost"
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return any(ip in ipaddress.ip_network(n) for n in _HOME_NETS if ipaddress.ip_network(n).version == ip.version)
+
+
+_HOME_NETS = ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10")
+
+
+@app.middleware("http")
+async def home_network_only(request: Request, call_next):
+    """Phone and tablet access is for the home network only: a request from anywhere else (the internet, if a router ever forwarded the port) is refused."""
+    host = request.client.host if request.client else ""
+    if host and not _home_network(host):
+        return Response("Only devices on your home network can use AI Storyteller.", media_type="text/plain", status_code=403)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -221,6 +280,7 @@ class StoryIn(BaseModel):
     opening_in_context: bool | None = None
     models: dict | None = None            # {story|recaps|images: {provider, model}}
     auto_replies: bool | None = None      # suggest three replies after every narrator reply
+    rule_check: bool | None = None        # after every reply, the small helper checks it against the story's own rules
     nsfw: bool | None = None              # adult content setting
     description: str | None = None
     prologue: str | None = None
@@ -260,6 +320,7 @@ class TurnIn(BaseModel):
     provider: str | None = None
     model: str | None = None
     force_budget: bool = False      # send even though a spending limit was reached
+    note: str = ""                  # regenerate with changes: sent with this request only, never stored in the story
 
 
 def _story(sid: str) -> dict:
@@ -302,6 +363,9 @@ def _save_turn(story: dict) -> dict:
     fresh = _story(story["id"])
     for k in ("turns", "state", "suggestions", "summary", "summary_upto", "tracker"):
         fresh[k] = story[k]
+    for k in ("retry_pending", "undone"):
+        if k not in story:
+            fresh.pop(k, None)
     store.save_story(fresh)
     return fresh
 
@@ -569,6 +633,8 @@ def create_story(body: StoryIn):
         s["opening_in_context"] = body.opening_in_context
     if body.auto_replies is not None:
         s["auto_replies"] = body.auto_replies
+    if body.rule_check is not None:
+        s["rule_check"] = body.rule_check
     _apply_creation_fields(s, body)
     store.save_story(s)
     if body.nsfw:
@@ -608,6 +674,8 @@ def update_story(sid: str, body: StoryIn):
         s["opening_in_context"] = body.opening_in_context
     if body.auto_replies is not None:
         s["auto_replies"] = body.auto_replies
+    if body.rule_check is not None:
+        s["rule_check"] = body.rule_check
     if body.nsfw is not None:
         s["nsfw"] = body.nsfw
     cast_before = body.cast
@@ -824,6 +892,7 @@ class ArtIn(BaseModel):
     portraits: bool = True
     newchar: bool = False               # opt-in: the narrator flags new named characters (hidden tag) so art can be offered
     now_card: bool = False              # opt-in: the side panel shows who the player is talking to (picture, mood, clothing) in place of the avatar
+    now_pic: str = "portrait"           # the card's picture: "portrait" (their saved picture for the mood) or "live" (a new picture each turn of what they are doing and wearing)
     dynamic_backdrop: bool = False      # opt-in (with auto_backdrop): dramatic moments (alarm, fire, battle...) get their own variant of the background
     auto_backdrop: bool = False         # opt-in: the helper model changes the screen backdrop to match where the scene is
     scene_often: bool = False           # opt-in: the narrator adds a scene picture to most replies (Places pictures cover routine room-to-room moves)
@@ -841,6 +910,8 @@ class CastMember(BaseModel):
     author: bool | None = None   # tell the narrator about this character (bio + personality)
     aka: str | None = None       # other names the story uses for them, comma separated (None = keep what is saved)
     address: str | None = None   # who may use which name for them (sent to the narrator every turn when filled in)
+    species: str | None = None   # "" or "human" = human; anything else is a species with its own reference picture and maker (None = keep what is saved)
+    maker: str | None = None     # this character's own picture maker: "" = the story's, "flux" = FLUX.2 klein (reference pictures), "ckpt:<name>" = a ComfyUI checkpoint
 
 
 class CastIn(BaseModel):
@@ -876,7 +947,14 @@ def _img_provider(cfg: dict, override: str | None = None, s: dict | None = None)
         raise HTTPException(400, "No image maker is selected. Choose one under Settings → AI & story → Pictures.")
     if chosen.get("model") and pid == chosen.get("provider") and not override:
         prov = {**prov, "model": chosen["model"]}   # this story's picture model (an online model name or a ComfyUI checkpoint)
+    if prov.get("type") == "comfyui" and _is_flux_model(prov.get("model", "")):
+        return {**_flux_provider(cfg, s, prov["model"]), "id": prov["id"]}   # FLUX.2 chosen as the main maker: it needs the FLUX workflow, not the checkpoint one
     return prov
+
+
+def _is_flux_model(name: str) -> bool:
+    from . import catalog
+    return name in catalog.UNETS or catalog.is_flux(name)
 
 
 def _bg_provider(cfg: dict, s: dict | None = None) -> dict:
@@ -895,6 +973,108 @@ def _bg_provider(cfg: dict, s: dict | None = None) -> dict:
     usage.set_ctx((s or {}).get("id"), "pictures")
     return {**comfy, "id": "comfyui-bg", "model": bg.get("model") or "flux-2-klein-4b-fp8.safetensors", "workflow": workflow, "workflow_ref": "",
             "prompt_style": "natural", "ref_mode": "characters", "extra_positive": "", "extra_negative": "", "model_tweaks": {}}
+
+
+# ---------------- species and per-character picture makers ----------------
+SPECIES_REF_MP = 0.03          # a species reference is shown to FLUX at this size (megapixels): only its broad look carries over
+_model_ctx: contextvars.ContextVar = contextvars.ContextVar("pic_model", default="")
+
+
+def _is_human(name: str | None) -> bool:
+    return (name or "").strip().lower() in ("", "human", "humans", "person")
+
+
+def _species_entry(s: dict, name: str | None) -> dict | None:
+    return None if _is_human(name) else (s.get("species") or {}).get((name or "").strip().lower())
+
+
+def _full_appearance(s: dict, ch: dict) -> str:
+    """The character's looks plus what is true of their whole species (so every member of it is drawn with the same traits)."""
+    sp = _species_entry(s, ch.get("species"))
+    look = (ch.get("appearance") or "").strip()
+    return f"{look} Species traits ({sp.get('name', ch.get('species'))}): {sp['description'].strip()}" if sp and (sp.get("description") or "").strip() else look
+
+
+def _model_family(name: str) -> str:
+    n = (name or "").lower()
+    if "pony" in n:
+        return "pony"
+    if re.search(r"anim|illustri|noob|waifu|anything|counterfeit|meina|hassaku|danbooru|cartoon|toon", n):
+        return "anime"
+    return "real"
+
+
+def _flux_provider(cfg: dict, s: dict | None = None, model: str | None = None) -> dict:
+    """FLUX.2 klein through ComfyUI, with room for two reference pictures (it keeps a character steady and can copy a whole species' look)."""
+    comfy = next((p for p in cfg.get("image_providers", []) if p.get("type") == "comfyui"), None)
+    if not comfy:
+        raise HTTPException(400, "A FLUX picture maker needs ComfyUI under 🖼 Art → Picture makers.")
+    bg = cfg.get("image_bg") or {}
+    plain = (bg.get("workflow") or "").strip() or (ROOT / "workflows" / "comfyui-flux2-klein.json").read_text(encoding="utf-8")
+    ref = (ROOT / "workflows" / "comfyui-flux2-klein-ref.json").read_text(encoding="utf-8")
+    model = model or bg.get("model") or "flux-2-klein-4b-fp8.safetensors"
+    return {**comfy, "id": "comfyui-flux", "model": model, "workflow": plain, "workflow_ref": ref, "prompt_style": "natural", "extra_positive": "", "extra_negative": "",
+            "model_tweaks": {}, "ref_mode": "characters"}
+
+
+def _maker_spec(s: dict, ch: dict) -> str:
+    """This character's picture maker: their own choice, else their species', else the story's ("")."""
+    sp = (s.get("species") or {}).get("human") if _is_human(ch.get("species")) else _species_entry(s, ch.get("species"))   # humans can have a default maker too (a "Human" entry)
+    return (ch.get("maker") or "").strip() or ((sp or {}).get("maker") or "").strip()
+
+
+def _maker_provider(cfg: dict, s: dict, ch: dict | None, override: str | None = None) -> dict:
+    """The picture provider for one character. "" = the story's own maker; "flux" = FLUX.2 klein with reference pictures; "ckpt:<name>" = another ComfyUI checkpoint
+    (text prompts only, no face reference: right for a species the face model was never trained on)."""
+    base = _img_provider(cfg, override, s)
+    spec = "" if override else _maker_spec(s, ch or {})
+    if spec == "flux":
+        prov = _flux_provider(cfg, s)
+    elif spec.startswith("ckpt:") and base.get("type") == "comfyui":
+        name = spec[5:]
+        raw = next((p for p in cfg.get("image_providers", []) if p.get("id") == base.get("id")), base)   # the checkpoint workflow, even when the story itself draws with FLUX
+        prov = {**raw, "model": name, "workflow_ref": "", "prompt_style": "natural" if _model_family(name) == "real" else "tags"}
+    else:
+        prov = base
+    _model_ctx.set(prov.get("model", ""))
+    return prov
+
+
+def _tag_quality() -> tuple[str, str]:
+    """(quality tags, extra negative tags) for the checkpoint being drawn with: Pony models are trained on score tags."""
+    if _model_family(_model_ctx.get()) == "pony":
+        return "score_9, score_8_up, score_7_up", "score_6, score_5, score_4"
+    return TAG_QUALITY, ""
+
+
+def _copy_species_reference(s: dict, ch: dict, url: str) -> str:
+    """Keep a copy of a character's picture as the reference picture of their species (it survives that character being removed)."""
+    f = _portrait_file(url)
+    if not f:
+        return ""
+    folder = store.PORTRAITS / s["id"] / "species"
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / f"{_slug(ch.get('species') or 'species')}-{int(time.time() * 1000)}{f.suffix}"
+    shutil.copyfile(f, dest)
+    return f"/portraits/{s['id']}/species/{dest.name}"
+
+
+def _note_species_reference(s: dict, ch: dict, mood: str) -> None:
+    """The first picture of a new species (its "normal 1" or default) becomes that species' reference for everyone drawn after."""
+    name = (ch.get("species") or "").strip()
+    if _is_human(name) or mood not in ("normal 1", "default", "normal"):
+        return
+    sp = (s.setdefault("species", {})).setdefault(name.lower(), {"name": name, "description": "", "maker": "", "reference_url": "", "from": ""})
+    url = (ch.get("moods") or {}).get(mood)
+    if url and not sp.get("reference_url"):
+        ref = _copy_species_reference(s, ch, url)
+        if ref:
+            sp["reference_url"], sp["from"] = ref, ch.get("slug", "")
+
+
+def _species_ref_urls(s: dict, ch: dict) -> list[str]:
+    sp = _species_entry(s, ch.get("species"))
+    return [sp["reference_url"]] if sp and sp.get("reference_url") else []
 
 
 def _local_file(url: str, root: Path, prefix: str) -> Path | None:
@@ -940,7 +1120,8 @@ def _store_mood(s: dict, ch: dict, mood: str, data: bytes, ext: str) -> None:
     if moods.get(mood):
         ch.setdefault("alts", {}).setdefault(mood, []).insert(0, moods[mood])
     moods[mood] = f"/portraits/{s['id']}/chars/{ch['slug']}/{name}"
-    tracker.apply_aliases(s)      # a generic side-panel label ("Shop Girl") becomes their name now that they have a picture
+    _note_species_reference(s, ch, mood)
+    tracker.apply_aliases(s)      # a generic side-panel label ("Innkeeper") becomes their name now that they have a picture
 
 
 def _portrait_file(url: str) -> Path | None:
@@ -1005,6 +1186,8 @@ def update_art(sid: str, body: ArtIn):
             art[k] = (v or "").strip()
         elif k == "size":
             art[k] = v if v in images.SHAPES else "portrait"
+        elif k == "now_pic":
+            art[k] = v if v in ("portrait", "live") else "portrait"
         elif k == "portrait_size":
             art[k] = v if v in ("small", "medium", "large") else "medium"
         elif k == "portrait_shape":
@@ -1055,7 +1238,7 @@ async def regenerate_setting(sid: str):
 
 
 def _split_aka(text: str, own_name: str = "") -> list[str]:
-    """'Naomi, Dr. N' -> ['Naomi', 'Dr. N'] (no blanks, no repeats, not the character's own name)."""
+    """'Ann, Captain A' -> ['Ann', 'Captain A'] (no blanks, no repeats, not the character's own name)."""
     out: list[str] = []
     for a in re.split(r"[,\n;]", text or ""):
         a = " ".join(a.split())[:40]
@@ -1075,12 +1258,12 @@ def _find_cast(s: dict, name: str) -> dict | None:
     for c in s.get("cast", []):
         if c["name"].lower().split()[0] == n:
             return c
-    hits = [c for c in s.get("cast", []) if len(n) > 2 and n in [w.strip(".,").lower() for w in c["name"].split()]]   # a surname ("Okafor")
+    hits = [c for c in s.get("cast", []) if len(n) > 2 and n in [w.strip(".,").lower() for w in c["name"].split()]]   # a surname ("Smith")
     return hits[0] if len(hits) == 1 else None
 
 
 def _merge_cast(s: dict, source_slug: str, into_slug: str) -> None:
-    """The same person was in the cast twice (for example "Naomi" and "Dr. Okafor"): fold the first into the second. The first one's name (and other names)
+    """The same person was in the cast twice (for example under a nickname and under their full name): fold the first into the second. The first one's name (and other names)
     become the second's "also called", their pictures join the second as earlier versions, their key events and side-panel row move over."""
     src, dst = _char(s, source_slug), _char(s, into_slug)
     if src is dst:
@@ -1145,10 +1328,15 @@ def update_cast(sid: str, body: CastIn):
                     "bio": prev.get("bio", "") if m.bio is None else m.bio.strip(),
                     "events": prev.get("events", []), "moods": prev.get("moods", {}), "alts": prev.get("alts", {}),
                     "group": prev.get("group", ""), "player": prev.get("player", False), "ext_refs": prev.get("ext_refs", []), "tags": prev.get("tags", ""),
+                    "species": prev.get("species", "") if m.species is None else m.species.strip()[:40],
+                    "maker": prev.get("maker", "") if m.maker is None else m.maker.strip()[:120],
                     "aka": prev.get("aka", []) if m.aka is None else _split_aka(m.aka, name),
                     "address": prev.get("address", "") if m.address is None else m.address.strip()[:600],
                     "personality": prev.get("personality", "") if m.personality is None else m.personality.strip(),
                     "author": prev.get("author", False) if m.author is None else m.author})
+    for c in new:      # every species named on a character is in the story's species list
+        if not _is_human(c.get("species")):
+            s.setdefault("species", {}).setdefault(c["species"].strip().lower(), {"name": c["species"].strip(), "description": "", "maker": "", "reference_url": "", "from": ""})
     for slug in old.keys() - seen:
         shutil.rmtree(store.PORTRAITS / sid / "chars" / slug, ignore_errors=True)
         gone = old[slug]["name"]       # a character the player removed must not come back by itself from the next reply
@@ -1275,17 +1463,35 @@ async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None
     """Draw one portrait. All the character's saved pictures are sent as references, so each saved one reinforces the next.
     Drawing a mood that already exists keeps the old picture as an alternate."""
     s, cfg = _story(sid), store.load_config()
-    ch, prov = _char(s, slug), _img_provider(store.load_config(), provider, s)
+    ch = _char(s, slug)
+    prov = _maker_provider(cfg, s, ch, provider)
     mood = mood.strip().lower() or "default"
-    refs = _load_refs(_portrait_urls(ch, mood), int(cfg.get("image_max_refs", 3)))
-    art = await _art_with_setting(s, cfg)
-    ext_only = bool(refs) and not _portrait_urls(ch, mood, ext=False)
-    prompt = images.portrait_prompt(art, ch["name"], ch["appearance"], None if mood == "default" else mood, bool(refs), ext_only, nsfw=bool(s.get("nsfw")))
+    look_of_mood = ((cfg.get("mood_looks") or {}).get(re.sub(r"\s*\d+$", "", mood)) or "")
+    if not provider and _is_explicit(mood + " " + look_of_mood, cfg) and (ns := _nsfw_provider(cfg, s)):
+        prov = ns                # an explicit picture type (e.g. "nude", "aroused") in an adult story: the adult picture maker draws it
+        _model_ctx.set(prov.get("model", ""))
+    urls = _portrait_urls(ch, mood)
+    species_only = False
+    if not urls and prov.get("workflow_ref"):    # nothing of their own yet: the first picture of their species is a (tiny) reference for the look of the species
+        urls = _species_ref_urls(s, ch)
+        species_only = bool(urls)
+        if species_only:
+            prov = {**prov, "ref_megapixels": SPECIES_REF_MP}
+    refs = _load_refs(urls, int(cfg.get("image_max_refs", 3)))
+    art = _nsfw_art(await _art_with_setting(s, cfg), prov)
+    look = _full_appearance(s, ch)
+    ext_only = bool(refs) and not species_only and not _portrait_urls(ch, mood, ext=False)
+    mood_text = None if mood == "default" else f"{mood} ({_mood_look(mood, bool(s.get('nsfw')))})"
+    prompt = images.portrait_prompt(art, ch["name"], look, mood_text, bool(refs), ext_only, nsfw=bool(s.get("nsfw")),
+                                    species_ref=(ch.get("species") or "") if species_only else "", framing=_framing(mood))
     negative = s["art"].get("negative", "")
     if _wants_tags(prov):
-        prompt, negative = await _portrait_tag_prompt(s, cfg, art, ch, mood)
+        prompt, negative = await _portrait_tag_prompt(s, cfg, art, {**ch, "appearance": look}, mood)
+    if prov.get("nsfw_maker"):
+        prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov))
     try:
-        data, ext = await images.generate(prov, prompt, negative, s["art"].get("portrait_shape", "landscape"), refs)
+        shape = ((prov.get("model_tweaks") or {}).get(prov.get("model", "")) or {}).get("shape") if prov.get("nsfw_maker") else None
+        data, ext = await images.generate(prov, prompt, negative, shape if shape in images.SHAPES else s["art"].get("portrait_shape", "landscape"), refs)
     except images.ImageError as e:
         raise HTTPException(502, str(e))
     s = _story(sid)           # freshest copy right before saving: edits made while this was drawing are kept
@@ -1328,7 +1534,7 @@ def _events_model(cfg: dict, s: dict | None = None, purpose: str = "key events")
     return _role(cfg, s, "small" if purpose == "key events" else "recaps", purpose)   # only the per-reply log uses the small helper; condense/rebuild/bio keep the better one
 
 
-async def _events_after_turn(sid: str, idx: int) -> None:
+async def _events_after_turn(sid: str, idx: int, ts: float | None = None) -> None:
     """After a reply is saved: log key events for the characters in it. Runs in the background and must never disturb play."""
     try:
         cfg = store.load_config()
@@ -1336,6 +1542,8 @@ async def _events_after_turn(sid: str, idx: int) -> None:
             return
         s = store.load_story(sid)
         if idx >= len(s["turns"]) or s["turns"][idx]["role"] != "assistant" or not s.get("cast"):
+            return
+        if ts is not None and s["turns"][idx].get("ts") != ts:     # that reply was retried or swapped meanwhile: do not log its events
             return
         raw = s["turns"][idx]["text"]
         text = _clean_for_scene(raw)
@@ -1476,6 +1684,81 @@ def _event_context(s: dict, name: str, limit: int = 7000) -> str:
 class EventIn(BaseModel):
     when: str = ""
     text: str
+
+
+class SpeciesItemIn(BaseModel):
+    name: str
+    description: str = ""
+    maker: str = ""
+
+
+class SpeciesIn(BaseModel):
+    species: list[SpeciesItemIn]
+
+
+@app.put("/api/stories/{sid}/species")
+def update_species(sid: str, body: SpeciesIn):
+    """The story's species: a description of what is true of the whole species (added to every member's picture prompt), the picture maker they use by default, and
+    the reference picture (kept). A species removed from the list loses its entry; the characters keep their species name."""
+    s = _story(sid)
+    old = s.get("species") or {}
+    new = {}
+    for it in body.species:
+        name = " ".join(it.name.split())[:40]
+        if not name:
+            continue
+        key = name.lower()
+        prev = old.get(key, {})
+        new[key] = {"name": name, "description": it.description.strip()[:800], "maker": it.maker.strip()[:120],
+                    "reference_url": prev.get("reference_url", ""), "from": prev.get("from", "")}
+    for key in old.keys() - new.keys():
+        f = _portrait_file(old[key].get("reference_url", ""))
+        if f:
+            f.unlink(missing_ok=True)
+    s["species"] = new
+    store.save_story(s)
+    return s
+
+
+class SpeciesRefIn(BaseModel):
+    slug: str
+
+
+@app.post("/api/stories/{sid}/species/{key}/reference")
+def set_species_reference(sid: str, key: str, body: SpeciesRefIn):
+    """Use one character's picture as the reference of this species (the first picture drawn does this by itself)."""
+    s = _story(sid)
+    sp = (s.get("species") or {}).get(key.lower())
+    if not sp:
+        raise HTTPException(404, "Unknown species")
+    ch = _char(s, body.slug)
+    moods = ch.get("moods") or {}
+    url = next((moods[m] for m in ("normal 1", "default", "normal") if moods.get(m)), next(iter(moods.values()), ""))
+    if not url:
+        raise HTTPException(400, f"{ch['name']} has no picture yet.")
+    ref = _copy_species_reference(s, {**ch, "species": sp["name"]}, url)
+    if not ref:
+        raise HTTPException(404, "That picture is missing.")
+    old = _portrait_file(sp.get("reference_url", ""))
+    if old:
+        old.unlink(missing_ok=True)
+    sp["reference_url"], sp["from"] = ref, ch["slug"]
+    store.save_story(s)
+    return s
+
+
+@app.delete("/api/stories/{sid}/species/{key}/reference")
+def clear_species_reference(sid: str, key: str):
+    s = _story(sid)
+    sp = (s.get("species") or {}).get(key.lower())
+    if not sp:
+        raise HTTPException(404, "Unknown species")
+    f = _portrait_file(sp.get("reference_url", ""))
+    if f:
+        f.unlink(missing_ok=True)
+    sp["reference_url"], sp["from"] = "", ""
+    store.save_story(s)
+    return s
 
 
 class TagsIn(BaseModel):
@@ -1632,7 +1915,8 @@ def _new_job(kind: str, sid: str, total: int) -> dict:
 async def _run_job(job: dict, work) -> None:
     async with _image_lock:
         try:
-            await work(job)
+            with localrt.hold():      # ComfyUI stays up for the whole job, not only while each picture is drawn
+                await work(job)
             job["status"] = "done"
         except HTTPException as e:
             job["status"], job["error"] = "error", str(e.detail)
@@ -1662,15 +1946,15 @@ _NEWCHAR_AI = ("You read story passages and report on the named characters. Repl
                '"new": EVERY character called by a personal name in the text (narration or dialogue) who is not on the known list; the player character and the known '
                "list are excluded. Only people with a name count: skip unnamed extras, groups and places. For each give a short purely visual description for an image "
                "generator, drawn only from what the text says (age, hair, eyes, build, clothing); leave out anything not stated. Keep descriptions safe for work. "
-               '"same": for each side-panel label you are given (a generic tag such as "Shop Girl"), say which named character it is, known or new, when the passages '
+               '"same": for each side-panel label you are given (a generic tag such as "Innkeeper"), say which named character it is, known or new, when the passages '
                "make that clear; leave the label out when it is someone else or you are not sure. "
                'Also add "aka": [{"alias": "...", "of": "..."}] for any name in the passages (a first name, surname, nickname or title) that is just ANOTHER NAME for a '
-               "character on the known list (for example the passages call Dr. Okafor \"Naomi\"), whether or not the alias is itself on the known list. Only when the passages make it clear; "
+               "character on the known list (for example the passages call a character by a nickname), whether or not the alias is itself on the known list. Only when the passages make it clear; "
                'never list such an alias under "new". This is a fiction-writing tool; just report names. Use [] for an empty list.')
 
 
 def _tracker_labels(s: dict) -> list[str]:
-    """Side-panel character rows that do not match anyone in the cast by name (usually a generic label like "Shop Girl")."""
+    """Side-panel character rows that do not match anyone in the cast by name (usually a generic label like "Innkeeper")."""
     first = {c["name"].lower().split()[0] for c in s.get("cast", [])} | {c["name"].lower() for c in s.get("cast", [])}
     first |= {a.lower() for c in s.get("cast", []) for a in c.get("aka") or []}
     asked = s.get("alias_asked") or {}
@@ -1681,7 +1965,7 @@ def _tracker_labels(s: dict) -> list[str]:
 
 def _apply_aka(story: dict, items: list[dict]) -> None:
     """The helper model says a name is just another name for a known character: remember it as "also called". If that name is already a separate cast entry
-    with no pictures (made earlier by mistake, like "Naomi" next to "Dr. Okafor"), it is folded into the real character; one with pictures is left for the player."""
+    with no pictures (made earlier by mistake, like a nickname next to the full name), it is folded into the real character; one with pictures is left for the player."""
     for m in items:
         alias, of = " ".join(str(m.get("alias", "")).split())[:40], str(m.get("of", "")).strip()
         target = _find_cast(story, of)
@@ -1732,7 +2016,7 @@ def _unseen_names(sid: str) -> bool:
 
 async def _find_new_chars(sid: str) -> None:
     """After a reply (opt-in art.newchar): the narrator does not always write the hidden <newchar> tag, so the helper model reads the last replies, adds
-    any named character missing from the cast, and works out which named character a generic side-panel label ("Shop Girl") really is. Failures are
+    any named character missing from the cast, and works out which named character a generic side-panel label ("Innkeeper") really is. Failures are
     silent: it is a convenience, not part of the turn."""
     try:
         s, cfg = _story(sid), store.load_config()
@@ -1862,19 +2146,36 @@ def _add_new_chars(story: dict, items: list[tuple[str, str]]) -> None:
         n = characters.clean_name(raw)
         if not n or n.lower().startswith(("the ", "her ", "his ", "their ", "my ", "your ", "a ", "an ")) or re.search(r"['’]s ", n) or n.lower() in known or n.lower().split()[0] in known:
             continue
-        _ensure_char(story, n, look[:400])
+        ch = _ensure_char(story, n, look[:400])
         known.add(n.lower())
+        _file_species(story, ch)
+
+
+def _file_species(story: dict, ch: dict) -> None:
+    """A new character whose look starts with a species ("Elf: tall, pointed ears..." or "Elf, tall...") is filed under it. A known species may be written either way;
+    a species the story has not met yet needs the colon form, and is added to the story's species list."""
+    if ch.get("species"):
+        return
+    m = re.match(r"\s*([A-Z][a-z]{2,19})\s*([:,])\s", ch.get("appearance", ""))
+    if not m:
+        return
+    word, sep = m.group(1), m.group(2)
+    species = story.get("species") or {}
+    if word.lower() in species or (sep == ":" and word.lower() not in ("human", "humans", "tall", "short", "young", "old", "male", "female", "man", "woman", "large", "small", "broad")):
+        ch["species"] = species[word.lower()]["name"] if word.lower() in species else word
+        ch["appearance"] = ch["appearance"][m.end():].strip() or ch["appearance"]
+        story.setdefault("species", {}).setdefault(word.lower(), {"name": word, "description": "", "maker": "", "reference_url": "", "from": ""})
 
 
 @app.post("/api/stories/{sid}/cast/candidates")
 async def cast_candidates(sid: str, body: CandidatesIn):
     """Draw a few independent candidate pictures of a character (added to the cast if new). Choose one with .../choose."""
     s, cfg = _story(sid), store.load_config()
-    prov = _img_provider(cfg, body.provider, s)
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "Give the character a name")
     ch = _ensure_char(s, name, body.appearance)
+    prov = _maker_provider(cfg, s, ch, body.provider)
     if not ch["appearance"].strip():
         raise HTTPException(400, "Describe how this character looks first (or use 'Suggest from the story')")
     store.save_story(s)
@@ -1888,20 +2189,26 @@ async def cast_candidates(sid: str, body: CandidatesIn):
         shape = st["art"].get("portrait_shape", "landscape")
         j["current"] = "Writing the picture prompt…"
         art = await _art_with_setting(st, cf)
+        _model_ctx.set(prov.get("model", ""))
+        look = _full_appearance(st, c) + (f". Extra notes: {notes}" if notes else "")
+        species_urls = _species_ref_urls(st, c) if (not c.get("moods") and prov.get("workflow_ref")) else []   # a new individual of a known species: its first picture is a small reference
+        cprov = {**prov, "ref_megapixels": SPECIES_REF_MP} if species_urls else prov
         if _wants_tags(prov):
-            prompt, negative = await _portrait_tag_prompt(st, cf, art, c, "default", notes)
+            prompt, negative = await _portrait_tag_prompt(st, cf, art, {**c, "appearance": _full_appearance(st, c)}, "default", notes)
         else:
-            prompt = images.portrait_prompt(art, c["name"], c["appearance"] + (f". Extra notes: {notes}" if notes else ""), None, False, nsfw=bool(st.get("nsfw")))
+            prompt = images.portrait_prompt(art, c["name"], look, None, bool(species_urls), False, nsfw=bool(st.get("nsfw")), species_ref=(c.get("species") or "") if species_urls else "")
             negative = st["art"].get("negative", "")
         folder = store.PORTRAITS / sid / "chars" / slug / "_candidates"
         folder.mkdir(parents=True, exist_ok=True)
         cand_refs = _load_refs([r["url"] for r in c.get("ext_refs") or []], int(cf.get("image_max_refs", 3))) if not c.get("moods") else []
-        if cand_refs and not _wants_tags(prov):
-            prompt = images.portrait_prompt(art, c["name"], c["appearance"] + (f". Extra notes: {notes}" if notes else ""), None, True, True, nsfw=bool(st.get("nsfw")))
+        if species_urls:
+            cand_refs = _load_refs(species_urls, 1)
+        elif cand_refs and not _wants_tags(prov):
+            prompt = images.portrait_prompt(art, c["name"], look, None, True, True, nsfw=bool(st.get("nsfw")))
         for i in range(count):
             j["current"] = f"Drawing option {i + 1} of {count}…"
             try:
-                data, ext = await images.generate(prov, prompt, negative, shape, cand_refs)
+                data, ext = await images.generate(cprov, prompt, negative, shape, cand_refs)
             except images.ImageError as e:
                 raise HTTPException(502, str(e))
             f = folder / f"cand-{int(time.time() * 1000)}-{i}.{ext}"
@@ -1982,6 +2289,29 @@ async def draw_mood_set(sid: str, slug: str, body: DrawSetIn):
     return {"job": job["id"], "moods": todo}
 
 
+@app.post("/api/stories/{sid}/cast/{slug}/redraw-all")
+async def redraw_all_pictures(sid: str, slug: str):
+    """After a new "normal 1" is chosen: delete every other picture of this character (all moods and earlier versions) and redraw those moods from the new face."""
+    s = _story(sid)
+    ch = _char(s, slug)
+    moods = ch.get("moods") or {}
+    keep = moods.get("normal 1")
+    if not keep:
+        raise HTTPException(400, "This character has no \"normal 1\" picture to redraw from.")
+    todo = [m for m in moods if m != "normal 1"]
+    if not todo:
+        raise HTTPException(400, "This character has no other pictures to redraw.")
+    folder = store.PORTRAITS / sid / "chars" / slug
+    keep_file = _portrait_file(keep)
+    for f in list(folder.iterdir()) if folder.exists() else []:
+        if f.is_file() and f != keep_file:
+            f.unlink(missing_ok=True)
+    ch["moods"] = {"normal 1": keep}
+    ch["alts"] = {}
+    store.save_story(s)
+    return await draw_mood_set(sid, slug, DrawSetIn(moods=todo))
+
+
 def _clean_for_scene(text: str) -> str:
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)           # status panels
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)                  # image tags
@@ -2043,17 +2373,136 @@ MOOD_LOOKS = {   # what to draw for common mood names (numbers like "angry 2" ar
     "angry": "furious, deep furrowed brows, glaring eyes, clenched teeth, tense shoulders, fists clenched, leaning forward",
     "scorn": "scornful, half-lidded eyes looking down the nose, one eyebrow raised, curled disdainful smirk, chin raised, arms crossed",
     "despair": "despair, tears running down the cheeks, hollow lifeless eyes, mouth slightly open, slumped shoulders, hands limp or covering the face",
-    "combat": "fierce determined glare, battle-ready stance, knees bent, fists or weapon raised, dynamic action pose",
+    "combat": "in the middle of a fight: striking or lunging with a weapon or fists, body twisted in motion, teeth gritted, eyes locked on an enemy, hair and clothes flying, sweat and dirt, motion on the strike",
     "cute": "cute pose, blushing, playful smile, winking or wide sparkling eyes, head tilted, hands near face",
-    "dead": "collapsed on the floor, eyes closed, pale, motionless",
+    "dead": "dead: a lifeless body lying limp on the ground, eyes half-open and glassy, slack jaw, pale grey skin, limbs sprawled awkwardly",
     "zombie": "undead, pale grey skin, glowing red eyes, torn uniform, slack jaw, hunched lurching posture",
 }
 
 
-def _mood_look(mood: str) -> str:
-    base = re.sub(r"\s*\d+$", "", mood.strip().lower())
+MOOD_LOOKS_ADULT = {   # stories with adult content on: the same picture types, shown without softening
+    "dead": "dead: a lifeless body lying in a pool of blood, a visible fatal wound, blood on the face and clothes, eyes half-open and glassy, slack jaw, pale grey skin, limbs sprawled awkwardly",
+    "combat": "in the middle of a brutal fight: striking or lunging with a weapon or fists, body twisted in motion, teeth gritted, eyes locked on an enemy, cuts and blood spatter, sweat and dirt, torn clothes, motion on the strike",
+}
+MOOD_FRAMING = {   # picture types that need a different frame than a chest-up portrait
+    "combat": "Dynamic three-quarter action shot, slightly low camera angle, motion in the scene, battlefield or ruins softly in the background. The face, shoulders, arms and weapon are the focus and fill the upper half of the picture.",
+    "dead": "Upper body seen from above, lying on their back on the ground, the face clearly visible and turned toward the viewer.",
+}
+# Picture types that are a face and a feeling. Anything else (combat, dead, stripping, showering, running, sleeping...) is an ACTION picture: drawn as a
+# three-quarter shot that shows the action, with the face and upper body as the focus (and shown cropped to the upper body in the story).
+EXPRESSION_MOODS = {"default", "normal", "smile", "happy", "laugh", "laughing", "shy", "surprise", "surprised", "sulky", "fear", "scared", "sad", "angry", "scorn",
+                    "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "aroused", "worried", "confused", "bored", "disgusted",
+                    "embarrassed", "blush", "blushing", "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty", "seductive",
+                    "calm", "serious", "thinking", "pout", "annoyed", "suspicious", "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie"}
+ACTION_FRAMING = ("Three-quarter shot that shows the whole action and the body, with the face, shoulders and hands as the focus in the upper half of the picture.")
+ACTION_FRAMING_TAGS = "cowboy shot, face focus, dynamic pose"
+
+
+def _is_action(mood: str) -> bool:
+    return _mood_base(mood) not in EXPRESSION_MOODS
+
+
+def _framing(mood: str, tags: bool = False) -> str:
+    base = _mood_base(mood)
+    if tags:
+        return MOOD_FRAMING_TAGS.get(base) or (ACTION_FRAMING_TAGS if _is_action(mood) else "")
+    return MOOD_FRAMING.get(base) or (ACTION_FRAMING if _is_action(mood) else "")
+
+
+MOOD_FRAMING_TAGS = {"combat": "fighting, action shot, dynamic pose, dynamic angle, motion blur, cowboy shot, face focus", "dead": "upper body, lying, on back, from above, on ground, face visible"}
+
+
+def _mood_base(mood: str) -> str:
+    return re.sub(r"\s*\d+$", "", mood.strip().lower())
+
+
+def _mood_look(mood: str, adult: bool = False) -> str:
+    base = _mood_base(mood)
     mine = {str(k).strip().lower(): str(v).strip() for k, v in (store.load_config().get("mood_looks") or {}).items() if str(v).strip()}
-    return mine.get(base) or MOOD_LOOKS.get(base, f"{base} expression")
+    return mine.get(base) or (adult and MOOD_LOOKS_ADULT.get(base)) or MOOD_LOOKS.get(base, f"{base} expression")
+
+
+# ---------------- adult (NSFW) picture maker: off by default ----------------
+EXPLICIT_RE = re.compile(
+    r"\b(nude|nudity|naked|topless|bottomless|unclothed|undress(?:ed|ing)?|breasts?|nipples?|genitals?|penis|vagina|pussy|"
+    r"sex|sexual(?:ly)?|intercourse|making love|orgasm\w*|aroused|arousal|erotic|explicit|nsfw|lewd|"
+    r"blowjob|fellatio|cunnilingus|masturbat\w*|cum|stripping|stripped|strips off|showering|in the shower|bathing|bathes|undressing)\b", re.IGNORECASE)
+# The editable list (🖼 Art → Picture makers → Adult pictures). Used whenever that box is empty. Whole words or phrases; chosen so ordinary scenes
+# ("a shower of sparks", "thrusts his sword", "oral report", "the strip mall") do not trigger it.
+NSFW_TYPES_DEFAULT = ("nude, naked, nudity, topless, bottomless, undressed, undressing, unclothed, disrobing, disrobed, stripping, stripped, strips off, "
+                      "lingerie, underwear, panties, bra, thong, see-through, wet t-shirt, towel only, covered only by a sheet, "
+                      "breasts, nipples, buttocks, bare bottom, genitals, penis, vagina, crotch, "
+                      "aroused, arousal, horny, lust, lustful, sexy, seductive, sensual, bedroom eyes, "
+                      "sex, sexual, intercourse, making love, lovemaking, foreplay, orgasm, climaxing, "
+                      "erotic, explicit, nsfw, lewd, kinky, fetish, bondage, bdsm, "
+                      "showering, in the shower, bathing, skinny dipping, in bed together, under the covers, "
+                      "straddling, spread legs, groping, fondling, "
+                      "oral sex, blowjob, fellatio, cunnilingus, handjob, masturbating, fingering herself, fingering himself, "
+                      "cum, ejaculation, threesome, orgy")
+NSFW_WORDS_TAGS = "nsfw, explicit, uncensored, nude"
+NSFW_WORDS_PONY = "rating_explicit, nsfw, explicit, uncensored, nude"
+NSFW_WORDS_NATURAL = "Explicit, uncensored adult image: nudity and sexual content shown openly, adults only."
+
+
+def _is_explicit(text: str, cfg: dict | None = None) -> bool:
+    """True when a scene description or mood names nudity or sexual content (only checked in stories with adult content on). Your own words from
+    🖼 Art → Picture makers → Adult (NSFW) pictures count too (whole words or phrases, any case)."""
+    if EXPLICIT_RE.search(text or ""):
+        return True
+    own = [w.strip().lower() for w in re.split(r"[,\n]", str(((cfg or {}).get("image_nsfw") or {}).get("types") or NSFW_TYPES_DEFAULT)) if w.strip()]
+    low = (text or "").lower()
+    return any(re.search(rf"\b{re.escape(w)}\b", low) for w in own)
+
+
+def _nsfw_provider(cfg: dict, s: dict) -> dict | None:
+    """The separate maker for explicit pictures (🖼 Art → Picture makers), or None when it is off, not set, or the story has adult content off."""
+    ns = cfg.get("image_nsfw") or {}
+    if not (ns.get("on") and s.get("nsfw") and "|" in (ns.get("maker") or "")):
+        return None
+    pid, model = ns["maker"].split("|", 1)
+    prov = next((p for p in cfg.get("image_providers", []) if p["id"] == pid), None)
+    if not prov:
+        return None
+    if prov.get("type") == "comfyui":
+        if _is_flux_model(model):
+            return {**_flux_provider(cfg, s, model), "id": pid, "nsfw_maker": True}
+        # Explicit pictures use their OWN settings for this model (🖼 Art → Picture makers → Adult pictures), never the model's ordinary ones: tuned so the face
+        # follows the character's first picture (Normal 1). Defaults: a strong face match from that one picture, cropped to the face.
+        own = dict(((ns.get("tweaks") or {}).get(model)) or {})
+        tw = {"ref_end": "0.95", "ref_crop": "face", "ref_count": "1", **own}
+        if not own.get("ref_weight"):
+            tw["ref_weight"] = str(float(ns.get("face") or 0.85))
+        if not (own.get("style_override") or "").strip() and (ns.get("style_mode") or "match") == "own" and (ns.get("style") or "").strip():
+            tw["style_override"] = ns["style"].strip()      # (older setting: one style for every model)
+        return {**prov, "model": model, "prompt_style": "natural" if _model_family(model) == "real" else "tags", "nsfw_maker": True,
+                "ref_mode": "one_character", "model_tweaks": {**(prov.get("model_tweaks") or {}), model: tw}}
+    return {**prov, "model": model or prov.get("model", ""), "nsfw_maker": True}
+
+
+NSFW_START = {"ref_weight": "0.85", "ref_end": "0.95", "ref_crop": "face", "ref_count": "1"}   # where a model's explicit-picture settings start
+
+
+def _nsfw_art(art: dict, prov: dict) -> dict:
+    """Explicit pictures with "use a different art style" on: the style you typed replaces the story's art direction (the face still follows Normal 1)."""
+    o = ((prov.get("model_tweaks") or {}).get(prov.get("model", "")) or {}).get("style_override") if prov.get("nsfw_maker") else ""
+    return {**art, "direction": o} if o else art
+
+
+def _nsfw_words(cfg: dict, prov: dict) -> str:
+    own = ((cfg.get("image_nsfw") or {}).get("words") or "").strip()
+    if own:
+        return own
+    if _wants_tags(prov):
+        return NSFW_WORDS_PONY if _model_family(prov.get("model", "")) == "pony" else NSFW_WORDS_TAGS
+    return NSFW_WORDS_NATURAL
+
+
+def _add_nsfw_words(prompt: str, negative: str, prov: dict, words: str) -> tuple[str, str]:
+    """Explicit words go first for tag models (they weigh early tags most) and at the end for sentence models; words that forbid nudity leave the negative prompt."""
+    prompt = f"{words}, {prompt}" if _wants_tags(prov) else f"{prompt}\n\n{words}"
+    prompt = prompt.replace(images.SAFE_LINE, "").strip()
+    keep = [x for x in re.split(r"\s*,\s*", negative or "") if x and not re.search(r"nsfw|nud|naked|explicit|sexual|cleavage|suggestive", x, re.IGNORECASE)]
+    return prompt, ", ".join(keep)
 
 
 def _wants_tags(prov: dict) -> bool:
@@ -2064,8 +2513,9 @@ def _wants_tags(prov: dict) -> bool:
 async def _tag_prompt(s: dict, cfg: dict, art: dict, scene: str, chars: list[dict]) -> tuple[str, str]:
     """(positive, negative) for a tag-style image model: the text model turns the description into tags."""
     tags = await _tag_line(s, cfg, art, scene, chars)
-    positive = ", ".join(x for x in ((art.get("direction") or "").strip(), tags, TAG_QUALITY) if x)
-    negative = ", ".join(x for x in ((art.get("negative") or "").strip(), TAG_NEGATIVE) if x)
+    quality, neg_extra = _tag_quality()
+    positive = ", ".join(x for x in ((art.get("direction") or "").strip(), tags, quality) if x)
+    negative = ", ".join(x for x in ((art.get("negative") or "").strip(), TAG_NEGATIVE, neg_extra) if x)
     return positive, negative
 
 
@@ -2097,11 +2547,13 @@ MOOD_TAGS = {   # the tag-style version of MOOD_LOOKS, so a mood portrait needs 
     "angry": "angry, furious, furrowed brow, glaring, clenched teeth, tense shoulders, clenched fists, leaning forward",
     "scorn": "scornful, half-closed eyes, looking down at viewer, raised eyebrow, smirk, chin up, crossed arms",
     "despair": "despair, crying, tears streaming, empty eyes, open mouth, slumped shoulders, hands over face",
-    "combat": "fierce glare, determined, fighting stance, bent knees, clenched fists, dynamic pose",
+    "combat": "fighting, attacking, lunging, weapon swing, clenched teeth, glaring, battle damage, dirt on face, sweat, motion lines",
     "cute": "cute, blush, playful smile, wink, head tilt, hands near face",
-    "dead": "lying on floor, closed eyes, pale, motionless",
+    "dead": "dead, corpse, lifeless eyes, empty eyes, half-closed eyes, open mouth, pale skin, limp, sprawled",
     "zombie": "undead, grey skin, glowing red eyes, torn clothes, slack jaw, hunched, lurching",
 }
+MOOD_TAGS_ADULT = {"dead": "dead, corpse, blood, blood pool, blood on face, wound, injury, lifeless eyes, empty eyes, pale skin, limp, sprawled",
+                   "combat": "fighting, attacking, lunging, weapon swing, clenched teeth, glaring, blood, blood splatter, cuts, injury, battle damage, torn clothes, dirt, sweat, motion lines"}
 _SUBJECT_TAG = re.compile(r"^(\d+(girl|boy|girls|boys|other|others)|solo|no humans)$")
 _EXPRESSION_TAG = re.compile(r"expression|smil|frown|pout|blush|looking|mouth|upper body|portrait|pose|standing|sitting|arms |hands|framing|close-up|wide shot", re.IGNORECASE)
 
@@ -2142,18 +2594,29 @@ async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: st
     are not built in, or that you reworded in Settings, and drawings with extra notes still go through the text model."""
     base = re.sub(r"\s*\d+$", "", mood.strip().lower())
     mine = {str(k).strip().lower(): str(v).strip() for k, v in (cfg.get("mood_looks") or {}).items() if str(v).strip()}
+    adult = bool(s.get("nsfw"))
+    frame = _framing(mood, tags=True) or "upper body, looking at viewer"
+    def framed(pn: tuple[str, str]) -> tuple[str, str]:
+        """Action pictures written by the helper AI: its portrait-framing tags go, the action framing is always there."""
+        if not _is_action(mood):
+            return pn
+        tags = [x for x in re.split(r"\s*,\s*", pn[0]) if x and not re.search(r"^(upper body|portrait|close-up|looking at viewer|cowboy shot|face focus)$", x, re.IGNORECASE)]
+        return ", ".join(tags + [frame]), pn[1]
     if notes or (mood != "default" and (base in mine or base not in MOOD_TAGS)):
-        look = "character portrait, upper body, looking at viewer" + ("" if mood == "default" else f", {_mood_look(mood)}") + (f", {notes}" if notes else "")
-        return await _tag_prompt(s, cfg, art, look, [ch])
+        look = f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult)}") + (f", {notes}" if notes else "")
+        return framed(await _tag_prompt(s, cfg, art, look, [ch]))
     tags = await _character_tags(s, cfg, art, ch)
     if not tags:
-        return await _tag_prompt(s, cfg, art, "character portrait, upper body, looking at viewer" + ("" if mood == "default" else f", {_mood_look(mood)}"), [ch])
+        return framed(await _tag_prompt(s, cfg, art, f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult)}"), [ch]))
     parts = [t.strip() for t in tags.split(",") if t.strip()]
     head = [parts.pop(0)] if parts and _SUBJECT_TAG.match(parts[0]) else []
     parts = [t for t in parts if not _SUBJECT_TAG.match(t)]
-    mood_tags = MOOD_TAGS["normal" if mood == "default" else base]
-    positive = ", ".join(x for x in ((art.get("direction") or "").strip(), ", ".join(head), mood_tags, ", ".join(parts), "upper body, looking at viewer", TAG_QUALITY) if x)
-    negative = ", ".join(x for x in ((art.get("negative") or "").strip(), TAG_NEGATIVE) if x)
+    mood_tags = (adult and MOOD_TAGS_ADULT.get(base)) or MOOD_TAGS["normal" if mood == "default" else base]
+    quality, neg_extra = _tag_quality()
+    if _is_action(mood):      # an action shot or a body on the ground: drop the saved portrait-framing tags
+        parts = [t for t in parts if not re.search(r"upper body|portrait|close-up|cowboy shot|looking at viewer", t, re.IGNORECASE)]
+    positive = ", ".join(x for x in ((art.get("direction") or "").strip(), ", ".join(head), mood_tags, ", ".join(parts), frame, quality) if x)
+    negative = ", ".join(x for x in ((art.get("negative") or "").strip(), TAG_NEGATIVE, neg_extra) if x)
     return positive, negative
 
 
@@ -2201,8 +2664,9 @@ async def _scene_tag_prompt(s: dict, cfg: dict, art: dict, scene: str, chars: li
     scene_tags = ", ".join(t.strip() for t in scene_tags.split(",") if t.strip() and not re.fullmatch(r"(one|two|three|four|\d+) (people|persons|girls|boys)", t.strip(), re.I))
     if not scene_tags:
         raise HTTPException(502, "The text model returned no tags. Try again, or switch this image provider to sentence-style prompts.")
-    positive = ", ".join(x for x in ((art.get("direction") or "").strip(), _subject_count(heads), *bodies, scene_tags, TAG_QUALITY) if x)
-    negative = ", ".join(x for x in ((art.get("negative") or "").strip(), TAG_NEGATIVE) if x)
+    quality, neg_extra = _tag_quality()
+    positive = ", ".join(x for x in ((art.get("direction") or "").strip(), _subject_count(heads), *bodies, scene_tags, quality) if x)
+    negative = ", ".join(x for x in ((art.get("negative") or "").strip(), TAG_NEGATIVE, neg_extra) if x)
     return positive, negative
 
 
@@ -2214,7 +2678,7 @@ def _scene_chars(s: dict, text: str, names: list[str] | None) -> list[dict]:
     for c in s.get("cast", []):
         firsts = [c["name"].split()[0].lower()] + [a.split()[0].lower() for a in c.get("aka") or []]
         if c["name"].lower() in want or any(f in want or re.search(rf"\b{re.escape(f)}\b", low) for f in firsts) or any(a.lower() in want for a in c.get("aka") or []):
-            out.append({"name": c["name"], "appearance": c.get("appearance", ""), "slug": c["slug"], "ref_url": None, "ref": False, "firsts": firsts})
+            out.append({"name": c["name"], "appearance": _full_appearance(s, c), "slug": c["slug"], "ref_url": None, "ref": False, "firsts": firsts})
     av, pn = s.get("avatar") or {}, prompting.player_name(s)
     if pn != "the player character" and (pn.lower() in want or pn.split()[0].lower() in want or re.search(rf"\b{re.escape(pn.split()[0].lower())}\b", low)):
         out.append({"name": pn, "appearance": av.get("appearance", ""), "ref_url": s.get("avatar_image") or None, "ref": bool(s.get("avatar_image"))})
@@ -2241,8 +2705,15 @@ async def illustrate(sid: str, body: IllustrateIn):
         scene, found, hints = await _describe_scene(s, cfg, turn["text"])
         names = names or found
     chars = _scene_chars(s, scene + " " + " ".join(names or []), names)
-    max_refs = int(cfg.get("image_max_refs", 3))
     by_slug = {c["slug"]: c for c in s.get("cast", [])}
+    if not body.provider:      # a character with their own picture maker (an alien drawn by FLUX, say) decides how the whole picture is drawn
+        own = next((by_slug[c["slug"]] for c in chars if c.get("slug") and _maker_spec(s, by_slug[c["slug"]])), None)
+        if own:
+            prov = _maker_provider(cfg, s, own)
+        if _is_explicit(scene, cfg) and (ns := _nsfw_provider(cfg, s)):
+            prov = ns           # an explicit moment in an adult story: drawn by the adult picture maker
+    _model_ctx.set(prov.get("model", ""))
+    max_refs = int(cfg.get("image_max_refs", 3))
     mode = prov.get("ref_mode") or ("one_character" if prov.get("type") == "comfyui" else "characters")
     refs: list[tuple[bytes, str]] = []
     if mode == "one_character":
@@ -2263,11 +2734,13 @@ async def illustrate(sid: str, body: IllustrateIn):
             got = _load_refs(urls, 1)
             if got:
                 refs.append(got[0]); c["ref"] = True
-    prompt = images.scene_prompt(s["art"], scene, chars, max_refs, nsfw=bool(s.get("nsfw")))
-    art = s["art"]
+    art = _nsfw_art(s["art"], prov)
+    prompt = images.scene_prompt(art, scene, chars, max_refs, nsfw=bool(s.get("nsfw")))
     negative = art.get("negative", "")
     if _wants_tags(prov):
         prompt, negative = await _scene_tag_prompt(s, cfg, art, scene, chars)
+    if prov.get("nsfw_maker"):
+        prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov))
     try:
         shape = "landscape" if str(art.get("scene_where", "")).startswith("banner") else art.get("size", "portrait")   # a wide strip needs a wide picture
         data, ext = await images.generate(prov, prompt, negative, shape, refs)
@@ -2329,6 +2802,18 @@ async def image_test(body: ImageTestIn):
     return {"image": f"data:{images.sniff(data)[1]};base64," + base64.b64encode(data).decode()}
 
 
+@app.get("/api/images/nsfw-types")
+def nsfw_types_default():
+    """The built-in list of picture types and words that count as explicit (shown in the Adult pictures box)."""
+    return {"types": NSFW_TYPES_DEFAULT}
+
+
+@app.get("/api/images/nsfw-tuned")
+def nsfw_tuned_for(model: str):
+    """The starting settings for explicit pictures with this model (the tuned ones for its family), shown in the Adult pictures settings."""
+    return {"family": _model_family(model), "flux": _is_flux_model(model), "tweaks": NSFW_START}
+
+
 @app.get("/api/images/bg-models")
 async def bg_models():
     """Diffusion models (the UNET loader's list) that the local ComfyUI has: what a separate backdrop maker like FLUX can use."""
@@ -2364,8 +2849,8 @@ async def image_test_bg(body: BgTestIn):
 @app.get("/api/images/starter-workflow")
 def starter_workflow(kind: str = "plain"):
     """kind=plain: text-to-image. kind=face: IPAdapter face-matching (needs the IPAdapter nodes and models in ComfyUI). kind=flux: FLUX.2 klein 4B text-to-image."""
-    if kind in ("face", "flux"):
-        f = ROOT / "workflows" / ("comfyui-ipadapter-face.json" if kind == "face" else "comfyui-flux2-klein.json")
+    if kind in ("face", "flux", "fluxref"):
+        f = ROOT / "workflows" / {"face": "comfyui-ipadapter-face.json", "flux": "comfyui-flux2-klein.json", "fluxref": "comfyui-flux2-klein-ref.json"}[kind]
         if f.is_file():
             return json.loads(f.read_text(encoding="utf-8"))
     return images.STARTER_WORKFLOW
@@ -2520,10 +3005,121 @@ def thumbnail(url: str, w: int = 240):
 
 
 @app.delete("/api/stories/{sid}")
-def delete_story(sid: str):
+def delete_story(sid: str, art: int = 1):
+    """art=1 (default) also deletes the story's pictures; art=0 keeps them on disk."""
     _story(sid)
-    store.delete_story(sid)
+    store.delete_story(sid, art=bool(art))
     return {"ok": True}
+
+
+@app.get("/api/stories/{sid}/art-count")
+def story_art_count(sid: str):
+    """How many picture files this story has (portraits, earlier versions, places, scenes, cover, backdrop, intro panels), for the delete dialog."""
+    _story(sid)
+    n = 0
+    for d in (store.PORTRAITS / sid, store.IMAGES / sid):
+        n += sum(1 for f in d.rglob("*") if f.is_file() and "_candidates" not in f.parts) if d.exists() else 0
+    return {"files": n}
+
+
+def _dir_size(d: Path, scratch: bool | None = None) -> int:
+    """Bytes in a folder. scratch=True counts only unchosen option pictures, False everything else, None all."""
+    n = 0
+    if d.exists():
+        for f in d.rglob("*"):
+            if f.is_file() and (scratch is None or store.is_scratch(f.relative_to(d)) == scratch):
+                try:
+                    n += f.stat().st_size
+                except OSError:
+                    pass
+    return n
+
+
+@app.get("/api/deleted-stories")
+def deleted_stories():
+    """Stories that were deleted but still have a backup (made automatically before every delete), newest first."""
+    out = []
+    for d in store.AUTO.iterdir() if store.AUTO.exists() else []:
+        if not d.is_dir() or (store.STORIES / f"{d.name}.json").exists():
+            continue
+        snaps = sorted(d.glob("*.json"))
+        if not snaps:
+            continue
+        try:
+            s = json.loads(snaps[-1].read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        out.append({"id": d.name, "title": s.get("title", "?"), "turns": len(s.get("turns", [])) // 2, "when": snaps[-1].stat().st_mtime,
+                    "pictures_kept": (store.PORTRAITS / d.name).exists() or (store.IMAGES / d.name).exists()})
+    return sorted(out, key=lambda x: -x["when"])
+
+
+def _deleted_dir(sid: str) -> Path:
+    if not re.fullmatch(r"[0-9a-z]+", sid) or (store.STORIES / f"{sid}.json").exists() or not (store.AUTO / sid).is_dir():
+        raise HTTPException(404, "No deleted story with that id")
+    return store.AUTO / sid
+
+
+@app.post("/api/deleted-stories/{sid}/restore")
+def restore_deleted_story(sid: str):
+    """Bring a deleted story back from its newest backup (its pictures too, if they were kept)."""
+    d = _deleted_dir(sid)
+    snap = sorted(d.glob("*.json"))[-1]
+    s = json.loads(snap.read_text(encoding="utf-8"))
+    s["id"], s["updated"] = sid, time.time()
+    store.save_story(s)
+    return _story(sid)
+
+
+@app.delete("/api/deleted-stories/{sid}")
+def forget_deleted_story(sid: str):
+    """Permanently remove a deleted story's backups and any pictures kept for it."""
+    d = _deleted_dir(sid)
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.rmtree(store.PORTRAITS / sid, ignore_errors=True)
+    shutil.rmtree(store.IMAGES / sid, ignore_errors=True)
+    return {"ok": True}
+
+
+@app.get("/api/storage")
+def storage_report():
+    """Disk use per story and the things that can be cleaned up."""
+    stories = []
+    for p in store.STORIES.glob("*.json"):
+        sid = p.stem
+        try:
+            title = json.loads(p.read_text(encoding="utf-8")).get("title", sid)
+        except (OSError, ValueError):
+            title = sid
+        stories.append({"id": sid, "title": title, "story": p.stat().st_size, "pictures": _dir_size(store.PORTRAITS / sid, False) + _dir_size(store.IMAGES / sid),
+                        "options": _dir_size(store.PORTRAITS / sid, True), "backups": _dir_size(store.AUTO / sid)})
+    live = {s["id"] for s in stories}
+    kept = [{"id": d.name, "bytes": _dir_size(d) + _dir_size(store.IMAGES / d.name)} for d in store.PORTRAITS.iterdir()
+            if d.is_dir() and not d.name.startswith("_") and d.name not in live]
+    kept += [{"id": d.name, "bytes": _dir_size(d)} for d in store.IMAGES.iterdir() if d.is_dir() and d.name not in live and not (store.PORTRAITS / d.name).exists()]
+    return {"stories": sorted(stories, key=lambda x: -(x["pictures"] + x["story"])), "kept_pictures": kept,
+            "options": _dir_size(store.PORTRAITS, True), "thumbs": _dir_size(store.DATA / "thumbs"),
+            "avatars": _dir_size(store.PORTRAITS / "_avatars")}
+
+
+class CleanIn(BaseModel):
+    what: str      # options | thumbs | kept
+
+
+@app.post("/api/storage/clean")
+def storage_clean(body: CleanIn):
+    """options: unchosen picture options; thumbs: the small-picture cache (rebuilt as needed); kept: pictures kept from deleted stories."""
+    if body.what == "options":
+        store.clean_scratch(0)
+    elif body.what == "thumbs":
+        shutil.rmtree(store.DATA / "thumbs", ignore_errors=True)
+    elif body.what == "kept":
+        for k in storage_report()["kept_pictures"]:
+            shutil.rmtree(store.PORTRAITS / k["id"], ignore_errors=True)
+            shutil.rmtree(store.IMAGES / k["id"], ignore_errors=True)
+    else:
+        raise HTTPException(400, "Unknown clean-up")
+    return storage_report()
 
 
 @app.get("/api/stories/{sid}/export", response_class=PlainTextResponse)
@@ -2536,19 +3132,152 @@ def export_story(sid: str):
     return "\n".join(lines)
 
 
+def _drop_undone(s: dict) -> None:
+    """Forget the exchange kept for Redo (and delete its pictures)."""
+    u = s.pop("undone", None)
+    for t in (u or {}).get("turns", []):
+        for im in t.get("images", []) + [i for a in t.get("attempts", []) for i in a.get("images", [])]:
+            _delete_image_file(im.get("url", ""))
+
+
+@app.post("/api/stories/{sid}/redo")
+def redo(sid: str):
+    """Put back the exchange the last Undo removed (only until a new move is made)."""
+    s = _story(sid)
+    u = s.get("undone")
+    if not u:
+        raise HTTPException(400, "Nothing to redo.")
+    s.pop("undone")
+    s["turns"].extend(u["turns"])
+    ex = u.get("extras") or {}
+    known = {c["slug"] for c in s.get("cast", [])}
+    s.setdefault("cast", []).extend(c for c in ex.get("chars", []) if c["slug"] not in known)
+    by = {c["slug"]: c for c in s.get("cast", [])}
+    for slug, evs in (ex.get("events") or {}).items():
+        if slug in by:
+            by[slug].setdefault("events", []).extend(evs)
+    if u.get("after"):
+        prompting.restore(s, u["after"])
+    store.save_story(s)
+    return s
+
+
 @app.post("/api/stories/{sid}/undo")
 def undo(sid: str):
     """Remove the last exchange (player input + narrator reply) and restore the state from before it."""
     s = _story(sid)
+    _drop_undone(s)
     if s["turns"] and s["turns"][-1]["role"] == "assistant":
         last = s["turns"].pop()
-        for im in last.get("images", []):
-            _delete_image_file(im.get("url", ""))
+        idx = len(s["turns"])
+        user = s["turns"].pop() if s["turns"] and s["turns"][-1]["role"] == "user" else None
+        # kept for Redo until the next move: the exchange, its pictures, the side-panel state after it, and what it left on the cast
+        s["undone"] = {"turns": [x for x in (user, last) if x], "after": prompting.snapshot(s), "extras": _reply_extras(s, last, idx, True)}
         if "before" in last:
             prompting.restore(s, last["before"])
-    if s["turns"] and s["turns"][-1]["role"] == "user":
+    elif s["turns"] and s["turns"][-1]["role"] == "user":
         s["turns"].pop()
     s["summary_upto"] = min(s.get("summary_upto", 0), len(s["turns"]))
+    store.save_story(s)
+    return s
+
+
+class RetryIn(BaseModel):
+    keep_chars: bool = False        # keep characters the discarded reply introduced
+    keep_events: bool = False       # keep what it logged on character cards
+    keep_state: bool = False        # keep its side-panel / status changes
+
+
+def _reply_extras(s: dict, turn: dict, idx: int, remove: bool, keep_chars: bool = False, keep_events: bool = False) -> dict:
+    """What an assistant reply left behind outside its text: new cast members and automatic card events. With remove=True they are taken out of the story
+    (so a retry starts from the previous turn only) and returned, so a swap can put them back."""
+    out = {"chars": [], "events": {}}
+    if not keep_chars and "cast_before" in turn:
+        known = set(turn["cast_before"])
+        gone = [c for c in s.get("cast", []) if c["slug"] not in known and not c.get("moods") and not c.get("player")]
+        out["chars"] = gone
+        if remove:
+            s["cast"] = [c for c in s["cast"] if c not in gone]
+    if not keep_events:
+        for c in s.get("cast", []):
+            mine = [e for e in c.get("events", []) if e.get("auto") and e.get("turn") == idx]
+            if mine:
+                out["events"][c["slug"]] = mine
+                if remove:
+                    c["events"] = [e for e in c["events"] if e not in mine]
+    return out
+
+
+@app.post("/api/stories/{sid}/retry")
+def retry_prepare(sid: str, body: RetryIn):
+    """Step back to just before the last narrator reply for a retry. The discarded reply is kept as an attempt on the next reply (so it can be swapped back).
+    The retry starts from the previous turn's information only: the discarded reply's side-panel changes, new characters and card events are taken out
+    unless the player chose to keep them."""
+    s = _story(sid)
+    if not (s["turns"] and s["turns"][-1]["role"] == "assistant" and len(s["turns"]) >= 2):
+        raise HTTPException(400, "There is no narrator reply to retry.")
+    _drop_undone(s)
+    idx = len(s["turns"]) - 1
+    last = s["turns"].pop()
+    user = s["turns"].pop()
+    prev = last.get("attempts") or []
+    for n, a in enumerate(prev):
+        a.setdefault("attempt_no", n + 1)
+    last.setdefault("attempt_no", len(prev) + 1)
+    attempt = {k: v for k, v in last.items() if k != "attempts"}
+    attempt["after"] = prompting.snapshot(s)
+    attempt["extras"] = _reply_extras(s, last, idx, True, body.keep_chars, body.keep_events)
+    if "before" in last and not body.keep_state:
+        prompting.restore(s, last["before"])
+    s["retry_pending"] = {"text": user["text"], "attempts": (last.get("attempts") or []) + [attempt]}
+    s["summary_upto"] = min(s.get("summary_upto", 0), len(s["turns"]))
+    store.save_story(s)
+    return s
+
+
+@app.post("/api/stories/{sid}/turns/{i}/attempt-step")
+def step_attempt(sid: str, i: int, dir: int = 1):
+    """◀ / ▶ on the newest reply: show the previous or next attempt (in the order they were written, wrapping around)."""
+    s = _story(sid)
+    if i != len(s["turns"]) - 1 or s["turns"][i]["role"] != "assistant" or not s["turns"][i].get("attempts"):
+        raise HTTPException(400, "This reply has no other attempts.")
+    cur, atts = s["turns"][i], s["turns"][i]["attempts"]
+    ring = sorted([cur] + atts, key=lambda a: a.get("attempt_no", 0))
+    target = ring[(ring.index(cur) + (1 if dir >= 0 else -1)) % len(ring)]
+    return swap_attempt(sid, i, atts.index(target))
+
+
+@app.post("/api/stories/{sid}/turns/{i}/attempt/{k}")
+def swap_attempt(sid: str, i: int, k: int):
+    """Swap the newest reply with one of its earlier attempts (restores that attempt's side-panel state, characters and card events)."""
+    s = _story(sid)
+    if i != len(s["turns"]) - 1 or s["turns"][i]["role"] != "assistant":
+        raise HTTPException(400, "Only the newest reply can be swapped.")
+    cur = s["turns"][i]
+    atts = list(cur.get("attempts") or [])
+    if not (0 <= k < len(atts)):
+        raise HTTPException(404, "No such attempt.")
+    chosen = atts.pop(k)
+    # park the current reply
+    parked = {x: v for x, v in cur.items() if x != "attempts"}
+    parked["after"] = prompting.snapshot(s)
+    parked["extras"] = _reply_extras(s, cur, i, True)
+    atts.insert(k, parked)
+    # bring the chosen one back
+    ex = chosen.get("extras") or {}
+    known = {c["slug"] for c in s.get("cast", [])}
+    for c in ex.get("chars", []):
+        if c["slug"] not in known:
+            s["cast"].append(c)
+    by = {c["slug"]: c for c in s.get("cast", [])}
+    for slug, evs in (ex.get("events") or {}).items():
+        if slug in by:
+            by[slug].setdefault("events", []).extend(evs)
+    if chosen.get("after"):
+        prompting.restore(s, chosen["after"])
+    new = {x: v for x, v in chosen.items() if x not in ("after", "extras")}
+    new["attempts"] = atts
+    s["turns"][i] = new
     store.save_story(s)
     return s
 
@@ -2575,7 +3304,7 @@ def _migrate_characters(story: dict) -> int:
         key = who.strip().lower()
         words = set(re.findall(r"[\w'’-]+", key))
         ch = next((c for c in cast if key in {c["name"].lower(), c["name"].lower().split()[0], *(a.lower() for a in c.get("aka") or [])}), None)
-        if not ch and words:        # "Dr. Naomi Okafor" for the cast entry "Dr. Okafor": every word of one name is in the other
+        if not ch and words:        # "Captain Ann Smith" for the cast entry "Captain Smith": every word of one name is in the other
             ch = next((c for c in cast if (cw := set(re.findall(r"[\w'’-]+", c["name"].lower()))) and (cw <= words or words <= cw)), None)
         if ch and body.strip():
             ch.setdefault("events", []).insert(0, {**_ev("Earlier", body.strip()[:3000], None, True), "digest": True})
@@ -2688,11 +3417,23 @@ async def turn(sid: str, body: TurnIn):
             rprov, rmodel = _role(cfg, story, "recaps", "memory summary")
             await _maybe_summarize(story, cfg, rprov, rmodel, prov)
             usage.set_ctx(sid, "story narration")
+            if story.get("undone"):
+                _drop_undone(story)
             before = prompting.snapshot(story)
+            cast_before = [c["slug"] for c in story.get("cast", [])]
+            pend = story.get("retry_pending")
+            if pend and pend.get("text", "").strip() != text:
+                story.pop("retry_pending", None)       # a different move: the discarded attempts (and their pictures) are dropped
+                for im in [i for a in pend.get("attempts", []) for i in a.get("images", [])]:
+                    _delete_image_file(im.get("url", ""))
+                pend = None
             story["turns"].append({"role": "user", "text": text, "ts": time.time()})
             built = prompting.build(story)
             usage.set_ctx(sid, "story narration", why=_cache_why(sid, built, cfg))
             system, messages = built.request()
+            if body.note.strip() and messages and messages[-1]["role"] == "user":
+                messages[-1]["content"] += ("\n\n(OOC: This is a rewrite of your previous reply to the message above, which the player discarded. "
+                                           "Write the reply again with these changes: " + body.note.strip()[:1500] + ")")
             full, use = "", {}
             async for chunk in providers.stream_chat(
                 prov, model, system, messages,
@@ -2711,9 +3452,10 @@ async def turn(sid: str, body: TurnIn):
                 hint = " It spent its whole reply budget thinking: raise Max reply tokens or turn Claude thinking off in Settings." if use.get("thinking") else ""
                 raise providers.ProviderError("The model returned an empty reply." + hint)
             story["turns"].append(
-                {"role": "assistant", "text": narration, "ts": time.time(), "model": f"{prov['id']}/{model}", "before": before,
-                 "usage": use, **({"scene": scene} if scene else {})}
+                {"role": "assistant", "text": narration, "ts": time.time(), "model": f"{prov['id']}/{model}", "before": before, "cast_before": cast_before,
+                 "usage": use, **({"scene": scene} if scene else {}), **({"attempts": pend["attempts"], "attempt_no": 1 + max(a.get("attempt_no", 0) for a in pend["attempts"])} if pend else {})}
             )
+            story.pop("retry_pending", None)
             prompting.apply_state(story, upd)
             got_panel = tracker.update_from_reply(story, narration, len(story["turns"]) // 2)
             saved = _save_turn(story)
@@ -2722,7 +3464,9 @@ async def turn(sid: str, body: TurnIn):
             _start_now(saved["id"])
             if (len(saved["turns"]) // 2) % 5 == 0:
                 store.snapshot_story(saved["id"], "every 5 turns")
-            asyncio.create_task(_events_after_turn(saved["id"], len(saved["turns"]) - 1))
+            asyncio.create_task(_events_after_turn(saved["id"], len(saved["turns"]) - 1, saved["turns"][-1].get("ts")))
+            if saved.get("rule_check"):
+                _check_tasks[saved["id"]] = asyncio.create_task(_rule_check(saved["id"], len(saved["turns"]) - 1, saved["turns"][-1].get("ts")))
             asyncio.create_task(_find_new_chars(saved["id"]))
             _note_cache_use(saved["id"], prov, model, cfg, use)
             yield _sse({"t": "done", "story": saved})
@@ -2738,13 +3482,16 @@ PACK_FIELDS = ("title", "subtitle", "description", "base_prompt", "opening", "op
 
 
 @app.get("/api/stories/{sid}/pack")
-def export_pack(sid: str, pictures: str = "all"):
+def export_pack(sid: str, pictures: str = "all", avatar: int = 0, webp: int = 0):
     """A story package you can share: prompt, prologue, opening scene and suggested first moves, cast (descriptions, bios, personalities, portraits), suggested side-panel
-    trackers, endings, art settings, cover, intro panels and backdrop. It never contains turns, memory, your avatar, notes, API keys or usage. pictures = none | normal | all."""
+    trackers, endings, art settings, cover, intro panels and backdrop. It never contains turns, memory, notes (your avatar sheet only if avatar=1, text only), API keys or usage. pictures = none | normal | all."""
     s = _story(sid)
     meta = {k: s.get(k) for k in PACK_FIELDS}
     meta["format"] = "storyteller-pack-2"
+    meta["app_version"] = APP_VERSION
     meta["cast"], files = [], []
+    if avatar and (sheet := _clean_sheet(s.get("avatar") or {})):     # opt-in: the avatar sheet (text only, no picture) as a starter character
+        meta["starter_avatar"] = sheet
     for c in s.get("cast", []):
         if c.get("player"):      # the player's own avatar stays out of a story package
             continue
@@ -2759,7 +3506,15 @@ def export_pack(sid: str, pictures: str = "all"):
                 moods[mood] = arc
                 files.append((arc, f))
         meta["cast"].append({"name": c["name"], "slug": c["slug"], "appearance": c.get("appearance", ""), "bio": c.get("bio", ""), "personality": c.get("personality", ""), "author": bool(c.get("author")),
-                             "address": c.get("address", ""), "tags": c.get("tags", ""), "group": c.get("group", ""), "moods": moods})
+                             "address": c.get("address", ""), "tags": c.get("tags", ""), "species": c.get("species", ""), "maker": c.get("maker", ""), "group": c.get("group", ""), "moods": moods})
+    meta["species"] = []
+    for key, sp in (s.get("species") or {}).items():
+        item = {"name": sp.get("name", key), "description": sp.get("description", ""), "maker": sp.get("maker", "")}
+        f = _portrait_file(sp["reference_url"]) if sp.get("reference_url") and pictures != "none" else None
+        if f:
+            item["file"] = f"species/{_slug(key)}{f.suffix}"
+            files.append((item["file"], f))
+        meta["species"].append(item)
     meta["intro"] = []
     for im in s.get("intro_images", []) if pictures != "none" else []:
         f = _portrait_file(im["url"])
@@ -2781,19 +3536,49 @@ def export_pack(sid: str, pictures: str = "all"):
     if s.get("backdrop", {}).get("url") and (bf := _portrait_file(s["backdrop"]["url"])):
         meta["backdrop"] = f"backdrop{bf.suffix}"
         files.append((meta["backdrop"], bf))
+    blobs: dict[str, bytes] = {}
+    if webp:     # smaller package: pictures as WebP (high quality); the references inside story.json follow the new names
+        from PIL import Image
+        renamed = {}
+        for arc, f in files:
+            if f.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                try:
+                    with Image.open(f) as im:
+                        out = io.BytesIO()
+                        im.convert("RGBA" if "A" in im.getbands() else "RGB").save(out, "WEBP", quality=90, method=4)
+                    renamed[arc] = str(Path(arc).with_suffix(".webp"))
+                    blobs[renamed[arc]] = out.getvalue()
+                except Exception:
+                    pass
+        def swap(o):
+            if isinstance(o, dict):
+                return {k: swap(v) for k, v in o.items()}
+            if isinstance(o, list):
+                return [swap(v) for v in o]
+            return renamed.get(o, o) if isinstance(o, str) else o
+        meta = swap(meta)
+        files = [(renamed.get(arc, arc), f) for arc, f in files]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("story.json", json.dumps(meta, indent=2, ensure_ascii=False))
         for arc, f in files:
-            z.write(f, arc)
+            if arc in blobs:
+                z.writestr(arc, blobs[arc])
+            else:
+                z.write(f, arc)
     name = _slug(s["title"])[:40] or "story"
     return Response(buf.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}-pack.zip"'})
 
 
-@app.post("/api/stories/import-pack")
-async def import_pack(request: Request):
-    """Body is the raw .zip made by 'Share pack'. Creates a new story from it."""
-    data = await request.body()
+APP_VERSION = (APP_DIR.parent / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR.parent / "VERSION").exists() else "0"
+
+
+def _ver(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
+
+
+def _open_pack(data: bytes) -> tuple[zipfile.ZipFile, dict, list[str]]:
+    """Open a story package; also returns warnings (made by a newer app version)."""
     try:
         z = zipfile.ZipFile(io.BytesIO(data))
         meta = json.loads(z.read("story.json"))
@@ -2801,58 +3586,147 @@ async def import_pack(request: Request):
         raise HTTPException(400, "That isn't a story pack made by this app.")
     if meta.get("format") not in ("storyteller-pack-1", "storyteller-pack-2"):
         raise HTTPException(400, "Unknown pack version.")
-    s = store.new_story(meta.get("title") or "Shared story", meta.get("subtitle", ""), meta.get("base_prompt", ""))
-    sid = s["id"]
-    for k in PACK_FIELDS:
-        if meta.get(k) is not None and k not in ("title", "subtitle", "base_prompt"):
-            s[k] = meta[k]
+    notes = []
+    if meta.get("app_version") and _ver(meta["app_version"]) > _ver(APP_VERSION):
+        notes.append(f"This package was made with a newer version of AI Storyteller ({meta['app_version']}; you have {APP_VERSION}). Some parts may be missing: update the app and import it again.")
+    raw = (meta.get("sidebar") or {}).get("custom") if isinstance(meta.get("sidebar"), dict) else None
+    if isinstance(raw, list) and len(raw) > len(tracker.clean_custom(raw)):
+        notes.append(f"The package has {len(raw)} side-panel trackers; this version keeps {len(tracker.clean_custom(raw))}.")
+    return z, meta, notes
 
+
+def _pack_saver(z: zipfile.ZipFile):
     def save_file(arc: str, dest: Path) -> bool:
+        arc = str(arc)
         if ".." in arc or arc.startswith("/") or arc not in z.namelist():
             return False
-        info = z.getinfo(arc)
-        if info.file_size > MAX_IMAGE:
+        if z.getinfo(arc).file_size > MAX_IMAGE:
             return False
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(z.read(arc))
         return True
+    return save_file
 
-    s["cast"] = []
-    for c in meta.get("cast", []):
-        slug = _slug(c.get("slug") or c["name"])
-        moods = {}
-        for mood, arc in (c.get("moods") or {}).items():
-            fname = f"{_slug(mood)}-{int(time.time() * 1000)}{Path(arc).suffix}"
-            if save_file(arc, store.PORTRAITS / sid / "chars" / slug / fname):
-                moods[mood] = f"/portraits/{sid}/chars/{slug}/{fname}"
-        s["cast"].append({"name": c["name"], "slug": slug, "appearance": c.get("appearance", ""), "bio": c.get("bio", ""), "personality": c.get("personality", ""),
-                          "author": bool(c.get("author")), "address": str(c.get("address", ""))[:600], "tags": str(c.get("tags", ""))[:1500], "group": c.get("group", ""), "events": [], "moods": moods, "alts": {}})
-    for im in meta.get("intro", []):
-        fname = f"{_slug(im['name'])}{Path(im['file']).suffix}"
-        if save_file(im["file"], store.PORTRAITS / sid / "intro" / fname):
-            s.setdefault("intro_images", []).append({"name": im["name"], "url": f"/portraits/{sid}/intro/{fname}"})
+
+def _pack_char(c: dict, sid: str, save_file) -> dict:
+    slug = _slug(c.get("slug") or c["name"])
+    moods = {}
+    for mood, arc in (c.get("moods") or {}).items():
+        fname = f"{_slug(mood)}-{int(time.time() * 1000)}{Path(str(arc)).suffix}"
+        if save_file(arc, store.PORTRAITS / sid / "chars" / slug / fname):
+            moods[mood] = f"/portraits/{sid}/chars/{slug}/{fname}"
+    return {"name": c["name"], "slug": slug, "appearance": c.get("appearance", ""), "bio": c.get("bio", ""), "personality": c.get("personality", ""),
+            "author": bool(c.get("author")), "address": str(c.get("address", ""))[:600], "tags": str(c.get("tags", ""))[:1500], "species": str(c.get("species", ""))[:40],
+            "maker": str(c.get("maker", ""))[:120], "group": c.get("group", ""), "events": [], "moods": moods, "alts": {}}
+
+
+def _pack_species(meta: dict, s: dict, save_file, only_missing: bool = False) -> None:
+    for sp in meta.get("species", []) if isinstance(meta.get("species"), list) else []:
+        if not isinstance(sp, dict) or not str(sp.get("name", "")).strip():
+            continue
+        name = " ".join(str(sp["name"]).split())[:40]
+        old = (s.get("species") or {}).get(name.lower())
+        item = {"name": name, "description": str(sp.get("description", "")).strip()[:800], "maker": str(sp.get("maker", ""))[:120],
+                "reference_url": (old or {}).get("reference_url", ""), "from": (old or {}).get("from", "")}
+        if sp.get("file") and not item["reference_url"]:
+            fname = f"{_slug(name)}-{int(time.time() * 1000)}{Path(str(sp['file'])).suffix}"
+            if save_file(str(sp["file"]), store.PORTRAITS / s["id"] / "species" / fname):
+                item["reference_url"] = f"/portraits/{s['id']}/species/{fname}"
+        if old and only_missing:
+            continue
+        s.setdefault("species", {})[name.lower()] = item
+
+
+def _pack_places(meta: dict, s: dict, save_file) -> None:
+    have = {p["name"].lower(): p for p in s.get("places", [])}
     for pl in meta.get("places", []) if isinstance(meta.get("places"), list) else []:
         if not isinstance(pl, dict) or not str(pl.get("name", "")).strip():
             continue
         name = " ".join(str(pl["name"]).split())[:60]
-        item = {"name": name, "description": str(pl.get("description", "")).strip()[:500], "url": ""}
-        if pl.get("file"):
+        item = have.get(name.lower()) or {"name": name, "description": "", "url": ""}
+        item["description"] = str(pl.get("description", "")).strip()[:500] or item["description"]
+        if pl.get("file") and not item.get("url"):
             fname = f"{_slug(name)}{Path(str(pl['file'])).suffix}"
-            if save_file(str(pl["file"]), store.PORTRAITS / sid / "places" / fname):
-                item["url"] = f"/portraits/{sid}/places/{fname}"
-        s.setdefault("places", []).append(item)
-    if isinstance(meta.get("sidebar"), dict):
-        sb = store.STORY_DEFAULTS["sidebar"] | {k: meta["sidebar"][k] for k in ("mode", "fields") if k in meta["sidebar"]}
-        sb["schema"] = tracker.clean_schema(meta["sidebar"].get("schema")) or None
-        sb["custom"] = tracker.clean_custom(meta["sidebar"].get("custom"))
+            if save_file(str(pl["file"]), store.PORTRAITS / s["id"] / "places" / fname):
+                item["url"] = f"/portraits/{s['id']}/places/{fname}"
+        if name.lower() not in have:
+            s.setdefault("places", []).append(item)
+            have[name.lower()] = item
+
+
+def _pack_sidebar(meta: dict) -> dict | None:
+    if not isinstance(meta.get("sidebar"), dict):
+        return None
+    sb = store.STORY_DEFAULTS["sidebar"] | {k: meta["sidebar"][k] for k in ("mode", "fields") if k in meta["sidebar"]}
+    sb["schema"] = tracker.clean_schema(meta["sidebar"].get("schema")) or None
+    sb["custom"] = tracker.clean_custom(meta["sidebar"].get("custom"))
+    return sb
+
+
+@app.post("/api/stories/import-pack")
+async def import_pack(request: Request):
+    """Body is the raw .zip made by 'Share pack'. Creates a new story from it."""
+    z, meta, notes = _open_pack(await request.body())
+    s = store.new_story(meta.get("title") or "Shared story", meta.get("subtitle", ""), meta.get("base_prompt", ""))
+    sid = s["id"]
+    for k in PACK_FIELDS:
+        if meta.get(k) is not None and k not in ("title", "subtitle", "base_prompt", "sidebar"):
+            s[k] = meta[k]
+    save_file = _pack_saver(z)
+    s["cast"] = [_pack_char(c, sid, save_file) for c in meta.get("cast", []) if isinstance(c, dict) and c.get("name")]
+    _pack_species(meta, s, save_file)
+    for im in meta.get("intro", []):
+        fname = f"{_slug(im['name'])}{Path(im['file']).suffix}"
+        if save_file(im["file"], store.PORTRAITS / sid / "intro" / fname):
+            s.setdefault("intro_images", []).append({"name": im["name"], "url": f"/portraits/{sid}/intro/{fname}"})
+    _pack_places(meta, s, save_file)
+    if (sb := _pack_sidebar(meta)):
         s["sidebar"] = sb
+    if isinstance(meta.get("starter_avatar"), dict) and (sheet := _clean_sheet(meta["starter_avatar"])):
+        s["avatar"], s["player_name"] = sheet, sheet.get("name", "")
     _give_default_models(s)
     if meta.get("backdrop") and save_file(meta["backdrop"], store.PORTRAITS / sid / f"backdrop{Path(meta['backdrop']).suffix}"):
         s["backdrop"] = {"url": f"/portraits/{sid}/backdrop{Path(meta['backdrop']).suffix}?v={int(time.time())}", "source": "package"}
     if meta.get("cover") and save_file(meta["cover"], store.PORTRAITS / sid / f"cover{Path(meta['cover']).suffix}"):
         s["cover"] = f"/portraits/{sid}/cover{Path(meta['cover']).suffix}?v={int(time.time())}"
     store.save_story(s)
-    return s
+    return {**s, "import_notes": notes}
+
+
+@app.post("/api/stories/{sid}/update-from-pack")
+async def update_from_pack(sid: str, request: Request, parts: str = "text,trackers"):
+    """Bring a newer version of a story package into a game already in progress. Turns, memory, the player's avatar, notes and existing characters are kept.
+    parts (comma list): text = story prompt, prologue, opening, suggested first moves, endings; trackers = the side-panel tracker list (current values kept);
+    art = art settings; world = places and species (new ones added, descriptions updated, existing pictures kept); cast = characters from the package that
+    this game does not have yet."""
+    s = _story(sid)
+    z, meta, notes = _open_pack(await request.body())
+    want = {p.strip() for p in parts.split(",") if p.strip()}
+    store.snapshot_story(sid, "before package update")
+    save_file = _pack_saver(z)
+    changed = []
+    if "text" in want:
+        for k in ("base_prompt", "prologue", "opening", "opening_options", "endings", "opening_in_context", "use_state_block"):
+            if meta.get(k) is not None:
+                s[k] = meta[k]
+        changed.append("story text")
+    if "trackers" in want and (sb := _pack_sidebar(meta)):
+        s["sidebar"] = {**(s.get("sidebar") or {}), **sb}
+        changed.append(f"{len(sb['custom'])} trackers")
+    if "art" in want and isinstance(meta.get("art"), dict):
+        s["art"] = {**(s.get("art") or {}), **meta["art"]}
+        changed.append("art settings")
+    if "world" in want:
+        _pack_places(meta, s, save_file)
+        _pack_species(meta, s, save_file)
+        changed.append("places and species")
+    if "cast" in want:
+        known = {c["name"].lower() for c in s.get("cast", [])} | {c["slug"] for c in s.get("cast", [])}
+        new = [c for c in meta.get("cast", []) if isinstance(c, dict) and c.get("name") and c["name"].lower() not in known and _slug(c.get("slug") or c["name"]) not in known]
+        s.setdefault("cast", []).extend(_pack_char(c, sid, save_file) for c in new)
+        changed.append(f"{len(new)} new character{'s' if len(new) != 1 else ''}")
+    store.save_story(s)
+    return {**_story(sid), "import_notes": notes, "updated_parts": changed}
 
 
 # ---------------- avatar library & cross-story references (both optional, set in Home → Settings → Libraries) ----------------
@@ -3285,6 +4159,9 @@ def edit_turn(sid: str, i: int, body: TurnEditIn):
     if not body.text.strip():
         raise HTTPException(400, "A turn can't be empty")
     store.snapshot_story(sid, "before turn edit")
+    if t["text"] != body.text.strip():      # the earlier wording is kept (newest first, up to 10) so an edit can be taken back
+        t.setdefault("versions", []).insert(0, {"text": t["text"], "ts": time.time()})
+        del t["versions"][10:]
     t["text"] = body.text.strip()
     t["edited"] = True
     store.save_story(s)
@@ -3442,8 +4319,31 @@ def _local_only(request: Request, what: str = "Backups can only be downloaded or
         raise HTTPException(403, f"{what} on the computer the app runs on.")
 
 
+@app.get("/api/lan")
+def lan_status(request: Request):
+    """Phone & tablet access (this computer only): the setting, whether the running app already listens on the home network, the addresses to open, the PIN."""
+    _local_only(request, "Phone and tablet settings can only be seen")
+    import socket
+    ips = []
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=3).stdout.split() if os.name != "nt" else socket.gethostbyname_ex(socket.gethostname())[2]
+        ips = [i for i in out if ":" not in i and _home_network(i) and not i.startswith("127.")]
+    except Exception:
+        pass
+    port = request.url.port or 8000
+    on = bool(store.load_config().get("lan_access"))
+    return {"on": on, "active": os.environ.get("STORYTELLER_LAN") == "1", "urls": [f"http://{i}:{port}" for i in ips], "pin": _lan_pin() if on or PIN else "", "port": port}
+
+
+@app.post("/api/lan/new-pin")
+def lan_new_pin(request: Request):
+    """A new PIN (phones then have to enter it again after the next restart)."""
+    _local_only(request, "The PIN can only be changed")
+    return {"pin": _lan_pin(new=True)}
+
+
 @app.post("/api/quit")
-async def quit_app(request: Request):
+async def quit_app(request: Request, restart: int = 0):
     """Close the app from its own screen (the same as the Stop launcher). Stories are saved as they go, so nothing is lost.
     When the app manages local models it also frees their memory first."""
     _local_only(request, "The app can only be closed")
@@ -3454,6 +4354,20 @@ async def quit_app(request: Request):
             freed = await localrt.free_all()
         except Exception:
             freed = None
+    if restart:     # a detached helper waits for this process to end, then starts the app again with the same settings (data folder, PIN, port)
+        import subprocess, sys
+        lan = bool(store.load_config().get("lan_access"))
+        host = "0.0.0.0" if lan else "127.0.0.1"         # the phone & tablet setting decides, so switching it takes effect on this restart
+        if lan:
+            os.environ["STORYTELLER_PIN"], os.environ["STORYTELLER_LAN"] = _lan_pin(), "1"
+        else:
+            os.environ.pop("STORYTELLER_PIN", None)
+            os.environ.pop("STORYTELLER_LAN", None)
+        code = ("import subprocess,sys,time;time.sleep(3);"
+                "subprocess.Popen([sys.executable,'-m','uvicorn','app.main:app','--host',sys.argv[1],'--port',sys.argv[2]],"
+                f"cwd={str(Path(__file__).resolve().parent.parent)!r},stdin=subprocess.DEVNULL,stdout=open({str(store.DATA / 'server.log')!r},'ab'),stderr=subprocess.STDOUT)")
+        kw = {"creationflags": 0x00000008 | 0x00000200 | 0x08000000} if os.name == "nt" else {"start_new_session": True}
+        subprocess.Popen([sys.executable, "-c", code, host, str(request.url.port or 8000)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
     asyncio.get_running_loop().call_later(0.6, lambda: os.kill(os.getpid(), signal.SIGTERM))   # (on Windows this ends the process at once; stories are already saved)   # after this reply has been sent
     return {"ok": True, "freed": freed}
 
@@ -4013,7 +4927,7 @@ _PORTRAIT_TAG = re.compile(r"!\[\]\(portrait:([^)/]+)/([^)]+)\)")
 NOW_SYSTEM = ("You keep a small 'right now' card for a story's side panel. Reply with ONLY JSON: "
               '{"name": "...", "mood": "...", "doing": "...", "wearing": "..."}. "name": the one character the player character is mainly interacting with at the end of the LATEST '
               "reply (never the player character), exactly as written in the known list; \"\" if nobody. \"mood\": that character's feeling right now in 1 to 2 lowercase words "
-              "(use the hint if one is given and it fits). \"doing\": what that character is physically doing at the end of the reply, as a short phrase about their pose, hands or gesture (for example \"hiding one hand behind her back\" or \"leaning on the table, arms crossed\"). \"wearing\": what that character is wearing now, in a short phrase (for example \"grey cadet uniform, jacket open\"), "
+              "(use the hint if one is given and it fits). \"doing\": what that character is physically doing at the end of the reply, as a short phrase about their pose, hands or gesture (for example \"hiding one hand behind her back\" or \"leaning on the table, arms crossed\"). \"wearing\": what that character is wearing now, in a short phrase (for example \"travel cloak over a linen shirt\"), "
               "taken from the text; if the text does not mention their clothing, keep the previous clothing if it was for the same character, otherwise give the most "
               "plausible outfit from the story. Visual facts only. This is a fiction-writing tool; just report what the text says.")
 
@@ -4050,10 +4964,94 @@ async def _update_now(sid: str) -> None:
         own = [m for n, m in tags if n == real]       # the narrator's own mood tag for that character wins over the helper's guess
         mood = own[-1].lower() if own else " ".join(str(j.get("mood", "")).lower().split())[:30]
         s2 = _story(sid)
+        old = s2.get("now") or {}
         s2["now"] = {"name": real, "mood": mood, "doing": " ".join(str(j.get("doing", "")).split())[:140] if real else "", "wearing": " ".join(str(j.get("wearing", "")).split())[:120] if real else "", "turn": len(s2["turns"])}
+        for k in ("image", "image_key"):           # the last picture stays until a new one is drawn
+            if old.get(k):
+                s2["now"][k] = old[k]
+        key = _now_key(s2["now"])
+        live = (s2.get("art") or {}).get("now_pic") == "live"
+        if live and key and key != old.get("image_key") and old.get("image_failed_key") != key:
+            s2["now"]["drawing"] = True
         store.save_story(s2)
+        if s2["now"].get("drawing"):
+            asyncio.create_task(_draw_now(sid, key))
     except Exception:
         pass
+
+
+def _now_key(now: dict) -> str:
+    """What the 'right now' picture shows: who, doing what, wearing what (the mood alone does not redraw it)."""
+    if not (now.get("name") and (now.get("doing") or now.get("wearing"))):
+        return ""
+    return hashlib.sha1(f"{now['name']}|{now.get('doing', '').lower()}|{now.get('wearing', '').lower()}".encode()).hexdigest()[:12]
+
+
+async def _draw_now(sid: str, key: str) -> None:
+    """Draw the character on the 'right now' card doing what the card says and wearing what it says, with their saved portraits as the face reference.
+    Runs in the background after the card's text is known; one picture at a time with everything else; failures leave the previous picture."""
+    async with _image_lock:
+        try:
+            s, cfg = _story(sid), store.load_config()
+            now = s.get("now") or {}
+            if _now_key(now) != key or not (s.get("art") or {}).get("now_card") or (s.get("art") or {}).get("now_pic") != "live":
+                return               # the card moved on while this waited
+            ch = next((c for c in s.get("cast", []) if c["name"] == now["name"]), None)
+            if not ch:
+                return
+            prov = _maker_provider(cfg, s, ch)
+            mood = (now.get("mood") or "").strip().lower()
+            scene = " ".join(x for x in (f"{ch['name']} {now.get('doing', '')}".strip(), f"looking {mood}" if mood else "") if x)
+            if _is_explicit(scene + " " + now.get("wearing", ""), cfg) and (ns := _nsfw_provider(cfg, s)):
+                prov = ns
+            _model_ctx.set(prov.get("model", ""))
+            refs = _load_refs(_portrait_urls(ch, mood or None), int(cfg.get("image_max_refs", 3)))
+            art = _nsfw_art(await _art_with_setting(s, cfg), prov)
+            where = ((s.get("backdrop") or {}).get("name") or "").strip()
+            look = _full_appearance(s, ch)
+            wearing = now.get("wearing", "").strip()
+            if _wants_tags(prov):
+                prompt, negative = await _portrait_tag_prompt(s, cfg, art, {**ch, "appearance": f"{look}. Wearing {wearing}" if wearing else look},
+                                                              mood or "normal", notes=f"{now.get('doing', '')}; wearing {wearing}".strip("; "))
+            else:
+                lines = [images.plain(art.get("direction") or "").strip(),
+                         f"{ch['name']}, right now: {now.get('doing', '').strip() or 'standing'}." + (f" In {where}." if where else ""),
+                         f"Who: {look}",
+                         f"Clothing right now (this replaces any clothing in the description or the reference): {wearing}." if wearing else "",
+                         f"Expression and body language: {mood}." if mood else "",
+                         ("Reference images are attached: copy the face, hair and build only. The clothing, pose, action and background come from the text above. "
+                          + images.STYLE_MATCH) if refs else "",
+                         "One character, shown from the waist up or three-quarter length so the action and the clothing are visible.",
+                         images.content_line(bool(s.get("nsfw")))]
+                prompt, negative = "\n\n".join(x for x in lines if x), (s.get("art") or {}).get("negative", "")
+            if prov.get("nsfw_maker"):
+                prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov))
+            data, ext = await images.generate(prov, prompt, negative, "portrait", refs)
+            folder = store.PORTRAITS / sid / "now"
+            folder.mkdir(parents=True, exist_ok=True)
+            name = f"now-{int(time.time() * 1000)}.{ext}"
+            (folder / name).write_bytes(data)
+            s = _story(sid)
+            n = s.get("now") or {}
+            for f in folder.glob("now-*"):           # only the newest picture is kept
+                if f.name != name and f"/{f.name}" not in json.dumps(n):
+                    f.unlink(missing_ok=True)
+            if _now_key(n) == key:
+                n.update({"image": f"/portraits/{sid}/now/{name}", "image_key": key})
+            n.pop("drawing", None)
+            s["now"] = n
+            store.save_story(s)
+        except Exception as e:
+            try:
+                s = _story(sid)
+                n = s.get("now") or {}
+                n.pop("drawing", None)
+                n["image_failed_key"] = key          # do not retry the same picture every turn
+                n["image_error"] = (getattr(e, "detail", None) or str(e))[:200]
+                s["now"] = n
+                store.save_story(s)
+            except Exception:
+                pass
 
 
 def _start_now(sid: str) -> None:
@@ -4087,6 +5085,50 @@ def delete_backdrop(sid: str):
 
 # ---------------- side panel (tracker) ----------------
 _tracker_tasks: dict[str, asyncio.Task] = {}
+_check_tasks: dict[str, asyncio.Task] = {}
+
+RULE_CHECK_SYSTEM = (
+    "You check one reply of an interactive story's narrator against the story's own rules. Report only clear, concrete slips of explicit, checkable "
+    "rules in the story prompt: required lines or notifications that are missing, doubled or in the wrong place; numbers that contradict the rules or the "
+    "previous values; choices, speech or spending made for the player when the rules say the player decides; a forbidden thing the rules name. "
+    "Ignore style, taste, length and anything the rules do not state. Each issue is one short sentence naming the rule. "
+    'Reply with ONLY JSON: {"issues": ["..."]} (at most 3; an empty list when the reply follows the rules).')
+
+
+async def _rule_check(sid: str, idx: int, ts: float | None) -> None:
+    """Opt-in (story option): the small helper reads the story's rules, the player's move and the reply, and notes clear rule slips on the reply.
+    The player can then fix it with one click (a retry that names the slips). Failures are silent."""
+    try:
+        s, cfg = _story(sid), store.load_config()
+        if idx >= len(s["turns"]) or s["turns"][idx]["role"] != "assistant" or s["turns"][idx].get("ts") != ts:
+            return
+        move = s["turns"][idx - 1]["text"] if idx >= 1 and s["turns"][idx - 1]["role"] == "user" else ""
+        prev = next((t["text"] for t in reversed(s["turns"][:idx - 1]) if t["role"] == "assistant"), "")
+        prov, model = _role(cfg, s, "small", "rule check")
+        user = (f"STORY RULES (the story prompt):\n{s.get('base_prompt', '')[:40000]}\n\nPREVIOUS REPLY (end, for the earlier values):\n{prev[-1500:]}\n\n"
+                f"PLAYER'S MOVE:\n{move[:1500]}\n\nREPLY TO CHECK:\n{s['turns'][idx]['text'][:14000]}")
+        out = await providers.complete(prov, model, RULE_CHECK_SYSTEM, [{"role": "user", "content": user}], temperature=0.1, max_tokens=300,
+                                       num_ctx=cfg["num_ctx"], **_extras(cfg))
+        j = _json_in(out)
+        issues = [" ".join(str(x).split())[:240] for x in (j.get("issues") or [])][:3] if isinstance(j, dict) else []
+        s = _story(sid)        # freshest copy
+        if idx < len(s["turns"]) and s["turns"][idx].get("ts") == ts:
+            s["turns"][idx]["check"] = {"issues": issues, "ts": time.time()}
+            store.save_story(s)
+    except Exception:
+        pass
+
+
+@app.get("/api/stories/{sid}/turns/{i}/check")
+async def get_rule_check(sid: str, i: int, wait: bool = False):
+    """The rule check of a reply (wait=true lets a running check finish first). issues is null while none has run."""
+    if wait:
+        t = _check_tasks.get(sid)
+        if t and not t.done():
+            await asyncio.wait({t}, timeout=60)
+    s = _story(sid)
+    t = _turn_at(s, i)
+    return {"issues": (t.get("check") or {}).get("issues")}
 
 
 def _maybe_track_with_ai(story: dict, idx: int, got_panel: bool) -> None:

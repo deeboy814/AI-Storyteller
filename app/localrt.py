@@ -33,6 +33,24 @@ def touch(service: str) -> None:
     _last[service] = time.time()
 
 
+_held = {"n": 0}      # picture jobs in progress (a mood set, a redraw-all...): ComfyUI is never stopped while one runs
+
+
+class hold:
+    """`with localrt.hold():` around a picture job keeps the idle timer from stopping ComfyUI in the middle of it."""
+    def __enter__(self):
+        _held["n"] += 1
+        touch("comfy")
+
+    def __exit__(self, *a):
+        _held["n"] = max(0, _held["n"] - 1)
+        touch("comfy")       # the idle time counts from the end of the job
+
+
+def busy() -> bool:
+    return _held["n"] > 0
+
+
 def _cfg() -> dict:
     return store.load_config()
 
@@ -275,6 +293,9 @@ async def loop() -> None:
             idle = time.time() - _last["comfy"] if _last["comfy"] else 0
             if _last["comfy"] == 0:
                 touch("comfy")   # it was already running when the app started: count idle time from now
+                continue
+            if busy():
+                touch("comfy")
                 continue
             if idle >= float(cfg.get("rt_comfy_idle_min", 15)) * 60:
                 if cfg.get("rt_comfy_mode", "stop") == "stop":

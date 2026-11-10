@@ -51,7 +51,7 @@ Everything runs on your own computer. Your stories, pictures and settings are st
 
 It runs on Linux (tested on Ubuntu) and Windows 10/11 (the Windows scripts have not yet been tried on a real Windows machine; if something fails, see Troubleshooting and please report it). It needs **Python 3.10 or newer**. To remove the desktop icon later run `./uninstall.sh` (Windows: `uninstall.bat`); your stories are not touched.
 
-Want something to try? Paste `examples/the-lighthouse-keepers.md` (a small original story prompt) into **New story**; `examples/story-prompt-template.md` explains how to write your own.
+Want to see a finished story package? Import `examples/Example Story Package - The Lantern Market.zip` with **📦 Import a story**: a complete, playable example (prompt, opening, cast with pictures, a species, places, trackers, endings and a starter character) whose prompt carries `GUIDE:` notes explaining each part; `examples/lantern-market/HOW-TO-BUILD-A-STORY-PACKAGE.md` walks through building your own. Or paste `examples/the-lighthouse-keepers.md` (a small original story prompt) into **New story**; `examples/story-prompt-template.md` explains how to write your own.
 
 ## What you need
 
@@ -198,7 +198,8 @@ The narrator reads your story prompt, the **memory** (a summary of older events)
 - **Pictures and moods:** each character can have several pictures named for a mood (`normal 1`, `smile 2`, `combat 3`…). The narrator is told which exist and shows the best match above that character's lines, so existing pictures are always used first. Only when no mood fits can it ask for a new one, and nothing is drawn unless you press **＋ Draw**.
 - **Characters without pictures:** a banner offers to make them. *Review…* lets you edit the description, add notes, and draw 4 options to pick a face; then the app can draw a set of moods in the background.
 - **Cast tools:** import a folder of portraits, find characters without art, suggest a cast from the prompt, **group characters** (extras such as guards or zombies show as one card), and **Voices** for reading aloud (all under *Cast tools* at the bottom of the Cast screen).
-- **Other names and private names:** a character's page has *Also called* (so "Naomi" counts as "Dr. Okafor" everywhere, and a duplicate can be merged into the real character) and *Names and forms of address* (who may use which name for them; sent to the narrator every turn).
+- **Species and picture makers:** a character's page has *Species* (empty = human) and *Picture maker*. The first picture drawn for a new species becomes its reference, so later members of that species share its look but keep their own face. For non-human characters choose **FLUX.2 klein with reference pictures** (the same model as the optional backgrounds maker); other ComfyUI checkpoints draw them from text only. Species traits and their default maker are under 🖼 Art → Characters → *Species & makers…*.
+- **Other names and private names:** a character's page has *Also called* (so a nickname counts as the same character everywhere, and a duplicate can be merged into the real character) and *Names and forms of address* (which names or titles each person uses for them, and who may; sent to the narrator every turn).
 - **Relationships tab:** how each character feels about you over time.
 - **👤 Player:** your character's sheet (name, gender, age, appearance, personality, background, abilities), your **notes** to the narrator (standing instructions), and a **Draw 4 options** button that draws your avatar from the sheet (you pick one). Everything else about pictures lives in **🖼 Art** (below).
 - **Fitting the story's world:** every picture the app generates is told the story's *setting* (a short description of its world, written once from your prompt; editable under 🖼 Art → Style & options), so characters are dressed to suit it.
@@ -236,7 +237,7 @@ Each story has up to four AI jobs: the **narrator** (writes the story, so qualit
 
 ### Phone and tablet
 
-The layout adapts to small screens. To use it from another device on your home network, start the app with `./run-lan.sh`: it prints an address and a 6-digit **PIN** (other devices must enter it; this computer never needs it). Only do this on a network you trust.
+The layout adapts to small screens. To play from a phone or tablet on your home network, turn on **Settings → Phone & tablet** and restart: the tab shows the address to open on the phone and a 6-digit **PIN** (other devices enter it once; this computer never needs it). Only devices on your home network are let in, and the phone talks only to this computer. If your computer has a firewall (Ubuntu's `ufw`), allow your home network once, as shown in that tab. (`./run-lan.sh` still works for a one-off session.)
 
 ---
 

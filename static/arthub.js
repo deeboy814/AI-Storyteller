@@ -20,7 +20,7 @@ function showArtHub(tab = "Overview") {
     <div class="tabs"><button class="tab hubtab" data-tab="Overview">Overview</button><button class="tab hubtab" data-tab="Style">Style &amp; options</button><button class="tab hubtab" data-tab="Backgrounds">Backgrounds</button><button class="tab hubtab" data-tab="Makers">Picture makers</button></div>
     <div id="hubOverview" class="hubgrid">
       ${card("🎭", "Characters", `${cast.length} character${cast.length === 1 ? "" : "s"} · ${withArt} with pictures${need ? ` · <b>${need} need art</b>` : ""}`,
-        `<button id="hCast">Cast &amp; pictures…</button><button id="aNew">Draw art for new characters…</button><button id="hGal">Gallery</button>`)}
+        `<button id="hCast">Cast &amp; pictures…</button><button id="aNew">Draw art for new characters…</button><button id="hGal">Gallery</button><button id="hSpecies">Species &amp; makers…</button>`)}
       ${card("🧑", "Your avatar", story.avatar_image ? "Has a picture" : "No picture yet", `<button id="hAvatar">Avatar picture…</button>`)}
       ${card("📍", "Places", `${places.length} place${places.length === 1 ? "" : "s"} · ${placesArt} with pictures`, `<button id="hPlaces">Manage places…</button>`)}
       ${card("🌄", "Backgrounds", `Showing: ${esc(bd.name || (bd.url ? "a picture you chose" : "nothing yet"))}<br>Changes automatically: ${onoff(a.auto_backdrop)}${a.dynamic_backdrop ? " (also for dramatic moments)" : ""} · screen display: ${onoff(config && config.ui_backdrop)}`, `<button id="hBg">Backgrounds…</button>`)}
@@ -49,6 +49,7 @@ function showArtHub(tab = "Overview") {
   const via = (f) => () => { artBack = back; f(); };    // the screen that opens gets a "← Art menu" button (see modal() in app.js)
   $("hCast").onclick = via(() => showCast("Characters"));
   $("hGal").onclick = via(() => showCast("Gallery"));
+  $("hSpecies").onclick = via(() => showSpecies({ back }));
   $("hIntro").onclick = via(() => showCast("Intro"));
   $("aNew").onclick = via(() => showArtDialog({ onClose: () => { renderAll(); back(); } }));
   $("hAvatar").onclick = via(() => showPlayer());
@@ -152,4 +153,37 @@ function collapsify(pane, openFirst = true) {
       const sm = document.createElement("summary"); sm.innerHTML = k.innerHTML; cur.appendChild(sm); pane.replaceChild(cur, k);
     } else if (cur) cur.appendChild(k);
   }
+}
+
+// Species: what is true of a whole species (written into every member's picture prompt), the picture maker it uses by default, and its reference picture. The first
+// picture drawn of a new species becomes its reference by itself; later characters of the species keep its look but are drawn as their own person.
+async function showSpecies(nav = {}) {
+  const list = Object.entries(story.species || {}), cast = story.cast || [], choices = await makerChoices();
+  const members = (name) => cast.filter((c) => ((c.species || "human").trim().toLowerCase() || "human") === name.toLowerCase());
+  const card = ([key, sp]) => {
+    const m = members(sp.name), withPic = m.filter((c) => Object.keys(c.moods || {}).length);
+    return `<div class="aiBox spcard" data-key="${esc(key)}"><b>${esc(sp.name)}</b> <small class="muted">${m.length} character${m.length === 1 ? "" : "s"}: ${esc(m.map((c) => c.name).join(", ") || "none yet")}</small>
+      <div class="bioTop">${sp.reference_url ? `<img class="bioimg" src="${thumbUrl(sp.reference_url, 360)}" alt="reference">` : '<div class="noart" style="width:110px;height:140px">No reference yet</div>'}
+      <div style="flex:1"><label>What is true of the whole species <small class="hint">(skin or covering, eyes, crests, build, clothing: added to every member's picture prompt)</small></label><textarea class="short spDesc" rows="3">${esc(sp.description || "")}</textarea>
+        <label>Picture maker for this species <small class="hint">(a character can still choose their own)</small></label><select class="spMaker"></select>
+        <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><select class="spPick">${withPic.map((c) => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join("") || "<option value=''>(no pictures yet)</option>"}</select>
+          <button class="spUse" ${withPic.length ? "" : "disabled"}>Use their picture as the reference</button>${sp.reference_url ? '<button class="spClear">Clear the reference</button>' : ""}</div></div></div></div>`;
+  };
+  modal(`<h2>🧬 Species</h2><p class="hint">Every character has a species (empty means human). The <b>first picture drawn</b> for a species becomes its reference: the next character of that species is drawn from a tiny version of it, so they share its look but have their own face. After a character has pictures of their own, those are used instead.</p>
+    <div id="spList">${list.map(card).join("") || '<p class="hint">No species yet. Give a character a species (character page → Species) or add one below.</p>'}</div>
+    <div class="actions" style="justify-content:flex-start"><input id="spNew" placeholder="Add a species, e.g. Elf" style="max-width:220px"><button id="spAdd">Add</button><span style="flex:1"></span><span class="hint" id="spNote"></span><button class="primary" id="spSave">Save</button></div>
+    <div class="actions" style="margin-top:8px"><button id="mClose">Close</button></div>`);
+  $("mClose").onclick = () => { closeModal(); renderAll(); };
+  const body = () => ({ species: [...document.querySelectorAll(".spcard")].map((el) => ({ name: (story.species[el.dataset.key] || {}).name || el.dataset.key, description: el.querySelector(".spDesc").value, maker: el.querySelector(".spMaker").value })) });
+  document.querySelectorAll(".spcard").forEach((el) => {
+    const key = el.dataset.key; makerSelect(el.querySelector(".spMaker"), choices, (story.species[key] || {}).maker || "");
+    el.querySelector(".spUse").onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "POST", body: { slug: el.querySelector(".spPick").value } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } };
+    const clr = el.querySelector(".spClear"); if (clr) clr.onclick = async () => { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "DELETE" }); showSpecies(nav); };
+  });
+  $("spAdd").onclick = async () => {
+    const n = $("spNew").value.trim(); if (!n) return;
+    const b = body(); b.species.push({ name: n, description: "", maker: "" });
+    try { story = await api(`/stories/${story.id}/species`, { method: "PUT", body: b }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; }
+  };
+  $("spSave").onclick = async () => { try { story = await api(`/stories/${story.id}/species`, { method: "PUT", body: body() }); $("spNote").textContent = "✔ Saved."; } catch (err) { $("spNote").textContent = err.message; } };
 }

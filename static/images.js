@@ -15,7 +15,7 @@ function introPanelHtml(name) {
   const im = ((story && story.intro_images) || []).find((p) => p.name.toLowerCase() === name.trim().toLowerCase());
   return im ? `<a href="${im.url}" target="_blank"><img class="intro-panel" src="${thumbUrl(im.url, 1100)}" alt=""></a>` : "";
 }
-// A place picture (![](place:Sync chamber)): a fixed picture of a room or location the story returns to often.
+// A place picture (![](place:Old library)): a fixed picture of a room or location the story returns to often.
 function placeHtml(name) {
   const pl = ((story && story.places) || []).find((p) => p.url && p.name.toLowerCase() === name.trim().toLowerCase());
   return pl ? `<figure class="placepic"><img loading="lazy" src="${thumbUrl(pl.url, 1100)}" alt=""><figcaption>📍 ${esc(pl.name)}</figcaption></figure>` : "";
@@ -40,13 +40,19 @@ document.getElementById("narrative").addEventListener("toggle", (e) => {
 }, true);
 const newMoodSeen = new Set();   // one "Draw new" button per character+mood per render
 let drawingNew = null;             // "slug|mood" being drawn right now
+// Same list as the server's EXPRESSION_MOODS: any other picture type is an action picture (drawn three-quarter, shown cropped to the upper body).
+const EXPRESSION_MOODS = new Set(["default", "normal", "smile", "happy", "laugh", "laughing", "shy", "surprise", "surprised", "sulky", "fear", "scared", "sad", "angry", "scorn",
+  "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "aroused", "worried", "confused", "bored", "disgusted", "embarrassed", "blush", "blushing",
+  "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty", "seductive", "calm", "serious", "thinking", "pout", "annoyed", "suspicious",
+  "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie"]);
+function isActionMood(m) { return !!m && !EXPRESSION_MOODS.has(String(m).toLowerCase().replace(/\s*\d+$/, "").trim()); }
 function portraitInfo(spec) {
   const i = spec.lastIndexOf("/");
   const name = (i < 0 ? spec : spec.slice(0, i)).trim().toLowerCase();
   const mood = (i < 0 ? "default" : spec.slice(i + 1)).trim().toLowerCase();
-  const flat = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");   // "Female Student" = "FemaleStudent"
+  const flat = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");   // "Tall Guard" = "TallGuard"
   const ch = ((story && story.cast) || []).find((c) => c.name.toLowerCase() === name || c.name.toLowerCase().split(" ")[0] === name || flat(c.name) === flat(name))
-    || ((story && story.cast) || []).find((c) => (c.aka || []).some((a) => a.toLowerCase() === name || flat(a) === flat(name)));   // "Naomi" = Dr. Okafor
+    || ((story && story.cast) || []).find((c) => (c.aka || []).some((a) => a.toLowerCase() === name || flat(a) === flat(name)));   // a nickname finds the character
   if (!ch) return null;
   const m = ch.moods || {};
   // A character's "default" is a picture named default, or else a neutral one (normal 1 / normal), or else any picture.
@@ -57,7 +63,8 @@ function portraitInfo(spec) {
 function portraitHtml(spec) {
   const p = portraitInfo(spec);
   if (!p) return "";
-  let h = p.url ? `<img class="npcpic" loading="lazy" src="${thumbUrl(p.url, 640)}" alt="">` : "";
+  const crop = isActionMood(p.mood) && p.exact;     // action pictures (combat, dead, showering...): show the upper body here; a click opens the whole picture
+  let h = p.url ? `<img class="npcpic${crop ? " upper" : ""}" loading="lazy" src="${thumbUrl(p.url, 640)}" alt="">` : "";
   const key = p.ch.slug + "|" + p.mood;
   if (!p.exact && /^[a-z0-9][a-z0-9 _-]{0,29}$/.test(p.mood) && (p.ch.appearance || "").trim() && !newMoodSeen.has(key)) {
     newMoodSeen.add(key);
@@ -80,11 +87,24 @@ function sceneHtml(t, i) {
   return h;
 }
 
+// After a new "normal 1": offer to delete the character's other pictures and redraw them all from the new face. Returns true if it ran.
+async function offerRedrawAll(ch, onProgress) {
+  const others = Object.keys(ch.moods || {}).filter((m) => m !== "normal 1");
+  if (!others.length) return false;
+  if (!confirm(`${ch.name} has ${others.length} other picture${others.length > 1 ? "s" : ""} (${others.slice(0, 6).join(", ")}${others.length > 6 ? "…" : ""}).\n\nRedraw them all to match the new Normal 1?\n\nOK deletes every other picture of ${ch.name} first (including earlier versions), then redraws them. Cancel keeps them as they are.`)) return false;
+  const r = await api(`/stories/${story.id}/cast/${ch.slug}/redraw-all`, { method: "POST" });
+  story = await api(`/stories/${story.id}`); renderAll();
+  const job = await watchJob(r.job, (j) => { artBusyText = `Redrawing ${ch.name}'s pictures: ${j.done} of ${j.total}`; if (onProgress) onProgress(`${j.current} (${j.done} of ${j.total} done)`); refreshArtSuggestions(); });
+  artBusyText = ""; story = await api(`/stories/${story.id}`); renderAll();
+  if (job.status === "error") alert("The redraw stopped: " + job.error);
+  return true;
+}
+
 async function illustrate(turnIdx = null, scene = null) {
   if (!story || busy || illustratingTurn !== null) return;
   const idx = turnIdx ?? story.turns.map((t) => t.role).lastIndexOf("assistant");
   if (idx < 0) { alert("There is no narrator reply to illustrate yet."); return; }
-  illustratingTurn = idx; renderNarrative(); renderSidebar();
+  illustratingTurn = idx; renderNarrative(null, "keep"); renderSidebar();
   try { story = await api(`/stories/${story.id}/illustrate`, { method: "POST", body: { turn: idx, scene } }); }
   catch (e) { alert("Illustration failed: " + e.message); }
   illustratingTurn = null; renderAll();
@@ -94,7 +114,7 @@ document.getElementById("narrative").addEventListener("click", async (e) => {
   const b = e.target.closest("button");
   if (!b || !story || busy) return;
   if (b.classList.contains("newmood")) {
-    drawingNew = b.dataset.slug + "|" + b.dataset.mood; renderNarrative();
+    drawingNew = b.dataset.slug + "|" + b.dataset.mood; renderNarrative(null, "keep");
     try { story = await api(`/stories/${story.id}/cast/${b.dataset.slug}/generate`, { method: "POST", body: { mood: b.dataset.mood } }); }
     catch (err) { alert("Could not draw it: " + err.message); }
     drawingNew = null; renderAll(); return;
@@ -238,6 +258,8 @@ function artTabHtml() {
     </details>
     <details class="sub"><summary>Side panel card</summary>
     <label class="chk"><input type="checkbox" id="artNow" ${a.now_card ? "checked" : ""}> Show who you are talking to in the side panel: their picture, mood and what they are wearing, in place of your avatar (the helper model updates it after each reply; off by default).</label>
+    <div class="field" style="margin-left:24px"><label>Its picture</label><select id="artNowPic"><option value="portrait" ${a.now_pic !== "live" ? "selected" : ""}>Their saved picture for the mood (no extra drawing)</option><option value="live" ${a.now_pic === "live" ? "selected" : ""}>A new picture each turn: what they are doing and wearing right now</option></select>
+      <div class="hint">A new picture each turn uses their saved pictures for the face and is drawn in the background after the reply, only when what they are doing or wearing changes. It uses your picture maker once per change (on a local ComfyUI, a few seconds of GPU each time).</div></div>
     </details>
     <p class="hint">Both switches add a short instruction for the narrator. Changing them makes the next Claude turn rewrite the prompt cache once.</p>
   </div>`;
@@ -246,7 +268,7 @@ function artTabInit() { const a = (story && story.art) || {}; if ($("artSceneWhe
   $("artSettingGen").onclick = async (e) => { e.target.disabled = true; $("artSettingNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/art/setting`, { method: "POST" }); $("artSetting").value = r.art.setting; $("artSettingNote").textContent = "Done. Edit if you like, then Save."; } catch (err) { $("artSettingNote").textContent = err.message; } e.target.disabled = false; }; $("artSize").value = a.size || "portrait"; $("artPsize").value = a.portrait_size || "medium"; $("artPshape").value = a.portrait_shape || "landscape"; }
 async function artTabSave() {
   story = await api(`/stories/${story.id}/art`, { method: "PUT", body: {
-    direction: $("artDir").value, setting: $("artSetting").value, negative: $("artNeg").value, size: $("artSize").value, portrait_size: $("artPsize").value, portrait_shape: $("artPshape").value, auto: $("artAuto").checked, suggest: $("artSuggest").checked, newchar: $("artNewchar").checked, exact_moods: $("artExact").checked, extended_moods: $("artExtMoods").checked, scene_often: $("artOften").checked, scene_where: $("artSceneWhere").value, now_card: $("artNow").checked, portraits: $("artPort").checked } });
+    direction: $("artDir").value, setting: $("artSetting").value, negative: $("artNeg").value, size: $("artSize").value, portrait_size: $("artPsize").value, portrait_shape: $("artPshape").value, auto: $("artAuto").checked, suggest: $("artSuggest").checked, newchar: $("artNewchar").checked, exact_moods: $("artExact").checked, extended_moods: $("artExtMoods").checked, scene_often: $("artOften").checked, scene_where: $("artSceneWhere").value, now_card: $("artNow").checked, now_pic: $("artNowPic").value, portraits: $("artPort").checked } });
 }
 
 // ---------- Cast: character cards, and a character view with Bio / Key events / Images ----------
@@ -298,6 +320,13 @@ function showGroupEditor() {
     showCast("Characters");
   };
 }
+function makerLabel(m) { return !m ? "" : m === "flux" ? "FLUX" : m.startsWith("ckpt:") ? m.slice(5).replace(/\.safetensors$/, "").replace(/[_-]/g, " ").slice(0, 18) : m; }
+function charBadges(c) {   // small species / picture-maker tags on a cast card
+  const sp = (c.species || "").trim(), own = makerLabel(c.maker || "");
+  const spMaker = sp ? makerLabel(((story.species || {})[sp.toLowerCase()] || {}).maker || "") : "";
+  return (sp && sp.toLowerCase() !== "human" ? `<span class="cbadge" title="Species">${esc(sp)}</span>` : "") +
+    (own ? `<span class="cbadge mk" title="This character's own picture maker">🖌 ${esc(own)}</span>` : spMaker ? `<span class="cbadge mk" title="Picture maker of their species">🖌 ${esc(spMaker)}</span>` : "");
+}
 function showCast(tab = "Characters") {
   if (!story) return;
   const items = [];
@@ -307,7 +336,7 @@ function showCast(tab = "Characters") {
     : '<p class="hint">No pictures yet. Use the 🎨 button under the input box to illustrate the latest reply.</p>';
   const card = (c) => `<button class="charcard" data-slug="${esc(c.slug)}">
     ${normalUrl(c) ? `<img loading="lazy" src="${thumbUrl(normalUrl(c), 420)}" alt="">` : '<div class="noart">No art yet</div>'}
-    <div class="meta"><b>${esc(c.name)}</b><small>${esc(oneLine(c.bio || c.appearance, 60) || "no description yet")}</small>${(c.events || []).length ? `<small class="evn">📜 ${c.events.length} event${c.events.length > 1 ? "s" : ""}</small>` : ""}</div></button>`;
+    <div class="meta"><b>${esc(c.name)}</b>${charBadges(c)}<small>${esc(oneLine(c.bio || c.appearance, 60) || "no description yet")}</small>${(c.events || []).length ? `<small class="evn">📜 ${c.events.length} event${c.events.length > 1 ? "s" : ""}</small>` : ""}</div></button>`;
   modal(`<h2>Cast &amp; gallery</h2>
     <div class="tabs"><button class="tab ctab" data-tab="Characters">Characters (${(story.cast || []).length})</button><button class="tab ctab" data-tab="Relationships">Relationships</button><button class="tab ctab" data-tab="Gallery">Gallery (${items.length})</button><button class="tab ctab" data-tab="Intro">Intro panels (${(story.intro_images || []).length})</button></div>
     <div id="cTabCharacters"><p class="hint">Click a character to see their bio, key events and all their pictures. The card shows their normal picture.</p>
@@ -401,16 +430,21 @@ function showCharacter(slug, tab = "Bio") {
     <div id="chBio">
       <div class="bioTop">${normalUrl(c) ? `<img class="bioimg" src="${thumbUrl(normalUrl(c), 480)}" alt="">` : ""}<div style="flex:1">
         <label>Name</label><input id="chName" value="${esc(c.name)}" placeholder="Name">
-        <label>Also called <small class="hint">(other names the story uses for them: first name, nickname, title; separate with commas)</small></label><input id="chAka" value="${esc((c.aka || []).join(", "))}" placeholder="e.g. Naomi">
+        <label>Also called <small class="hint">(other names the story uses for them: first name, nickname, title; separate with commas)</small></label><input id="chAka" value="${esc((c.aka || []).join(", "))}" placeholder="e.g. a nickname or title">
+        <div class="grid2" style="grid-template-columns:1fr 2fr"><div><label>Species <small class="hint">(empty = human)</small></label><input id="chSpecies" list="speciesList" value="${esc(c.species || "")}" placeholder="human"><datalist id="speciesList">${Object.values(story.species || {}).map((x) => `<option value="${esc(x.name)}">`).join("")}</datalist></div>
+          <div><label>Picture maker <small class="hint">(for this character; empty = their species' or the story's)</small></label><select id="chMaker"></select></div></div>
+        ${(() => { const sp = c.species && (story.species || {})[c.species.toLowerCase()]; return sp && sp.reference_url
+          ? `<div class="spref"><img src="${thumbUrl(sp.reference_url, 200)}" alt=""><div class="hint"><b>${esc(sp.name)} reference picture.</b> New characters of this species are drawn from it, so they share its look but have their own face. Change it under 🖼 Art → Characters → Species.</div></div>`
+          : `<div class="hint">The first picture drawn for a new species becomes its reference: later characters of that species keep its look (skin, crests, build) but are drawn as their own person. Species traits are written under 🖼 Art → Characters → Species.</div>`; })()}
         <label>How they look <small class="hint">(what the artist is told: age, hair, eyes, build, clothing, distinctive features)</small></label><textarea class="short" id="chApp" rows="3">${esc(c.appearance)}</textarea>
         <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button id="chAppSuggest" ${isNew ? "disabled" : ""}>Suggest from the story</button></div></div></div>
-      <label>Names and forms of address <small class="hint">(optional: who may use which name for them. Sent to the narrator every turn. Example: “Her first name is Naomi. Nobody uses it except the player; leadership knows it but says Dr. Okafor.”)</small></label><textarea class="short" id="chAddress" rows="3" maxlength="600">${esc(c.address || "")}</textarea>
+      <label>Names and forms of address <small class="hint">(optional: which names or titles each person uses for this character, and who is allowed to. Sent to the narrator every turn, so it can keep names consistent. For example: a given name only close friends use, a nickname, a title or rank others use, or a name that should stay secret.)</small></label><textarea class="short" id="chAddress" rows="3" maxlength="600">${esc(c.address || "")}</textarea>
       <label>Personality <small class="hint">(traits, how they speak, what they want)</small></label><input id="chPers" value="${esc(c.personality || "")}">
       <label>Bio <small class="hint">(who they are in your story: role, history, relationships)</small></label><textarea class="short" id="chBioText" rows="5">${esc(c.bio || "")}</textarea>
       <label class="chk top"><input type="checkbox" id="chAuthor" ${c.author ? "checked" : ""}><span><b>Tell the narrator about them</b><span class="hint">Sends this character's looks, personality and bio to the narrator every turn. Off: the bio is only shown here.</span></span></label>
       <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button id="chBioSuggest" ${isNew ? "disabled" : ""}>Suggest a bio from the story</button></div>
       <div id="chPromptLines"></div><div class="aStatus hint" id="chStatus"></div>
-      ${isNew || (story.cast || []).length < 2 ? "" : `<div class="aiBox"><b>Same person as another character?</b> <small class="muted">If the story ended up with this character twice (for example “Naomi” and “Dr. Okafor”), fold this entry into the right one: its name becomes an “also called” name there, and its pictures, key events and side-panel row move over.</small>
+      ${isNew || (story.cast || []).length < 2 ? "" : `<div class="aiBox"><b>Same person as another character?</b> <small class="muted">If the story ended up with this character twice (for example under a nickname and under their full name), fold this entry into the right one: its name becomes an “also called” name there, and its pictures, key events and side-panel row move over.</small>
         <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><select id="chMergeSel">${(story.cast || []).filter((x) => x.slug !== slug).map((x) => `<option value="${esc(x.slug)}">${esc(x.name)}</option>`).join("")}</select><button id="chMerge">Merge ${esc(c.name)} into them</button></div></div>`}
       <div class="actions">${isNew ? "" : '<button class="danger" id="chRemove">Remove character</button><span style="flex:1"></span>'}<button class="primary" id="chSave">${isNew ? "Create character" : "Save"}</button></div></div>
 
@@ -475,9 +509,10 @@ function showCharacter(slug, tab = "Bio") {
     box.innerHTML = `<p class="hint" style="margin-bottom:2px">What your story prompt says about them:</p>` + r.lines.map((l, i) => `<div class="pline"><span>${esc(oneLine(l, 260))}</span><button class="usebio" data-i="${i}">Use as bio</button></div>`).join("");
     box.querySelectorAll(".usebio").forEach((b) => b.onclick = () => { $("chBioText").value = r.lines[+b.dataset.i]; });
   }).catch(() => {});
+  if ($("chMaker")) { makerSelect($("chMaker"), [["", "Same as the story"]], c.maker || ""); makerChoices().then((ch) => { if ($("chMaker")) makerSelect($("chMaker"), ch, c.maker || ""); }); }
   $("chSave").onclick = async () => {
     const name = $("chName").value.trim(); if (!name) { status("chStatus", "Give the character a name."); return; }
-    const edit = { name, appearance: $("chApp").value, bio: $("chBioText").value, personality: $("chPers").value, author: $("chAuthor").checked, aka: $("chAka").value, address: $("chAddress").value, slug: isNew ? null : slug };
+    const edit = { name, appearance: $("chApp").value, bio: $("chBioText").value, personality: $("chPers").value, author: $("chAuthor").checked, aka: $("chAka").value, address: $("chAddress").value, species: $("chSpecies").value, maker: $("chMaker").value, slug: isNew ? null : slug };
     try {
       story = await api(`/stories/${story.id}/cast`, { method: "PUT", body: { cast: isNew ? [...castPayload(null), edit] : castPayload(edit) } });
       const made = isNew ? story.cast.find((x) => x.name === name) : null;
@@ -540,7 +575,7 @@ function showCharacter(slug, tab = "Bio") {
     // ----- Images
     const busy = async (btn, label, fn) => { const old = btn.textContent; btn.disabled = true; btn.textContent = label; try { await fn(); } catch (err) { alert(err.message); } refresh("Images"); };
     $("imOpts").onclick = () => showArtDialog({ only: c.name, onClose: () => { renderAll(); showCharacter(slug, "Images"); } });
-    $("imDraw").onclick = (e) => busy(e.target, "Drawing…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: $("imMood").value || "normal 1" } }); });
+    $("imDraw").onclick = (e) => busy(e.target, "Drawing…", async () => { const mood = ($("imMood").value || "normal 1").trim().toLowerCase(); story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood } }); if (mood === "normal 1") await offerRedrawAll(story.cast.find((x) => x.slug === slug), (m) => status("imStatus", m)); });
     $("imFile").onchange = async (e) => {
       const f = e.target.files[0]; if (!f) return;
       const res = await fetch(`/api/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(($("imMood").value || "normal 1").trim())}`, { method: "POST", headers: { "content-type": f.type }, body: f });
@@ -561,7 +596,7 @@ function showCharacter(slug, tab = "Bio") {
     };
     $("imGrid").addEventListener("click", async (e) => {
       const b = e.target.closest("button"); if (!b) return;
-      if (b.classList.contains("mregen")) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: b.dataset.mood } }); });
+      if (b.classList.contains("mregen")) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: b.dataset.mood } }); if (b.dataset.mood === "normal 1") await offerRedrawAll(story.cast.find((x) => x.slug === slug), (m) => status("imStatus", m)); });
       else if (b.classList.contains("mdel")) { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}`, { method: "DELETE" }); refresh("Images"); }
       else if (b.classList.contains("altuse")) { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/use?url=${encodeURIComponent(b.dataset.url)}`, { method: "POST" }); refresh("Images"); }
       else if (b.classList.contains("altdel")) { if (!confirm("Delete this earlier version?")) return; story = await api(`/stories/${story.id}/cast/${slug}/alt?url=${encodeURIComponent(b.dataset.url)}`, { method: "DELETE" }); refresh("Images"); }
@@ -628,6 +663,22 @@ function loadTweaks(card, p, model) {
   const s = card.querySelector(".mtweak summary b");
   if (s) s.textContent = model ? `Settings for ${model} only` : "Settings for this checkpoint only";
 }
+// Which picture maker a character or species can use: the story's own, FLUX.2 klein (takes reference pictures: best for non-human characters), or another ComfyUI checkpoint.
+async function makerChoices() {
+  const out = [["", "Same as the story"], ["flux", "FLUX.2 klein (reference pictures; best for non-human characters)"]];
+  try {
+    const o = await api("/model-options"), comfy = (o.images || []).find((p) => p.local && p.id === "comfyui") || (o.images || []).find((p) => p.local);
+    for (const m of (comfy && comfy.models) || []) if (m.kind !== "flux") out.push(["ckpt:" + m.id, "Checkpoint: " + m.id + " (text only)"]);
+  } catch (e) { /* the list is a convenience */ }
+  return out;
+}
+function makerSelect(sel, choices, cur) {
+  const have = new Set(choices.map((c) => c[0]));
+  if (cur && !have.has(cur)) choices = [...choices, [cur, cur]];
+  sel.innerHTML = choices.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
+  sel.value = cur || "";
+}
+
 function imageSettingsHtml(cfg) {
   const provs = cfg.image_providers || [];
   return `<h3>Picture settings</h3>
@@ -649,7 +700,42 @@ function imageSettingsHtml(cfg) {
       <textarea class="short" id="imgBgFlow" rows="4" placeholder="Empty = the built-in FLUX.2 klein 4B workflow">${esc((cfg.image_bg || {}).workflow || "")}</textarea>
       <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="imgBgStarter" type="button">Insert the FLUX.2 klein workflow</button><button id="imgBgTest" type="button">Test: draw a small backdrop</button></div>
       <div id="imgBgOut"></div>
-    </div>`;
+    </div>
+    ${typeof story !== "undefined" && story && story.nsfw ? `<h3>Adult (NSFW) pictures</h3>
+    <label class="chk top"><input type="checkbox" id="imgNsOn" ${(cfg.image_nsfw || {}).on ? "checked" : ""}><span><b>Use a different picture maker for explicit pictures</b><span class="hint">Shown because this story has adult content on (Settings → AI &amp; story). Used only in stories with adult content on, and only for pictures that are explicit (a scene or picture type that mentions nudity or sex). Everything else keeps using your normal picture makers. Off by default.</span></span></label>
+    <div id="imgNsBox" class="${(cfg.image_nsfw || {}).on ? "" : "hidden"}">
+      <label>Picture maker for explicit pictures</label>
+      <select id="imgNsMaker" style="min-width:260px">${(cfg.image_nsfw || {}).maker ? `<option value="${esc(cfg.image_nsfw.maker)}">${esc(cfg.image_nsfw.maker.replace("|", ": "))}</option>` : '<option value="">Loading…</option>'}</select>
+      <details class="fold" id="imgNsTune" open><summary><b>Settings for this model (explicit pictures only)</b></summary>
+        <div class="hint"><b>These settings are used only when this model draws an explicit picture.</b> They do not change the model when it draws anything else (its ordinary settings are under Picture services above), and each model keeps its own set.</div>
+        ${[["ref_weight", "Face match strength (how closely the face follows Normal 1)", 0, 1.6, 0.05, 0.85],
+           ["ref_end", "Face match stops at (later = stronger hold on the face)", 0.3, 1, 0.05, 0.95],
+           ["ref_count", "Reference pictures used (Normal 1 first)", 1, 3, 1, 1],
+           ["cfg", "Guidance (how literally it follows the prompt)", 1, 15, 0.5, 6],
+           ["steps", "Steps (quality vs. speed)", 10, 60, 1, 28],
+           ["clip_skip", "CLIP skip (Pony models need 2)", 1, 3, 1, 1],
+           ["hires_denoise", "Refine strength (second pass)", 0.1, 0.8, 0.05, 0.45]].map(([k, l, mn, mx, st, dv]) =>
+          `<div class="field nsslider"><label>${l}: <b data-v="${k}"></b></label><input type="range" data-n="${k}" min="${mn}" max="${mx}" step="${st}" data-def="${dv}"></div>`).join("")}
+        <div class="grid2">
+          <div class="field"><label>Face match scaling</label><select data-n="ref_scaling"><option value="">Workflow's</option><option>V only</option><option>K+V</option><option>K+V w/ C penalty</option><option>K+mean(V) w/ C penalty</option></select></div>
+          <div class="field"><label>Face match blend</label><select data-n="ref_type"><option value="">Workflow's</option><option>linear</option><option>ease in-out</option><option>strong middle</option><option>weak input</option><option>style transfer</option></select></div>
+          <div class="field"><label>Crop the reference to the face</label><select data-n="ref_crop"><option value="face">Yes</option><option value="">No</option></select></div>
+          <div class="field"><label>Refine pass</label><select data-n="refine"><option value="">On</option><option value="off">Off</option></select></div>
+          <div class="field"><label>Picture shape</label><select data-n="shape"><option value="">Story's</option><option value="portrait">Portrait (tall)</option><option value="square">Square</option><option value="landscape">Landscape (wide)</option></select></div>
+        </div>
+        <label>Art style <small class="hint">(empty = match the story's art style; type a style to draw this model's explicit pictures in it instead; the face still follows Normal 1)</small></label><input data-n="style_override" placeholder="e.g. illustration, digital art, clean lines, soft shading">
+        <label>Extra words (style)</label><input data-n="extra_positive" placeholder="e.g. semi-realistic, painterly, soft shading">
+        <label>Extra negative words</label><input data-n="extra_negative" placeholder="e.g. chibi, flat color, 3d">
+        <div class="actions" style="justify-content:flex-start"><button type="button" id="imgNsTuneReset">Reset this model's explicit settings</button></div>
+      </details>
+
+      <label>Extra words added to its prompts <small class="hint">(empty = the app's choice for that model, shown faded)</small></label>
+      <input id="imgNsWords" value="${esc((cfg.image_nsfw || {}).words || "")}" placeholder="nsfw, explicit, uncensored, nude">
+      <label>Picture types and words that count as explicit <small class="hint">(comma separated, whole words or phrases; a short core list such as nude, naked and sex always counts)</small></label>
+      <textarea class="short" id="imgNsTypes" rows="4" placeholder="Loading the built-in list…">${esc((cfg.image_nsfw || {}).types || "")}</textarea>
+      <div class="actions" style="justify-content:flex-start"><button type="button" id="imgNsTypesReset">Restore the built-in list</button></div>
+      <div class="hint" id="imgNsNote"></div>
+    </div>` : ""}`;
 }
 // Family of a checkpoint / model by its name: "anime", "real" or "" (unknown). Used to suggest art styles and the prompt style.
 function modelFamily(id) {
@@ -675,6 +761,57 @@ function bindImageSettings(cfg, picker) {
       btn.disabled = false;
     };
   }
+  if ($("imgNsOn")) {   // adult picture maker: every model a picture service offers, by "provider|model"
+    $("imgNsOn").onchange = () => $("imgNsBox").classList.toggle("hidden", !$("imgNsOn").checked);
+    const hint = () => {
+      const v = $("imgNsMaker").value, m = v.split("|")[1] || "", f = modelFamily(m);
+      $("imgNsWords").placeholder = /flux[._ -]?2/i.test(m) || !v.startsWith("comfyui") ? "Explicit, uncensored adult image: nudity and sexual content shown openly, adults only." : /pony/i.test(m) ? "rating_explicit, nsfw, explicit, uncensored, nude" : f === "anime" ? "nsfw, explicit, uncensored, nude" : "Explicit, uncensored adult image: nudity and sexual content shown openly, adults only.";
+      const opts = [...$("imgNsMaker").options].map((o) => o.value), pony = opts.find((x) => /pony/i.test(x));
+      $("imgNsNote").innerHTML = /flux[._ -]?2/i.test(m) ? `<span style="color:var(--danger)">⚠ FLUX.2 klein is trained to avoid nudity: it softens or covers explicit content whatever the prompt says.</span> ${pony ? `Choose <b>${esc(pony.split("|")[1])}</b> (recommended) instead.` : "Choose an SDXL checkpoint trained on adult content instead (a Pony or Illustrious model)."}`
+        : !v.startsWith("comfyui") && v ? "Online picture services usually refuse explicit pictures; a local checkpoint trained on adult content works best."
+        : /pony/i.test(m) ? "Good choice: Pony models are trained on adult content and get their own score and rating tags automatically." : v ? "Tip: a checkpoint trained on adult content (Pony, Illustrious) follows explicit prompts best." : "";
+    };
+    api("/model-options").then((o) => {
+      const cur = (cfg.image_nsfw || {}).maker || "", opts = [];
+      for (const p of o.images || []) for (const m of p.models || []) opts.push([`${p.id}|${m.id}`, `${p.name || p.id}: ${m.id}${m.kind === "flux" ? " (FLUX.2: avoids nudity)" : p.local && /pony/i.test(m.id) ? " (recommended for explicit pictures)" : ""}`]);
+      opts.sort((a, b) => (/pony/i.test(b[0]) ? 1 : 0) - (/pony/i.test(a[0]) ? 1 : 0));      // adult-trained models first
+      if (cur && !opts.some((x) => x[0] === cur)) opts.unshift([cur, cur.replace("|", ": ")]);
+      $("imgNsMaker").innerHTML = opts.length ? opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("") : '<option value="">No picture models found (start ComfyUI or add a key)</option>';
+      if (cur) $("imgNsMaker").value = cur;
+      hint();
+      if (window.__nsfwFill) window.__nsfwFill();
+    }).catch(() => {});
+    $("imgNsMaker").onchange = hint;
+    // per-model explicit-picture settings: own values in cfg.image_nsfw.tweaks[model]; empty boxes show the tuned value faded
+    const nsT = JSON.parse(JSON.stringify((cfg.image_nsfw || {}).tweaks || {}));
+    let nsModel = "";
+    const tuneBoxes = () => [...document.querySelectorAll("#imgNsTune [data-n]")];
+    const keepTune = () => { if (!nsModel) return; const o = {}; tuneBoxes().forEach((b) => { if (b.type === "range" ? b.dataset.set === "1" : b.value.trim()) o[b.dataset.n] = b.value.trim(); }); nsT[nsModel] = o; };
+    const showV = (b) => { const v = document.querySelector(`#imgNsTune [data-v="${b.dataset.n}"]`); if (v) v.textContent = b.dataset.set === "1" ? b.value : `${b.value} (default)`; };
+    const fillTune = async () => {
+      keepTune();
+      const v = $("imgNsMaker").value; nsModel = v.split("|")[1] || "";
+      if (!nsModel) return;
+      let start = {}; try { start = (await api(`/images/nsfw-tuned?model=${encodeURIComponent(nsModel)}`)).tweaks || {}; } catch (e) { /* none */ }
+      const mine = nsT[nsModel] || (Object.keys(nsT).includes(nsModel) ? {} : { ...start });
+      tuneBoxes().forEach((b) => {
+        const has = mine[b.dataset.n] !== undefined && mine[b.dataset.n] !== "";
+        if (b.type === "range") { b.value = has ? mine[b.dataset.n] : b.dataset.def; b.dataset.set = has ? "1" : ""; showV(b); b.oninput = () => { b.dataset.set = "1"; showV(b); }; }
+        else b.value = has ? mine[b.dataset.n] : (b.dataset.n === "ref_crop" ? "face" : "");
+      });
+      $("imgNsTune").querySelector("summary b").textContent = `Settings for ${nsModel} (explicit pictures only)`;
+    };
+    $("imgNsTuneReset").onclick = () => { if (!nsModel) return; delete nsT[nsModel]; nsModel = ""; fillTune(); };
+    const oldMakerChange = $("imgNsMaker").onchange;
+    $("imgNsMaker").onchange = () => { if (oldMakerChange) oldMakerChange(); fillTune(); };
+    window.__nsfwFill = fillTune;
+    $("imgNsOn").dataset.collect = "1";
+    window.__nsfwTweaks = () => { keepTune(); return nsT; };
+    api("/images/nsfw-types").then((r) => {     // an empty box means the built-in list: show it so it can be read and edited
+      if (!$("imgNsTypes").value.trim()) $("imgNsTypes").value = r.types;
+      $("imgNsTypesReset").onclick = () => { $("imgNsTypes").value = r.types; };
+    }).catch(() => {});
+  }
   // Fill each card's model box with the models that service really offers, and keep it equal to the AI & story choice.
   const sync = () => {
     const o = picker && picker.opts(); if (!o) return;
@@ -698,10 +835,10 @@ function bindImageSettings(cfg, picker) {
           };
         }
         const sel = box.querySelector("[data-f=model]");
-        if (sel.dataset.filled !== ids.join("|")) { sel.innerHTML = ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join(""); sel.dataset.filled = ids.join("|"); }
+        if (sel.dataset.filled !== ids.join("|")) { sel.innerHTML = q.models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}${m.kind === "flux" ? " (FLUX.2: reference pictures)" : ""}</option>`).join(""); sel.dataset.filled = ids.join("|"); }
         sel.value = want;
       } else if (cur && ch && ch.provider === q.id && ch.model) cur.value = ch.model;
-      card.querySelector(".ipstat").textContent = q.local ? (q.models.length ? (q.ready ? `running · ${q.models.length} checkpoint${q.models.length > 1 ? "s" : ""}` : "found, but " + (q.error || "not usable")) : "not running") : q.has_key ? (q.models.length ? "key saved" : "key saved, no models found") : "needs a key";
+      card.querySelector(".ipstat").textContent = q.local ? (q.models.length ? (q.ready ? `running · ${q.models.length} model${q.models.length > 1 ? "s" : ""}` : "found, but " + (q.error || "not usable")) : "not running") : q.has_key ? (q.models.length ? "key saved" : "key saved, no models found") : "needs a key";
       card.querySelector(".imnote").textContent = noteFor(q, box.querySelector("[data-f=model]").value);
       loadTweaks(card, p, box.querySelector("[data-f=model]").value);
       const key = card.querySelector('[data-f="api_key"]');
@@ -710,6 +847,7 @@ function bindImageSettings(cfg, picker) {
   };
   const noteFor = (q, model) => {
     if (!q.local) return "";
+    if ((q.models.find((m) => m.id === model) || {}).kind === "flux") return "FLUX.2 diffusion model: drawn with the app's FLUX workflow, using saved pictures as references (sentence-style prompts). Per-checkpoint settings below don't apply to it.";
     const f = modelFamily(model);
     return f === "anime" ? "Anime-style checkpoint: tag-style prompts work best." : f === "real" ? "Realistic checkpoint: sentence-style prompts work best." : "";
   };
@@ -745,6 +883,8 @@ function collectImageSettings(cfg) {
   cfg.mood_looks = looks;
   cfg.image_max_refs = +$("imgRefs").value || 0;
   if ($("imgBgOn")) cfg.image_bg = { on: $("imgBgOn").checked, model: $("imgBgModel").value, workflow: $("imgBgFlow").value.trim() };
+  if ($("imgNsOn")) cfg.image_nsfw = { on: $("imgNsOn").checked, maker: $("imgNsMaker").value, words: $("imgNsWords").value.trim(), types: $("imgNsTypes").value.trim(),
+    style_mode: (cfg.image_nsfw || {}).style_mode || "match", style: (cfg.image_nsfw || {}).style || "", tweaks: window.__nsfwTweaks ? window.__nsfwTweaks() : ((cfg.image_nsfw || {}).tweaks || {}) };
   document.querySelectorAll(".iprov").forEach((card) => {
     const p = cfg.image_providers[+card.dataset.i];
     card.querySelectorAll("[data-f]").forEach((inp) => { p[inp.dataset.f] = inp.type === "checkbox" ? inp.checked : inp.value; });
@@ -853,11 +993,14 @@ async function showArtDialog(opts = {}) {
     const name = el.dataset.name, status = el.querySelector(".aStatus"), set = el.querySelector(".aSet").value;
     const ch = story.cast.find((c) => c.name.toLowerCase() === name.toLowerCase());
     try {
+      const hadOthers = Object.keys(ch.moods || {}).some((m) => m !== "normal 1");
       story = await api(`/stories/${story.id}/cast/${ch.slug}/choose`, { method: "POST", body: { url, mood: "normal 1" } });
       el.querySelector(".aResult").innerHTML = ""; el.querySelectorAll("button, textarea, input").forEach((x) => x.disabled = true);
       status.textContent = `✔ ${name} now has a picture.`;
       renderAll();
-      if (set !== "none") {
+      if (hadOthers && await offerRedrawAll(story.cast.find((c) => c.slug === ch.slug), (m) => { if (document.body.contains(status)) status.textContent = "✔ Chosen. " + m; })) {
+        if (document.body.contains(status)) status.textContent = `✔ ${name} is done: all pictures redrawn from the new Normal 1.`;
+      } else if (set !== "none") {
         const r = await api(`/stories/${story.id}/cast/${ch.slug}/draw-set`, { method: "POST", body: { preset: set } });
         const job = await watchJob(r.job, (j) => {
           artBusyText = `Drawing ${name}'s pictures: ${j.done} of ${j.total}`;
@@ -920,7 +1063,7 @@ function showPlaces(nav = {}) {   // nav.back: where to go when closed (the Art 
   let places = (story.places || []).map((p) => ({ ...p }));
   const opts = {};   // place name -> option urls drawn so far
   const card = (p, i) => `<div class="artcard plcard" data-i="${i}">
-    <div class="plhead"><input class="plName" value="${esc(p.name)}" placeholder="Name (e.g. Sync chamber)" maxlength="60"><button class="x plDel" title="Remove this place">×</button></div>
+    <div class="plhead"><input class="plName" value="${esc(p.name)}" placeholder="Name (e.g. Old library)" maxlength="60"><button class="x plDel" title="Remove this place">×</button></div>
     ${p.url ? `<img class="plthumb" src="${thumbUrl(p.url, 480)}" alt="">` : ""}
     <label>What it looks like <small class="hint">(what the artist is told; the narrator also sees this)</small></label>
     <textarea class="short plDesc" rows="2" maxlength="500" placeholder="e.g. A cold white pod room with a reclined link chair, ceiling arrays and a glass observation window.">${esc(p.description || "")}</textarea>
