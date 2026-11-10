@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
     "backup_keep": 5,           # how many automatic backups to keep
     "ui_bg": "",                # appearance: background colour of the reading area ("" = default theme)
     "ui_text": "",              # appearance: text colour
+    "image_nsfw": {"on": False, "maker": "", "words": "", "types": "", "face": 0.85},   # a different picture maker for explicit pictures in adult stories ("provider|model"), plus its extra prompt words
     "image_bg": {"on": False, "model": "flux-2-klein-4b-fp8.safetensors", "workflow": ""},   # a separate (local, ComfyUI) picture maker for backgrounds and places, e.g. FLUX.2 klein
     "ui_twotone": False,        # two-tone story text: dimmer narration, bright dialogue
     "ui_narr_dim": 38,          # how much the narration is dimmed in two-tone mode (percent toward the background)
@@ -172,7 +173,7 @@ def new_story(title: str, subtitle: str, base_prompt: str, player_name: str = ""
         "models": {},          # this story's AI choices: story / recaps / images -> {"provider", "model"} (empty = use app defaults)
         "user_notes": "",      # standing instructions from the player, sent every turn
         "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False},
+                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
         "art_dismissed": [],   # names the player said never to ask about
         "cast": [],            # characters: name, appearance (for image prompts), moods {mood: portrait url}
         "opening": "",         # the story's first scene (markdown), shown before the first move; ![](intro:It1) shows an intro panel
@@ -203,7 +204,7 @@ STORY_DEFAULTS = {
     "cover": "", "description": "",
     "auto_replies": False, "reply_options": {}, "group_cast": True, "models": {}, "avatar": {}, "avatar_image": "", "user_notes": "", "cast": [], "opening": "", "opening_in_context": True, "intro_images": [],
     "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False},
+            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
     "art_dismissed": [],
 }
 
@@ -333,13 +334,15 @@ def restore_snapshot(sid: str, name: str) -> dict:
     return load_story(sid)
 
 
-def delete_story(sid: str) -> None:
+def delete_story(sid: str, art: bool = True) -> None:
+    """Delete a story. art=False keeps its pictures on disk (data/portraits/<id>, data/images/<id>), so a restored backup of the story finds them again."""
     snapshot_story(sid, "before delete")
     p = _path(sid)
     if p.exists():
         p.unlink()
-    shutil.rmtree(PORTRAITS / sid, ignore_errors=True)
-    shutil.rmtree(IMAGES / sid, ignore_errors=True)
+    if art:
+        shutil.rmtree(PORTRAITS / sid, ignore_errors=True)
+        shutil.rmtree(IMAGES / sid, ignore_errors=True)
 
 
 def list_stories() -> list[dict]:

@@ -1,9 +1,9 @@
 // Per-turn tools (bookmark, edit, branch, retry with another model, continue, read aloud), search, quick instructions, voices.
 function turnBar(t, i, lastAi) {
   const b = (act, title, label) => `<button data-act="${act}" title="${title}">${label}</button>`;
-  return `<span class="tbar">${t.role === "assistant" ? b("read", "Read aloud", "🔊") : ""}${b("bm", "Bookmark this turn", t.bookmark ? "★" : "☆")}${b("edit", "Edit this message", "✎")}` +
-    `${t.role === "user" ? b("branch", "Branch: start a copy of this story from here to try a different move", "⑂") : ""}` +
-    `${i === lastAi ? b("alt", "Retry this reply with a different AI", "↻▾") + b("cont", "Continue this reply (if it was cut off)", "…") : ""}</span>`;
+  return `<span class="tbar">${t.role === "assistant" ? b("read", "Read aloud", "🔊") : ""}${b("bm", "Bookmark this turn", t.bookmark ? "★" : "☆")}${b("edit", "Edit this message", "✏️")}` +
+    `${t.role === "user" ? b("branch", "Branch: start a copy of this story from here to try a different move", "🔀") : ""}` +
+    `${i === lastAi && (t.attempts || []).length ? b("prev", "Show the previous attempt", "◀") + `<span class="tcount" title="Attempt ${t.attempt_no || "?"} of ${t.attempts.length + 1}">${t.attempt_no || "?"}/${t.attempts.length + 1}</span>` + b("next", "Show the next attempt", "▶") + b("tries", "All attempts at this reply: compare and pick one", "🗂️") : ""}${i === lastAi ? b("alt", "Retry this reply with a different AI", "🔄▾") + b("cont", "Continue this reply (if it was cut off)", "⏩") : ""}</span>`;
 }
 
 async function turnAction(act, i) {
@@ -18,8 +18,10 @@ async function turnAction(act, i) {
   if (act === "edit") {
     modal(`<h2>Edit ${t.role === "user" ? "your move" : "the narrator's reply"}</h2><textarea id="eTxt" style="min-height:300px">${esc(t.text)}</textarea>
       <p class="hint">The change is used from the next turn on. If this turn is already in the memory summary, edit the summary too (🧠).</p>
+      ${(t.versions || []).length ? `<details><summary class="hint">Earlier versions (${t.versions.length})</summary>${t.versions.map((v, k) => `<div class="aiBox"><small class="muted">${new Date(v.ts * 1000).toLocaleString()}</small><div class="hint">${esc(v.text.slice(0, 300))}${v.text.length > 300 ? "…" : ""}</div><button data-ver="${k}">Put this version in the box</button></div>`).join("")}</details>` : ""}
       <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="eSave">Save</button></div>`);
     $("mClose").onclick = closeModal;
+    document.querySelectorAll("#modalCard [data-ver]").forEach((bt) => bt.onclick = () => { $("eTxt").value = t.versions[+bt.dataset.ver].text; });
     $("eSave").onclick = async () => { story = await api(`/stories/${story.id}/turns/${i}`, { method: "PUT", body: { text: $("eTxt").value } }); closeModal(); renderAll(); };
     return;
   }
@@ -35,9 +37,28 @@ async function turnAction(act, i) {
     const cur = (t.model || "").replace("/", "|");
     modal(`<h2>Retry this reply with a different AI</h2><p class="hint">Your move is sent again; the current reply is discarded. Last written by ${esc(t.model || "?")}.</p>
       <select id="aModel" style="width:100%">${models.map((m) => `<option value="${esc(m.provider)}|${esc(m.model)}" ${cur === m.provider + "|" + m.model ? "selected" : ""}>${esc(m.provider_name)}: ${esc(m.model)}</option>`).join("")}</select>
+      <textarea id="aNote" rows="2" style="margin-top:8px" placeholder="Optional: what should change? (sent along with the retry, not saved)"></textarea>
+      ${KEEP_HTML}
       <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="aGo">Retry</button></div>`);
     $("mClose").onclick = closeModal;
-    $("aGo").onclick = async () => { const v = $("aModel").value; closeModal(); const text = await undo(); if (text) send(text, v); };
+    restoreKeepTicks();
+    $("aGo").onclick = () => retryTurn($("aModel").value, $("aNote").value.trim());
+    return;
+  }
+  if (act === "prev" || act === "next") {
+    try { story = await api(`/stories/${story.id}/turns/${i}/attempt-step?dir=${act === "next" ? 1 : -1}`, { method: "POST" }); renderNarrativeKeepScroll(); renderSidebar(); } catch (e) { alert(e.message); }
+    return;
+  }
+  if (act === "tries") {
+    const short = (x) => esc((x.text || "").replace(/\[\[[^\]]*\]\]|[*_#>`]/g, " ").replace(/\s+/g, " ").trim().slice(0, 360)) + "…";
+    modal(`<h2>Attempts at this reply</h2><p class="hint">All earlier attempts are saved on this computer. Pick one to swap it in; the current reply is kept as an attempt. Side-panel changes, new characters and card events follow the reply you pick.</p>
+      <div class="aiBox"><b>Current</b> <small>${esc(t.model || "")}</small><div class="hint">${short(t)}</div></div>
+      ${t.attempts.map((x, k) => `<div class="aiBox"><b>Attempt ${k + 1}</b> <small>${esc(x.model || "")}</small><div class="hint">${short(x)}</div><button data-use="${k}">Use this one</button></div>`).join("")}
+      <div class="actions"><button id="mClose">Close</button></div>`);
+    $("mClose").onclick = closeModal;
+    document.querySelectorAll("#modalCard [data-use]").forEach((bt) => bt.onclick = async () => {
+      try { story = await api(`/stories/${story.id}/turns/${i}/attempt/${bt.dataset.use}`, { method: "POST" }); closeModal(); renderAll(); } catch (e) { alert(e.message); }
+    });
     return;
   }
   if (act === "cont") return send("(OOC: Your last reply was cut off or unfinished. Continue it exactly where it stopped, without repeating anything and without moving the story past that moment.)");
@@ -231,8 +252,17 @@ function showExport() {
     <div class="aiBox"><b>Plain text</b><div class="hint">Every turn as a text file.</div><button id="xText">Download .txt</button></div>
     <div class="aiBox"><b>Illustrated page</b><div class="hint">One self-contained web page with the story, pictures and your cover, ready to print or save as PDF from the browser (Ctrl+P). Pictures are shrunk to keep the file small.</div>
       <label class="chk"><input type="checkbox" id="xStatus"> Include status panels</label><button id="xHtml">Build page</button> <span class="hint" id="xProg"></span></div>
-    <div class="aiBox"><b>Story package</b><div class="hint">Everything the author made, as one .zip to share or back up: prompt, prologue, opening scene and suggested first moves, cast (looks, personalities, bios, pictures), suggested trackers, endings, cover, intro panels and backdrop. It never contains your turns, memory, character sheet, notes or API keys. Import it from the Home screen (📦).</div>
-      <select id="xPics"><option value="all">All pictures</option><option value="normal">One picture per character</option><option value="none">No pictures</option></select> <button id="xPack">Download package</button></div>
+    <div class="aiBox"><b>Story package</b><div class="hint">Everything the author made, as one .zip to share or back up: prompt, prologue, opening scene and suggested first moves, cast (looks, personalities, bios, pictures), suggested trackers, endings, cover, intro panels and backdrop. It never contains your turns, memory, notes or API keys, and your avatar sheet only if you tick the box. Import it from the Home screen (📦).</div>
+      <select id="xPics"><option value="all">All pictures</option><option value="normal">One picture per character</option><option value="none">No pictures</option></select>
+      <label class="chk"><input type="checkbox" id="xAv"> Include my avatar sheet as a starter character (text only)</label>
+      <label class="chk"><input type="checkbox" id="xWebp"> Smaller file: save pictures as WebP (high quality, much smaller)</label> <button id="xPack">Download package</button></div>
+    <div class="aiBox"><b>Update this game from a package</b><div class="hint">Bring a newer version of this story's package into the game you are playing. Your turns, memory, avatar, notes and existing characters are kept; a backup is made first.</div>
+      <label class="chk"><input type="checkbox" class="upPart" value="text" checked> Story text (prompt, prologue, opening, endings)</label>
+      <label class="chk"><input type="checkbox" class="upPart" value="trackers" checked> Side-panel trackers (current values kept)</label>
+      <label class="chk"><input type="checkbox" class="upPart" value="art"> Art settings</label>
+      <label class="chk"><input type="checkbox" class="upPart" value="world"> Places and species (new ones added, pictures kept)</label>
+      <label class="chk"><input type="checkbox" class="upPart" value="cast"> Characters this game does not have yet</label>
+      <label class="btnlike">Choose package…<input type="file" id="xUpd" accept=".zip,application/zip" hidden></label> <span class="hint" id="xUpdNote"></span></div>
     <div class="aiBox"><b>Backups</b><div class="hint">This story: the app keeps copies of it automatically (before a summary, an edit or a restore, and every 5 turns) and you can restore one. Everything: one .zip with all stories, pictures, avatars and settings.</div>
       <button id="xSnaps">This story's backups…</button> <button id="xAll">Back up everything…</button></div>
     <div class="actions"><button id="mClose">Close</button></div>`);
@@ -240,7 +270,18 @@ function showExport() {
   $("xSnaps").onclick = () => showBackups(story.id);
   $("xAll").onclick = () => showSettings("Backup");
   $("xText").onclick = () => window.open(`/api/stories/${story.id}/export`, "_blank");
-  $("xPack").onclick = () => { window.location = `/api/stories/${story.id}/pack?pictures=${$("xPics").value}`; };
+  $("xPack").onclick = () => { window.location = `/api/stories/${story.id}/pack?pictures=${$("xPics").value}&avatar=${$("xAv").checked ? 1 : 0}&webp=${$("xWebp").checked ? 1 : 0}`; };
+  $("xUpd").onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const parts = [...document.querySelectorAll(".upPart:checked")].map((x) => x.value).join(",");
+    if (!parts) { $("xUpdNote").textContent = "Tick at least one part."; e.target.value = ""; return; }
+    try {
+      const r = await uploadZip(`/api/stories/${story.id}/update-from-pack?parts=${parts}`, f, (pct) => { $("xUpdNote").textContent = `Uploading… ${pct}%`; });
+      story = r; renderAll(); refreshTracker && refreshTracker();
+      $("xUpdNote").textContent = "✔ Updated: " + (r.updated_parts || []).join(", ") + "." + ((r.import_notes || []).length ? " " + r.import_notes.join(" ") : "");
+    } catch (err) { $("xUpdNote").textContent = "Could not update: " + err.message; }
+    e.target.value = "";
+  };
   $("xHtml").onclick = () => exportHtml($("xStatus").checked, (t) => { $("xProg").textContent = t; });
 }
 async function shrinkImage(src, max = 720) {

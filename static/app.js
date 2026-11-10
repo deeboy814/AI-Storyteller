@@ -12,7 +12,7 @@ async function api(path, opts = {}) {
   if (!r.ok) { let t = (await r.text()) || r.statusText; try { t = JSON.parse(t).detail || t; } catch (e) { /* plain text */ } throw new Error(t); }
   return r.json();
 }
-const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // Images: only local ones (/static/..., /portraits/...) are shown. Remote image links
 // (e.g. from prompts written for other sites) are dropped so nothing is fetched from outside.
 function inlineMd(text) {
@@ -92,8 +92,10 @@ function renderNarrative(streamText = null, scroll = "bottom") {   // scroll: "b
   const lastAi = story.turns.map((t) => t.role).lastIndexOf("assistant");
   story.turns.forEach((t, i) => {
     const sw = (story.art || {}).scene_where, sc = t.role === "user" ? "" : sceneHtml(t, i);
-    const inner = t.role === "user" ? `<div class="player">${md(t.text)}</div>` : (sw === "banner_top" ? sc + md(t.text) : md(t.text) + sc) + (i === lastAi ? usageLine(t.usage) : "");
-    html += `<div class="turn ${t.role}${t.bookmark ? " bm" : ""}" data-i="${i}">${turnBar(t, i, lastAi)}${t.bookmark ? `<div class="bmlabel">★ ${esc(t.bookmark)}</div>` : ""}${inner}</div>`;
+    const chk = t.role === "assistant" && i === lastAi && t.check && (t.check.issues || []).length
+      ? `<div class="rulechk">⚠ <b>Possible rule slips</b><ul>${t.check.issues.map((x) => `<li>${esc(x)}</li>`).join("")}</ul><button class="rcfix">Fix this reply</button> <button class="rcok">Ignore</button></div>` : "";
+    const inner = t.role === "user" ? `<div class="player">${md(t.text)}</div>` : (sw === "banner_top" ? sc + md(t.text) : md(t.text) + sc) + (i === lastAi ? usageLine(t.usage) : "") + chk;
+    html += `<div class="turn ${t.role}${t.bookmark ? " bm" : ""}" data-i="${i}">${t.bookmark ? `<div class="bmlabel">★ ${esc(t.bookmark)}</div>` : ""}${inner}${turnBar(t, i, lastAi)}</div>`;
   });
   if (streamText !== null) html += `<div class="typing" style="min-height:${Math.max(200, box.clientHeight - 40)}px">${md(stripState(streamText)) || ""}</div>`;   // room below, so your move can sit at the top of the page while the reply grows
   if (!story.turns.length && streamText === null)
@@ -203,15 +205,17 @@ async function fetchReplies(manual = true) {
   catch (e) { renderReplies(false, e.message); }
   repliesFetching = false;
 }
-function renderAll(keepScroll = false) { renderHeader(); renderNarrative(null, keepScroll ? "keep" : "bottom"); renderSidebar(); renderChips(); renderReplies(); setBusy(busy); }
+function renderAll(keepScroll = true) { renderHeader(); renderNarrative(null, keepScroll ? "keep" : "bottom");   // stays where the reader is; only opening a story jumps to the end
+  renderSidebar(); renderChips(); renderReplies(); setBusy(busy); }
 function setBusy(b) {
   busy = b;
   for (const id of ["btnSend", "btnUndo", "btnRetry", "btnIllustrate", "input"]) $(id).disabled = b || !story;
+  if ($("btnRedo")) { $("btnRedo").disabled = b || !story || !story.undone; $("btnRedo").classList.toggle("hidden", !(story && story.undone)); }
   $("btnSend").textContent = b ? "…" : "Send";
 }
 
 // ---------- playing a turn ----------
-async function send(text, override, forceBudget = false) {
+async function send(text, override, forceBudget = false, note = "", redraw = false) {
   text = (text || "").trim();
   if (!text || busy || !story) return;
   const own = story.models && story.models.story;   // the story's own choice is used by the server; the header menu only matters for older stories
@@ -225,7 +229,7 @@ async function send(text, override, forceBudget = false) {
   try {
     const r = await fetch(`/api/stories/${story.id}/turn`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, provider, model, force_budget: forceBudget }),
+      body: JSON.stringify({ text, provider, model, force_budget: forceBudget, note }),
     });
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.getReader(), dec = new TextDecoder();
@@ -262,12 +266,29 @@ async function send(text, override, forceBudget = false) {
   }
   if (!failed) { genStatus("done", words); refreshTracker(); watchBackdrop(); watchNow(); wasAtBottom = false; if (narrativeAtBottom() && $("narrative").scrollHeight <= $("narrative").clientHeight + 40) maybeShowReplies(); }
   const lastT = story.turns[story.turns.length - 1];
-  if (!failed && story.art && story.art.auto && lastT && lastT.role === "assistant" && lastT.scene && !(lastT.images || []).length) illustrate(story.turns.length - 1);
+  if (!failed && lastT && lastT.role === "assistant" && !(lastT.images || []).length && ((story.art && story.art.auto && lastT.scene) || redraw)) illustrate(story.turns.length - 1);
   if (!failed && story.auto_replies) fetchReplies(false);
+  if (!failed && story.rule_check) watchRuleCheck(story.turns.length - 1);
   refreshBudget();
-  if (failed && failed.startsWith("BUDGET:") && confirm(failed.slice(8) + "\n\nSend anyway, this once?")) { $("input").value = ""; return send(text, override, true); }
+  if (failed && failed.startsWith("BUDGET:") && confirm(failed.slice(8) + "\n\nSend anyway, this once?")) { $("input").value = ""; return send(text, override, true, note, redraw); }
   $("input").focus();
 }
+// Rule check (story option): fetch the helper's verdict on the newest reply and show it under the reply.
+async function watchRuleCheck(i) {
+  try {
+    const r = await api(`/stories/${story.id}/turns/${i}/check?wait=true`);
+    const t = story && story.turns[i];
+    if (!t || t.role !== "assistant" || i !== story.turns.length - 1) return;
+    t.check = { issues: r.issues || [] };
+    if ((r.issues || []).length) renderNarrativeKeepScroll();
+  } catch (e) { /* the check is optional */ }
+}
+$("narrative").addEventListener("click", (e) => {
+  const b = e.target.closest(".rulechk button"); if (!b || busy || !story) return;
+  const t = story.turns[story.turns.length - 1]; if (!t || !t.check) return;
+  if (b.classList.contains("rcok")) { t.check.issues = []; renderNarrativeKeepScroll(); return; }
+  retryTurn(undefined, "Fix these slips of the story's rules, and keep everything else about the reply: " + t.check.issues.join(" "));
+});
 // Spending-limit warning above the input box
 async function refreshBudget() {
   const el = $("budgetNote"); if (!el) return;
@@ -280,6 +301,7 @@ async function refreshBudget() {
     $("bnSet").onclick = () => showSettings("Memory");
   } catch (e) { el.classList.add("hidden"); }
 }
+function hadPicture() { const l = [...story.turns].reverse().find((x) => x.role === "assistant"); return !!(l && (l.images || []).length); }
 async function undo() {
   if (busy || !story || !story.turns.length) return null;
   const last = [...story.turns].reverse().find((t) => t.role === "user");
@@ -298,6 +320,17 @@ function modal(html) {
     b.onclick = () => { const f = artBack; artBack = null; f(); };
     $("modalCard").prepend(b);
   }
+  foldLongHints($("modalCard"));
+}
+// Long explanations in dialogs show two lines and a "More" link, so the controls stay easy to find.
+function foldLongHints(root) {
+  root.querySelectorAll("div.hint, p.hint").forEach((h) => {
+    if (h.dataset.fold || h.id || (h.textContent || "").trim().length < 240 || h.querySelector("input, select, textarea, button")) return;
+    h.dataset.fold = "1"; h.classList.add("folded");
+    const m = document.createElement("button"); m.type = "button"; m.className = "foldmore"; m.textContent = "More";
+    m.onclick = () => { const f = h.classList.toggle("folded"); m.textContent = f ? "More" : "Less"; };
+    h.after(m);
+  });
 }
 let onModalClose = null;
 function closeModal() { artBack = null; $("modal").classList.add("hidden"); if (onModalClose) onModalClose(); }
@@ -365,7 +398,7 @@ function showImport(list, opts = {}) {
         r = { warnings: j.result.warnings };
       }
       localStorage.setItem("story", story.id);
-      closeModal(); hideHome(); renderAll(); syncModelSelect();
+      closeModal(); hideHome(); renderAll(false); syncModelSelect();
       if (r.warnings && r.warnings.length) alert(r.warnings.join("\n\n"));
     } catch (e) { btn.disabled = false; $("iProg").textContent = ""; alert("Import failed: " + e.message); }
   };
@@ -464,14 +497,29 @@ async function showSettings(tab = "AI") {
     <div class="actions" style="margin-top:8px"><button class="danger" data-rm="${i}">Remove provider</button></div></div>`;
   const field = (label, control, help = "") => `<div class="field"><label>${label}</label>${control}${help ? `<div class="hint">${help}</div>` : ""}</div>`;
   modal(`<h2>Settings</h2>
-    <div class="tabs"><button class="tab stt" data-t="AI">AI &amp; story</button><button class="tab stt" data-t="Memory">Memory &amp; cost</button><button class="tab stt" data-t="Libraries">Libraries</button><button class="tab stt" data-t="Appearance">Appearance</button><button class="tab stt" data-t="Local">Local models</button><button class="tab stt" data-t="Backup">Backup</button><button class="tab stt" data-t="Advanced">Advanced</button></div>
+    <div class="tabs"><button class="tab stt" data-t="AI">AI models</button><button class="tab stt" data-t="Story">Story &amp; narration</button><button class="tab stt" data-t="Memory">Memory &amp; cost</button><button class="tab stt" data-t="Appearance">Appearance</button><button class="tab stt" data-t="Phone">Phone &amp; tablet</button><button class="tab stt" data-t="Local">Local models</button><button class="tab stt" data-t="Backup">Libraries &amp; backup</button></div>
 
     <div class="stpane" data-p="AI">
       <h3>Which AI does what${story ? ` in “${esc(story.title)}”` : ""}</h3>
       <div id="aiPick"></div><div id="aiPickImg" class="hidden"></div>
       <div id="artStyleBox"></div>
       <div class="hint">${story ? "Saved for this story, and used as the starting choice for new stories." : "Used as the starting choice for new stories (open a story to change it for that story)."}</div>
+      <h3>Claude's thinking</h3>
+      <div class="grid2">${field("Thinking", '<select id="sThink"><option value="off">Lowest available</option><option value="on">On (more tokens)</option></select>', "Extra private reasoning before replying. Costs output tokens.")}
+        ${field("Effort", '<select id="sEffort"><option value="low">Low (recommended)</option><option value="medium">Medium</option><option value="high">High</option></select>', "Low keeps hidden thinking short.")}
+        ${field("Room for hidden thinking", `<input id="sHead" type="number" min="0" step="512" value="${config.thinking_headroom ?? 4096}">`, "tokens added to the reply limit so thinking can't cut a reply short; only used tokens are billed.")}</div>
+      <h3>Providers</h3>
+      <div class="hint">Connections to AI services. API keys can also be pasted in the AI chooser. Add any OpenAI-compatible service (OpenRouter, LM Studio, DeepSeek…).</div>
+      <details class="fold"><summary>Show provider settings (${config.providers.length})</summary><div id="provs">${config.providers.map(provHtml).join("")}</div>
+      <div class="actions" style="justify-content:flex-start"><button id="mAdd">+ Add provider</button></div></details>
+    </div>
+
+    <div class="stpane hidden" data-p="Story">
       ${story ? `<h3>Content</h3><label class="chk top"><input type="checkbox" id="sNsfw" ${story.nsfw ? "checked" : ""}><span><b>Adult (NSFW) content</b><span class="hint">Allows explicit content between adult characters in the narration. Off by default and set per story. It also lets scene pictures and portraits show adult content between adults (covers and backdrops stay safe for work). Online picture services (Gemini, OpenAI, Grok) usually refuse explicit images; a local model in ComfyUI is what allows them. Your AI provider's own rules still apply.</span></span></label>` : ""}
+      <h3>Writing</h3>
+      <div class="grid2">${field("Creativity (temperature)", `<input id="sTemp" type="number" step="0.05" min="0" max="2" value="${config.temperature}">`, "How adventurous the word choice is. Lower (0.5) = predictable and focused, higher (1.1) = more varied and surprising. Matters for local models; Claude's newer models and ChatGPT's reasoning models ignore it.")}
+        ${field("Longest reply", `<input id="sMax" type="number" step="128" min="256" value="${config.max_tokens}">`, "tokens (about ¾ of a word each). Replies stop here.")}
+        ${field("Context size (local models)", `<input id="sCtx" type="number" step="1024" min="2048" value="${config.num_ctx}">`, "How much text a local model reads at once. Bigger remembers more but needs more video memory; 8192 is safe on 12 GB.")}</div>
       <h3>Side panel</h3>
       ${story ? `<div class="field"><label>What the side panel shows in “${esc(story.title)}”</label><select id="sbMode"><option value="prompt">Leave it to the prompt author</option><option value="player">I choose the fields</option><option value="ai">Let the AI decide</option></select><div class="hint" id="sbHint"></div></div>
         <div id="sbFields"></div><div id="sbCustom"></div><div id="sbAi"></div>
@@ -479,12 +527,11 @@ async function showSettings(tab = "AI") {
       <div class="field"><label>Default for new stories</label><select id="sbDefault"><option value="prompt">Leave it to the prompt author</option><option value="player">I choose the fields</option><option value="ai">Let the AI decide</option></select></div>
       <h3>Key events</h3>
       ${field("Key events log", '<select id="sEvents"><option value="every">Update after every reply</option><option value="off">Off (only what you write)</option></select>', "Writes each character's important moments (Cast → character → Key events) with one small background call per reply, using the recaps &amp; helpers AI above.")}
-      <h3>Spending</h3>
-      <div class="actions" style="justify-content:flex-start;margin-top:4px"><button id="sUsage">💲 Usage &amp; cost…</button></div>
     </div>
 
     <div class="stpane hidden" data-p="Memory">
       <h3>Spending limit</h3>
+      <div class="actions" style="justify-content:flex-start;margin:0 0 6px"><button id="sUsage">💲 Usage &amp; cost…</button></div>
       <div class="grid2">${field("Per day", `<input id="sBudD" type="number" min="0" step="0.5" value="${config.budget_daily || ""}" placeholder="no limit">`, "dollars")}
         ${field("Per month", `<input id="sBudM" type="number" min="0" step="1" value="${config.budget_monthly || ""}" placeholder="no limit">`, "dollars")}
         ${field("When a limit is reached", '<select id="sBudAct"><option value="warn">Just warn me</option><option value="stop">Ask before every paid call</option></select>', "Local models are free and never stopped.")}</div>
@@ -504,12 +551,6 @@ async function showSettings(tab = "AI") {
       <div class="grid2">${field("Stop keep-warm after", `<input id="sWarmH" type="number" min="0.5" step="0.5" value="${config.keep_warm_hours ?? 2}">`, "hours without a turn")}<div></div><div></div></div>
     </div>
 
-    <div class="stpane hidden" data-p="Libraries">
-      <h3>Reuse across stories</h3>
-      <div class="hint">Both are off by default and work independently.</div>
-      <label class="chk top"><input type="checkbox" id="sAvLib" ${config.avatar_library ? "checked" : ""}><span><b>Avatar library</b><span class="hint">Create several player avatars (a sheet and a picture each) and reuse them in any story. Each story uses exactly one, as its own copy. Adds a 🧑 Avatars button on the Home screen and a library row in Player → Avatar.</span></span></label>
-      <label class="chk top"><input type="checkbox" id="sReuse" ${config.reuse_art ? "checked" : ""}><span><b>Reuse character art across stories</b><span class="hint">Borrow a character's pictures from another story as a face reference (Cast → character → Images). Only identity carries over: each story's own art style and setting still apply, so the character looks like they belong to the new story.</span></span></label>
-    </div>
 
     <div class="stpane hidden" data-p="Appearance">
       ${appearanceHtml(config)}
@@ -531,7 +572,16 @@ async function showSettings(tab = "AI") {
       <label class="chk top"><input type="checkbox" id="sRtSwap" ${config.rt_swap !== false ? "checked" : ""}><span><b>Make room for pictures</b><span class="hint">If video memory is short when a local picture is about to be drawn, the local text model is unloaded first (it reloads at your next turn). Helpful on 12 GB cards that can't hold both.</span></span></label>
     </div>
 
+    <div class="stpane hidden" data-p="Phone">
+      <h3>Play from your phone or tablet</h3>
+      <label class="chk top"><input type="checkbox" id="sLan" ${config.lan_access ? "checked" : ""}><span><b>Let devices on my home network open AI Storyteller</b><span class="hint">Your phone or tablet opens the app in its browser over your home Wi-Fi. Everything still runs on this computer: the phone only shows the pages and sends your moves here; it never connects to anything on the internet itself. Other devices must enter a PIN once (this computer never does), and anything that is not on your home network is refused. Takes effect after a restart.</span></span></label>
+      <div id="lanBox" class="aiBox"><span class="hint">Loading…</span></div>
+    </div>
     <div class="stpane hidden" data-p="Backup">
+      <h3>Reuse across stories</h3>
+      <div class="hint">Both are off by default and work independently.</div>
+      <label class="chk top"><input type="checkbox" id="sAvLib" ${config.avatar_library ? "checked" : ""}><span><b>Avatar library</b><span class="hint">Create several player avatars (a sheet and a picture each) and reuse them in any story. Each story uses exactly one, as its own copy. Adds a 🧑 Avatars button on the Home screen and a library row in Player → Avatar.</span></span></label>
+      <label class="chk top"><input type="checkbox" id="sReuse" ${config.reuse_art ? "checked" : ""}><span><b>Reuse character art across stories</b><span class="hint">Borrow a character's pictures from another story as a face reference (Cast → character → Images). Only identity carries over: each story's own art style and setting still apply, so the character looks like they belong to the new story.</span></span></label>
       <h3>Back up everything</h3>
       <div class="hint">One .zip with all your stories, character pictures, scene pictures, avatars, usage log and settings. Your per-story backups (🧠 → Backups) protect against bad edits; this protects against a lost or broken disk, so keep a copy on another drive.</div>
       <label class="chk top"><input type="checkbox" id="bkKeys"><span><b>Include API keys</b><span class="hint">Off by default. If you include them, keep the file private.</span></span></label>
@@ -546,20 +596,6 @@ async function showSettings(tab = "AI") {
       <div class="actions" style="justify-content:flex-start"><label class="btnlike">Restore from a backup file…<input type="file" id="bkFile" accept=".zip,application/zip" hidden></label><span class="hint" id="bkRestoreNote"></span></div>
     </div>
 
-    <div class="stpane hidden" data-p="Advanced">
-      <h3>Writing</h3>
-      <div class="grid2">${field("Creativity (temperature)", `<input id="sTemp" type="number" step="0.05" min="0" max="2" value="${config.temperature}">`, "How adventurous the word choice is. Lower (0.5) = predictable and focused, higher (1.1) = more varied and surprising. Matters for local models; Claude's newer models and ChatGPT's reasoning models ignore it.")}
-        ${field("Longest reply", `<input id="sMax" type="number" step="128" min="256" value="${config.max_tokens}">`, "tokens (about ¾ of a word each). Replies stop here.")}
-        ${field("Context size (local models)", `<input id="sCtx" type="number" step="1024" min="2048" value="${config.num_ctx}">`, "How much text a local model reads at once. Bigger remembers more but needs more video memory; 8192 is safe on 12 GB.")}</div>
-      <h3>Claude's thinking</h3>
-      <div class="grid2">${field("Thinking", '<select id="sThink"><option value="off">Lowest available</option><option value="on">On (more tokens)</option></select>', "Extra private reasoning before replying. Costs output tokens.")}
-        ${field("Effort", '<select id="sEffort"><option value="low">Low (recommended)</option><option value="medium">Medium</option><option value="high">High</option></select>', "Low keeps hidden thinking short.")}
-        ${field("Room for hidden thinking", `<input id="sHead" type="number" min="0" step="512" value="${config.thinking_headroom ?? 4096}">`, "tokens added to the reply limit so thinking can't cut a reply short; only used tokens are billed.")}</div>
-      <h3>Providers</h3>
-      <div class="hint">Connections to AI services. API keys can also be pasted in the AI chooser. Add any OpenAI-compatible service (OpenRouter, LM Studio, DeepSeek…).</div>
-      <details class="fold"><summary>Show provider settings (${config.providers.length})</summary><div id="provs">${config.providers.map(provHtml).join("")}</div>
-      <div class="actions" style="justify-content:flex-start"><button id="mAdd">+ Add provider</button></div></details>
-    </div>
     <div class="actions sticky"><button id="mClose">Cancel</button><button class="primary" id="mSave">Save</button></div>`);
   $("modalCard").classList.add("tall");   // same window size on every tab
   const showTab = (t) => { document.querySelectorAll(".stt").forEach((b) => b.classList.toggle("on", b.dataset.t === t)); document.querySelectorAll(".stpane").forEach((p) => p.classList.toggle("hidden", p.dataset.p !== t)); };
@@ -589,6 +625,18 @@ async function showSettings(tab = "AI") {
     $("sbBuild").onclick = async (e) => { e.target.disabled = true; $("sbNote").textContent = "Building…"; try { story = await api(`/stories/${story.id}/sidebar/build?fresh=true`, { method: "POST" }); renderSidebar(); $("sbNote").textContent = "Done."; } catch (err) { $("sbNote").textContent = err.message; } e.target.disabled = false; };
   }
   const themeDraft = bindAppearance(config);
+  const lanFill = async () => {
+    const box = $("lanBox"); if (!box) return;
+    let l; try { l = await api("/lan"); } catch (e) { box.innerHTML = `<span class="hint">${esc(e.message)}</span>`; return; }
+    const want = $("sLan").checked;
+    box.innerHTML = (l.active ? `<b>✔ Open on your phone:</b> ${l.urls.map((u) => `<code>${esc(u)}</code>`).join(" or ") || "(this computer's network address could not be read)"}<br><b>PIN:</b> <code>${esc(l.pin)}</code> <button id="lanPin">New PIN</button>`
+        : want ? `<b>Restart the app to turn it on.</b> <button id="lanRestart">Save and restart now</button>` : `<span class="hint">Off: only this computer can open the app.</span>`)
+      + (l.active && !want ? `<div class="hint">Turned off: save and restart to stop phones from connecting. <button id="lanRestart">Save and restart now</button></div>` : "")
+      + `<div class="hint" style="margin-top:6px">If the phone cannot connect, this computer's firewall may be blocking it. Allow only your home network, once, in a terminal: <code>sudo ufw allow from ${esc(((l.urls[0] || "http://192.168.0.1").split("//")[1] || "").split(":")[0].replace(/\.\d+$/, ".0"))}/24 to any port ${l.port} proto tcp</code></div>`;
+    if ($("lanPin")) $("lanPin").onclick = async () => { if (!confirm("Make a new PIN? Devices will have to enter it again after the next restart.")) return; await api("/lan/new-pin", { method: "POST" }); lanFill(); };
+    if ($("lanRestart")) $("lanRestart").onclick = async () => { $("mSave").click(); setTimeout(() => restartApp(), 1500); };
+  };
+  $("sLan").onchange = lanFill; lanFill();
   onModalClose = () => { applyTheme(config); onModalClose = null; };   // Cancel / click-away undoes the colour preview
   $("sBudAct").value = config.budget_action || "warn"; $("sCharMemSize").value = config.char_memory_size || "medium";
   api("/budget").then((b) => { $("sBudNow").textContent = `Spent so far: $${b.daily.spent.toFixed(2)} today` + (b.monthly.limit > 0 ? ` · $${b.monthly.spent.toFixed(2)} this month` : "") + " (estimated)."; }).catch(() => {});
@@ -652,6 +700,7 @@ async function showSettings(tab = "AI") {
     if (styleChanged || styleDir) config.default_art_direction = styleDir;   // new stories start with it
     config.rt_text = $("sRtText").checked; config.rt_comfy = $("sRtComfy").checked; config.rt_comfy_idle_min = +$("sRtIdle").value || 15; config.rt_comfy_mode = $("sRtMode").value; config.rt_comfy_cmd = $("sRtCmd").value.trim(); config.rt_swap = $("sRtSwap").checked;
     config.avatar_library = $("sAvLib").checked; config.reuse_art = $("sReuse").checked;
+    config.lan_access = $("sLan").checked;
     config.keep_warm = $("sWarm").checked; config.keep_warm_hours = +$("sWarmH").value || 2;
     config.summarize_when = +$("sWhen").value || 24; config.keep_recent = +$("sRecent").value || 10;
     await picker.ready;
@@ -662,7 +711,7 @@ async function showSettings(tab = "AI") {
     if (story) story.models = await api(`/stories/${story.id}/models`, { method: "PUT", body: chosen });
     if (story && $("sbMode")) {
       const mode = $("sbMode").value, fields = [...document.querySelectorAll("#sbFields input:checked")].map((i) => i.dataset.f), old = story.sidebar || {};
-      const custom = sbTrk ? sbTrk.get() : (old.custom || []), strip = (l) => JSON.stringify((l || []).map((f) => [f.label, f.scope || f.id.split(".")[0], f.kind, f.min ?? null, f.max ?? null, String(Array.isArray(f.options) ? f.options.join(",") : f.options || ""), f.unit || "", f.note || ""]));
+      const custom = sbTrk ? sbTrk.get() : (old.custom || []), strip = (l) => JSON.stringify((l || []).map((f) => [f.label, f.scope || f.id.split(".")[0], f.kind, f.min ?? null, f.max ?? null, String(Array.isArray(f.options) ? f.options.join(",") : f.options || ""), f.unit || "", f.note || "", String(Array.isArray(f.levels) ? f.levels.join(",") : f.levels || "").replace(/\s+/g, ""), String(f.max_level ?? "")]));
       if (mode !== old.mode || JSON.stringify(fields) !== JSON.stringify(old.fields || []) || strip(custom) !== strip(old.custom)) story = await api(`/stories/${story.id}/sidebar`, { method: "PUT", body: { mode, fields, custom } });
     }
     if (story && styleChanged) story = await api(`/stories/${story.id}/art`, { method: "PUT", body: { ...story.art, direction: styleDir, setting: (story.art || {}).setting ?? null } });
@@ -701,7 +750,7 @@ function syncModelSelect() { // the header menu shows this story's narrator mode
 async function openStory(id) {
   story = await api("/stories/" + id);
   localStorage.setItem("story", id);
-  syncModelSelect(); hideHome(); renderAll(); applyTheme(config); refreshCache(); refreshArtSuggestions(); runtimeSelect(); refreshBudget();
+  syncModelSelect(); hideHome(); renderAll(false); applyTheme(config); refreshCache(); refreshArtSuggestions(); runtimeSelect(); refreshBudget();
 }
 function runtimeSelect() {   // local-model auto-management (Settings → Local models): load what this story needs, release the rest
   if (story && config && (config.rt_text || config.rt_comfy)) api("/runtime/select", { method: "POST", body: { story_id: story.id } }).catch(() => {});
@@ -713,7 +762,37 @@ $("btnSend").onclick = () => send($("input").value);
 $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send($("input").value); } });
 $("input").addEventListener("input", autosize);
 $("btnUndo").onclick = async () => { const t = await undo(); if (t) { $("input").value = t; autosize(); } };
-$("btnRetry").onclick = async () => { const t = await undo(); if (t) send(t); };
+$("btnRedo").onclick = async () => {
+  if (busy || !story || !story.undone) return;
+  try { story = await api(`/stories/${story.id}/redo`, { method: "POST" }); $("input").value = ""; autosize(); renderAll(); } catch (e) { alert(e.message); }
+};
+const KEEP_HTML = `<details style="margin-top:6px"><summary class="hint">Keep something from the discarded reply? (by default the retry starts from the previous turn only)</summary>
+    <label class="chk"><input type="checkbox" id="kpChars"> New characters it introduced</label>
+    <label class="chk"><input type="checkbox" id="kpEvents"> What it logged on character cards</label>
+    <label class="chk"><input type="checkbox" id="kpState"> Its side-panel and status changes</label></details>`;
+function restoreKeepTicks() {   // the Retry dialog remembers your last "keep" choices
+  let k = {}; try { k = JSON.parse(localStorage.getItem("retryKeep") || "{}"); } catch (e) { /* none saved */ }
+  for (const [id, key] of [["kpChars", "keep_chars"], ["kpEvents", "keep_events"], ["kpState", "keep_state"]]) if ($(id)) $(id).checked = !!k[key];
+  if (Object.values(k).some(Boolean) && $("kpChars")) $("kpChars").closest("details").open = true;
+}
+async function retryTurn(model, note) {   // steps back, keeping the discarded reply as an attempt, and asks again
+  const keep = { keep_chars: !!($("kpChars") && $("kpChars").checked), keep_events: !!($("kpEvents") && $("kpEvents").checked), keep_state: !!($("kpState") && $("kpState").checked) };
+  if ($("kpChars")) { try { localStorage.setItem("retryKeep", JSON.stringify(keep)); } catch (e) { /* not saved */ } }
+  const had = hadPicture(), text = [...story.turns].reverse().find((x) => x.role === "user");
+  if (!text) return;
+  closeModal();
+  story = await api(`/stories/${story.id}/retry`, { method: "POST", body: keep }); renderAll();
+  send(text.text, model, false, note, !!note || had);
+}
+$("btnRetry").onclick = () => {
+  if (busy || !story || !story.turns.length) return;
+  modal(`<h2>Regenerate this reply</h2><p class="hint">Your move is sent again and the current reply is discarded (it is kept as an earlier attempt you can swap back to). Optionally say what should change; it is sent along with the request and is not saved in the story. If you describe a change, or the reply had a picture, the scene is drawn again from the new reply.</p>
+    <textarea id="rgNote" rows="3" placeholder="e.g. Shorter, more tension, keep the guard calmer… (leave empty to just try again)" autofocus></textarea>${KEEP_HTML}
+    <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="rgGo">Regenerate</button></div>`);
+  $("mClose").onclick = closeModal;
+  restoreKeepTicks();
+  $("rgGo").onclick = () => retryTurn(undefined, $("rgNote").value.trim());
+};
 $("btnHome").onclick = showHome;
 bindTools();
 $("btnSide").onclick = () => $("sidebar").classList.toggle("open");
@@ -740,6 +819,6 @@ $("modelSelect").onchange = async (e) => {
   const list = await api("/stories");
   const last = localStorage.getItem("story");
   const id = list.find((s) => s.id === last) ? last : list[0] && list[0].id;
-  if (id) await openStory(id); else renderAll();
+  if (id) await openStory(id); else renderAll(false);
   showHome();   // start on the Home screen; the last story is already loaded behind it
 })();

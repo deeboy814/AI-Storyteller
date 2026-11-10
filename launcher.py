@@ -39,10 +39,20 @@ def start() -> int:
     if not up():
         (HERE / "data").mkdir(exist_ok=True)
         log = open(HERE / "data" / "server.log", "ab")
-        cmd = [str(PY), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", PORT]
+        host, env = "127.0.0.1", dict(os.environ)
+        try:     # Settings -> Phone & tablet: listen on the home network (devices enter a PIN)
+            import json
+            if json.loads((HERE / "data" / "config.json").read_text(encoding="utf-8")).get("lan_access"):
+                pin_file = HERE / "data" / "lan_pin"
+                if not pin_file.exists() or not pin_file.read_text().strip():
+                    pin_file.write_text("".join(secrets.choice("0123456789") for _ in range(6)) + "\n")
+                host, env["STORYTELLER_PIN"], env["STORYTELLER_LAN"] = "0.0.0.0", pin_file.read_text().strip(), "1"
+        except Exception:
+            pass
+        cmd = [str(PY), "-m", "uvicorn", "app.main:app", "--host", host, "--port", PORT]
         flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW) if WIN else 0
         kw = {"creationflags": flags} if WIN else {"start_new_session": True}
-        subprocess.Popen(cmd, cwd=str(HERE), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kw)
+        subprocess.Popen(cmd, cwd=str(HERE), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, **kw)
         for _ in range(80):
             if up():
                 break
@@ -86,7 +96,7 @@ def lan() -> int:
         ip = socket.gethostbyname(socket.gethostname())
     print(f"\n  On your phone or tablet open:  http://{ip}:8000\n  PIN: {pin}   (stored in data\\lan_pin; delete that file to get a new one)\n")
     print("  If Windows asks to allow the app through the firewall, allow it on PRIVATE networks only.\n")
-    env = {**os.environ, "STORYTELLER_PIN": pin}
+    env = {**os.environ, "STORYTELLER_PIN": pin, "STORYTELLER_LAN": "1"}
     return subprocess.call([str(PY), "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"], cwd=str(HERE), env=env)
 
 

@@ -33,7 +33,8 @@ function panelSidebarHtml() {
         return `<div class="kv"><small>${esc(f.label)} ${v}${d ? ` <span class="${d > 0 ? "up" : "down"}">${d > 0 ? "+" : ""}${d}</span>` : ""}</small></div>${bar(f, v, f.min ?? 0, f.max ?? 100, c)}`;
       }
       if (f.custom && f.kind === "text" && String(v).includes(" | ")) return `<div class="kv${mark(c)}"><small>${esc(f.label)}</small>${String(v).split(" | ").map((x) => `<div>• ${esc(x)}</div>`).join("")}</div>`;
-      return `<div class="kv${mark(c)}"><small>${esc(f.label)}</small> ${esc(String(v))}${f.kind === "number" && f.unit ? " " + esc(f.unit) : ""}</div>`;
+      const nxt = f.levels && f.levels.length ? nextLevelAt(f.levels, v, f.max_level) : null;
+      return `<div class="kv${mark(c)}"><small>${esc(f.label)}</small> ${esc(String(v))}${nxt ? ` <span class="muted">/ ${nxt}</span>` : ""}${f.kind === "number" && f.unit ? " " + esc(f.unit) : ""}</div>`;
     }).join("");
   let info = "", chars = "", qh = "", qn = 0, artN = 0;
   const scene = kv("scene");
@@ -77,6 +78,11 @@ function panelSidebarHtml() {
         ${q.reward ? `<div class="qrew"><small>${done ? "Reward granted" : "Reward"}</small> ${esc(q.reward)}</div>` : ""}<div class="qstat"><small>Status</small> ${esc(q.status)}</div></div></details>`;
     }).join("") : `<div class="side-empty">No quests right now.</div>`);
   }
+  const jr = (tr.journal || []).slice().reverse();
+  if (F.some((x) => x.kind === "quests") && jr.length) {
+    qh = qh || `<div class="qhead"><b>Quests</b> <small>0 active</small></div><div class="side-empty">No quests right now.</div>`;
+    qh += `<details class="qjournal"><summary>Journal · ${jr.length} finished</summary>${jr.map((q) => `<div class="qj ${q.status}"><span class="stchip ${q.status === "completed" ? "st-immune" : "st-dead"}">${q.status === "completed" ? "✓" : "✗"}</span> <b>${esc(q.name)}</b>${q.reward ? ` <small class="muted">${esc(q.reward)}</small>` : ""}${q.turn ? ` <small class="muted">· turn ${q.turn}</small>` : ""}</div>`).join("")}</details>`;
+  }
   if (!info && !chars && !qh) return "";
   const list = changes.map((c) => { const f = byId[`${c.s}.${c.k}`]; return `${c.n ? c.n + " · " : ""}${c.k === "*" ? "new character" : (f ? f.label : c.k) + ": " + fmtVal(c.b) + " → " + fmtVal(c.a)}`; });
   const panes = [["info", "Info", info], ["chars", artN ? "Characters 🎨" : "Characters", chars], ["quests", qn ? `Quests · ${qn}` : "Quests", qh]].filter((x) => x[2]);
@@ -100,6 +106,16 @@ async function refreshTracker() {   // after a reply: let a background AI update
 }
 
 
+function nextLevelAt(levels, v, cap) {   // same rule as the server's tracker.level_for (null at the highest level)
+  const n = parseFloat(String(v).replace(",", ".").match(/-?\d+(\.\d+)?/)?.[0]); if (isNaN(n)) return null;
+  const lv = levels.slice(), max = cap ? cap - 1 : 500;
+  while (lv[lv.length - 1] <= n && lv.length < max) {
+    const L = lv.length, gap = lv[L - 1] - (L > 1 ? lv[L - 2] : 0), step = L > 2 ? gap - (lv[L - 2] - lv[L - 3]) : 0;
+    lv.push(lv[L - 1] + gap + Math.max(step, 0));
+  }
+  return lv.slice(0, max).find((t) => t > n) ?? null;
+}
+
 // ---- the player's own trackers: type a name, say where it lives and how it looks (text / number / slider / status)
 const TRK_SCOPES = [["me", "You"], ["scene", "Scene"], ["chars", "Each character"]];
 const TRK_KINDS = [["slider", "Slider (gauge)"], ["number", "Number"], ["status", "Status (labels)"], ["text", "Text"], ["quests", "Quest log (tab)"]];
@@ -112,7 +128,7 @@ function trackerEditor(el, initial, ctx) {
       f.label = g("label"); f.scope = g("scope"); f.kind = g("kind"); f.note = g("note");
       if (f.kind === "slider") { f.min = g("min"); f.max = g("max"); }
       if (f.kind === "status") f.options = g("options");
-      if (f.kind === "number") f.unit = g("unit");
+      if (f.kind === "number") { f.unit = g("unit"); f.levels = g("levels"); f.max_level = g("max_level"); }
     });
   };
   const draw = () => {
@@ -125,7 +141,9 @@ function trackerEditor(el, initial, ctx) {
           <button class="aibtn tsug" title="Let the helper AI suggest the type, range and meaning from the name">✨</button><button class="x tdel" title="Remove">×</button></div>
           <div class="trow2">${k === "slider" ? `<label>from <input data-k="min" type="number" value="${f.min ?? 0}"></label><label>to <input data-k="max" type="number" value="${f.max ?? 100}"></label>` : ""}
           ${k === "status" ? `<input data-k="options" placeholder="Labels, separated by commas (e.g. calm, tense, panicked)" value="${esc(Array.isArray(f.options) ? f.options.join(", ") : f.options || "")}">` : ""}
-          ${k === "number" ? `<label>unit <input data-k="unit" maxlength="12" placeholder="optional, e.g. gold" value="${esc(f.unit || "")}"></label>` : ""}
+          ${k === "number" ? `<label>unit <input data-k="unit" maxlength="12" placeholder="optional, e.g. gold" value="${esc(f.unit || "")}"></label>
+            <label title="Optional, for an XP tracker: the XP totals where each level begins (level 2 at the first number, level 3 at the second…). The app then keeps a tracker named “Level” in step with the XP, shows the next goal (XP 160 / 300) and tells the narrator the level.">levels at <input data-k="levels" placeholder="optional, e.g. 50, 150, 300" value="${esc(Array.isArray(f.levels) ? f.levels.join(", ") : f.levels || "")}"></label>
+            <label title="Optional: the highest level there is. At this level the XP shows no next goal and the narrator is told there are no more level-ups.">max level <input data-k="max_level" type="number" min="2" style="width:80px" placeholder="none" value="${esc(String(f.max_level ?? ""))}"></label>` : ""}
           <input data-k="note" class="tnote" maxlength="200" placeholder="What it means / what changes it (helps the AI)" value="${esc(f.note || "")}"></div><div class="hint tmsg"></div></div>`;
       }).join("") + `<div class="actions" style="justify-content:flex-start"><button class="tadd">＋ Add a tracker</button></div>`;
     el.querySelectorAll(".trow").forEach((r, i) => {
@@ -142,7 +160,7 @@ function trackerEditor(el, initial, ctx) {
         } catch (err) { msg.textContent = err.message; e.target.disabled = false; }
       };
     });
-    el.querySelector(".tadd").onclick = () => { sync(); if (list.length < 16) list.push({ label: "", scope: "me", kind: "slider", min: 0, max: 100 }); draw(); const ins = el.querySelectorAll('.trow [data-k="label"]'); if (ins.length) ins[ins.length - 1].focus(); };
+    el.querySelector(".tadd").onclick = () => { sync(); if (list.length < 24) list.push({ label: "", scope: "me", kind: "slider", min: 0, max: 100 }); draw(); const ins = el.querySelectorAll('.trow [data-k="label"]'); if (ins.length) ins[ins.length - 1].focus(); };
   };
   draw();
   return { get: () => { sync(); return list.filter((f) => (f.label || "").trim()); } };
@@ -169,7 +187,9 @@ function nowCardHtml() {
       <figcaption>${esc(oneLine(sc.im.scene || "", 160))}</figcaption>
       <span class="nowscbtn"><button data-act="redraw" data-turn="${sc.turn}" data-img="${sc.k}" title="Draw this scene again (the earlier picture stays)">↻</button><button data-act="save" data-turn="${sc.turn}" data-img="${sc.k}" title="Keep this picture as a portrait of a character">💾</button><button data-act="del" data-turn="${sc.turn}" data-img="${sc.k}" title="Delete this picture">×</button></span></figure>` : "";
   const drawingNote = drawing && story.art.scene_where === "panel" ? '<div class="drawing">🎨 Drawing the scene…</div>' : "";
-  const who = p ? `<div class="nowbody">${p.url ? `<img class="nowpic" src="${thumbUrl(p.url, 360)}" alt="">` : ""}<div class="nowtext"><b class="pname" data-slug="${esc(p.ch.slug)}">${esc(p.ch.name)}</b>
+  const live = story.art.now_pic === "live" && n && n.image, picUrl = live ? n.image : p && p.url;
+  const liveNote = story.art.now_pic === "live" && n && n.drawing ? '<div class="drawing">🎨 Drawing what they are doing…</div>' : "";
+  const who = p ? `${liveNote}<div class="nowbody${live ? " live" : ""}">${picUrl ? `<a href="${esc(picUrl)}" target="_blank"><img class="nowpic${live ? " live" : ""}${!live && isActionMood(n.mood || "") ? " upper" : ""}" src="${live ? esc(picUrl) : thumbUrl(picUrl, 360)}" alt="" title="${live ? esc(`${p.ch.name}: ${n.doing || ""}${n.wearing ? " · wearing " + n.wearing : ""}`) : ""}"></a>` : ""}<div class="nowtext"><b class="pname" data-slug="${esc(p.ch.slug)}">${esc(p.ch.name)}</b>
     ${n.mood ? `<div class="nowmood">${esc(n.mood)}</div>` : ""}${n.doing ? `<div class="nowdoing">${esc(n.doing)}</div>` : ""}${n.wearing ? `<div class="nowwear"><small>Wearing</small> ${esc(n.wearing)}</div>` : ""}</div></div>` : "";
   return `<div class="nowcard"><div class="nowhead"><small>Right now</small><button class="nowflip" title="Show my own avatar instead">me</button></div>${scene}${drawingNote}${who}</div>`;
 }
@@ -177,8 +197,13 @@ async function watchNow() {
   if (!story || !(story.art && story.art.now_card)) return;
   const id = story.id;
   try {
-    const r = await api(`/stories/${id}/now?wait=true`);
+    let r = await api(`/stories/${id}/now?wait=true`);
     if (!story || story.id !== id) return;
     story.now = r.now; renderSidebar();
+    for (let i = 0; i < 60 && r.now && r.now.drawing; i++) {     // a new "right now" picture is being drawn: show it when it is ready
+      await new Promise((ok) => setTimeout(ok, 4000));
+      if (!story || story.id !== id) return;
+      r = await api(`/stories/${id}/now`); story.now = r.now; renderSidebar();
+    }
   } catch (e) { /* keep what is shown */ }
 }

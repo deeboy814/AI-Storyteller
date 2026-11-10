@@ -14,6 +14,7 @@ import base64
 import copy
 import io
 import json
+import os
 import random
 import re
 import uuid
@@ -157,6 +158,8 @@ def tweak_workflow(wf: dict, tw: dict) -> dict:
     ref_weight / ref_end go to the IPAdapter node that applies the reference to the model, hires_denoise to the second (refining)
     sampler (denoise below 1), steps to the first sampler. Anything left blank keeps the workflow's own value."""
     rw, re_, hd, st = _tw_num(tw, "ref_weight", 0, 2), _tw_num(tw, "ref_end", 0, 1), _tw_num(tw, "hires_denoise", 0, 1), _tw_num(tw, "steps", 1, 150)
+    rs, cg = _tw_num(tw, "ref_start", 0, 1), _tw_num(tw, "cfg", 1, 30)
+    rtype, rscale = str(tw.get("ref_type") or "").strip(), str(tw.get("ref_scaling") or "").strip()
     if str(tw.get("refine", "")).strip().lower() == "off":
         # skip the refine pass: whatever decodes the refined latent decodes the first sampler's result instead (unused nodes are not run)
         for rid, r in wf.items():
@@ -171,6 +174,15 @@ def tweak_workflow(wf: dict, tw: dict) -> dict:
                 ni = n.get("inputs") if isinstance(n, dict) else None
                 if isinstance(ni, dict) and ni.get("samples") == [rid, 0]:
                     ni["samples"] = src
+    cs = _tw_num(tw, "clip_skip", 1, 12)
+    if cs and cs > 1:       # Pony models are trained with CLIP skip 2: the text encoders read the CLIP from a "set last layer" node
+        ck = next((k for k, n in wf.items() if isinstance(n, dict) and n.get("class_type") == "CheckpointLoaderSimple"), None)
+        if ck and "clipskip" not in wf:
+            wf["clipskip"] = {"class_type": "CLIPSetLastLayer", "inputs": {"stop_at_clip_layer": -int(cs), "clip": [ck, 1]}}
+            for n in wf.values():
+                ni = n.get("inputs") if isinstance(n, dict) else None
+                if isinstance(ni, dict) and ni.get("clip") == [ck, 1] and n.get("class_type") != "CLIPSetLastLayer":
+                    ni["clip"] = ["clipskip", 0]
     for node in wf.values():
         inp = node.get("inputs") if isinstance(node, dict) else None
         if not isinstance(inp, dict):
@@ -181,11 +193,19 @@ def tweak_workflow(wf: dict, tw: dict) -> dict:
                 inp["weight"] = rw
             if re_ is not None and isinstance(inp.get("end_at"), (int, float)):
                 inp["end_at"] = re_
+            if rs is not None and isinstance(inp.get("start_at"), (int, float)):
+                inp["start_at"] = rs
+            if rtype and "weight_type" in inp:
+                inp["weight_type"] = rtype            # e.g. "ease in-out", "strong middle", "style transfer"
+            if rscale and "embeds_scaling" in inp:
+                inp["embeds_scaling"] = rscale        # "V only", "K+V", "K+V w/ C penalty", "K+mean(V) w/ C penalty"
         elif cls.startswith("KSampler") and isinstance(inp.get("denoise"), (int, float)):
             if inp["denoise"] < 1 and hd is not None:
                 inp["denoise"] = hd
             elif inp["denoise"] >= 1 and st is not None:
                 inp["steps"] = int(st)
+            if inp["denoise"] >= 1 and cg is not None and isinstance(inp.get("cfg"), (int, float)):
+                inp["cfg"] = cg
     return wf
 
 
@@ -212,6 +232,10 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
     except ValueError as e:
         raise ImageError(f"The ComfyUI workflow in Settings is not valid JSON: {e}")
     w, h = SHAPES[shape]
+    if p.get("ref_megapixels"):   # a species reference is shown at a tiny size, so only its broad look (colours, crests, ears, build) carries over, not the individual's face
+        for n in wf.values():
+            if isinstance(n, dict) and n.get("class_type") == "ImageScaleToTotalPixels":
+                n.setdefault("inputs", {})["megapixels"] = float(p["ref_megapixels"])
     tw = (p.get("model_tweaks") or {}).get(p.get("model", "")) or {}   # settings for this checkpoint only (Settings -> Pictures -> Local)
     if tw:
         wf = tweak_workflow(wf, tw)
@@ -227,6 +251,8 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
         prompt = f"{prompt}, {xpos}"
     if xneg:
         negative = f"{negative}, {xneg}" if negative else xneg
+    if seed is None and os.environ.get("STORYTELLER_TEST_SEED"):     # tuning runs only: the same seed for every picture, so settings can be compared fairly
+        seed = int(os.environ["STORYTELLER_TEST_SEED"])
     values = {"prompt": prompt, "negative": negative, "seed": seed if seed is not None else random.randint(0, 2**32 - 1),
               "width": w, "height": h, "model": p.get("model", "")}
     try:
@@ -276,11 +302,14 @@ async def generate(provider: dict, prompt: str, negative: str = "", shape: str =
     local = provider.get("type") == "comfyui"
     if local:
         await localrt.before_image(provider)     # starts ComfyUI / makes room if the player turned that on (Settings -> Local models)
+    held = localrt.hold() if local else None
+    if held:
+        held.__enter__()       # never stopped by the idle timer while drawing (a slow first load can take minutes)
     try:
         data = await fn(provider, prompt, negative, shape, list(refs or []), seed)
     finally:
-        if local:
-            localrt.touch("comfy")
+        if held:
+            held.__exit__(None, None, None)
     try:
         usage.record({"purpose": "pictures", "kind": "image", "provider": provider.get("id", ""), "model": provider.get("model", ""), "images": 1})
     except Exception:
@@ -341,19 +370,27 @@ MOOD_EMPHASIS = ("The mood must be unmistakable at a glance: show it strongly in
                  "Frame from the waist up so the hands and posture are visible.")
 
 
-def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has_ref: bool, ext_only: bool = False, nsfw: bool = False) -> str:
+def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has_ref: bool, ext_only: bool = False, nsfw: bool = False, species_ref: str = "", framing: str = "") -> str:
     head = plain(art.get("direction") or "").strip()
-    if ext_only:   # the only references come from ANOTHER story, drawn in a different style and outfit
+    if species_ref:   # the only reference is the first picture of this species: a different individual of the same kind
+        body = (f"The reference picture shows another member of the same species ({species_ref}). Draw a DIFFERENT individual of that species: {name}: {appearance}. "
+                f"Keep what is true of the whole species (skin or covering, ears, crests, eyes, build, proportions, clothing style) but give this individual their own face and features; "
+                f"do NOT copy the reference's face. " + (f"Expression: {mood}. " if mood else "Neutral expression. ") + "Upper body portrait (framed from the chest up), facing the viewer, simple soft background.")
+    elif ext_only:   # the only references come from ANOTHER story, drawn in a different style and outfit
         body = (f"Same character as the reference images ({name}: {appearance}). Keep their face, hair and identity. The references come from a different story with a different "
                 f"art style, outfit and setting, so do NOT copy their style, clothing, background or lighting; redraw the character in the style and setting described here. "
-                + (f"Expression: {mood}. " if mood else "Neutral expression. ") + "Upper body, facing the viewer, simple soft background.")
+                + (f"Expression: {mood}. " if mood else "Neutral expression. ") + "Upper body portrait (framed from the chest up), facing the viewer, simple soft background.")
     elif mood and has_ref:
         body = (f"Same character as the reference images ({name}: {appearance}). Copy the face, hair and clothing exactly from the "
-                f"references; do NOT copy their backgrounds or lighting. New expression/mood: {mood}. Upper body, facing the viewer, simple soft background. " + STYLE_MATCH)
+                f"references; do NOT copy their backgrounds, lighting or pose: the pose, body language and camera must change to show the new mood. New expression/mood: {mood}. Upper body portrait (framed from the chest up), facing the viewer, simple soft background. " + STYLE_MATCH)
     else:
-        body = f"Character portrait of {name}: {appearance}. Upper body, facing the viewer, " + (f"expression: {mood}." if mood else "neutral expression.") + " Simple soft background."
+        body = f"Character portrait of {name}: {appearance}. Upper body portrait (framed from the chest up), facing the viewer, " + (f"expression: {mood}." if mood else "neutral expression.") + " Simple soft background."
+    if framing:     # an action shot or a body on the ground instead of a chest-up portrait
+        for f in ("Upper body portrait (framed from the chest up), facing the viewer, simple soft background.", "Upper body portrait (framed from the chest up), facing the viewer, "):
+            body = body.replace(f, "")
+        body = body.replace(" Simple soft background.", "").strip() + " " + framing
     if mood and mood.split()[0].lower() not in ("normal", "default", "neutral"):
-        body += " " + MOOD_EMPHASIS
+        body += " " + (MOOD_EMPHASIS.replace(" Frame from the waist up so the hands and posture are visible.", "") if framing else MOOD_EMPHASIS)
     setting = plain(art.get("setting") or "").strip()
-    fit = f"The character belongs to this world; dress and style them to fit it: {setting}" if setting and (ext_only or not (mood and has_ref)) else ""
+    fit = f"The character belongs to this world; dress and style them to fit it, but keep the background a plain soft backdrop (the setting only decides clothing and style): {setting}" if setting and (ext_only or not (mood and has_ref)) else ""
     return "\n\n".join(x for x in (head, body, fit, content_line(nsfw)) if x)
