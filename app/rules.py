@@ -158,12 +158,21 @@ DIFFICULTY = {"easy": 8, "medium": 12, "hard": 16, "very hard": 20, "heroic": 24
 BASE_STAT = 5          # a stat of 5 is average and adds nothing; each point above or below adds or subtracts 1
 
 
+def stat_mod(v: float) -> int:
+    """The bonus a stat adds to a roll. Up to 10 each point counts (5 is average, 10 is +5). Stats can climb far past 10 when a story levels up (a stat of 30
+    or 100), and a flat +1 per point would make every check automatic, so above 10 each doubling of the stat adds only +3 (20 is +8, 40 is +11, 80 is +14)."""
+    import math
+    if v <= 10:
+        return int(round(v - BASE_STAT))
+    return int(round(5 + 3 * math.log2(v / 10)))
+
+
 def roll(value, difficulty: str = "medium", dc=None, adv: str = "", label: str = "", rng=None) -> dict:
-    """A d20 check: d20 + (stat - 5) against a difficulty (or a number). `adv` is "adv" or "dis" for two dice. Pure code, so the outcome is fair and the narrator cannot fudge it."""
+    """A d20 check: d20 + the stat's bonus (stat - 5, easing off above 10) against a difficulty (or a number). `adv` is "adv" or "dis" for two dice. Pure code, so the outcome is fair and the narrator cannot fudge it."""
     import random
     rng = rng or random
     v = float(value) if value is not None else float(BASE_STAT)
-    mod = int(round(v - BASE_STAT))
+    mod = stat_mod(v)
     rolls = [rng.randint(1, 20)] + ([rng.randint(1, 20)] if adv in ("adv", "dis") else [])
     die = max(rolls) if adv == "adv" else min(rolls)
     try:
@@ -205,17 +214,49 @@ def dice_mode(story: dict) -> str:
     return "auto" if prompt_calls_for_checks(story) else "manual"
 
 
+DICE_RULE = ("## Dice checks\n- Risky or uncertain actions are decided by a d20 roll that the app makes: d20 plus the stat's bonus against a difficulty. When a roll result "
+             "comes with the move, it is final: narrate exactly that outcome (critical success, success, partial success at a cost, failure or critical failure) and never "
+             "re-roll, soften or reverse it. Do not call for a roll on conversation, questions or safe actions, and never roll for anyone but {user}.")
+_LEVELISH = {"level", "lvl", "xp", "experience", "exp", "tier", "rank"}
+_PROMPT_LEVELS = re.compile(r"\b(level(?:s|ing)?|xp|experience points?|stat points?|skill points?)\b", re.IGNORECASE)
+
+
+def dice_offer(story: dict) -> bool:
+    """Should the app ask about dice? Yes for a story that is game-like (it tracks stats AND levels) when nobody has chosen a dice setting yet and the question was not
+    answered before: the player picks automatic, manual or off (also when the prompt itself already calls for rolls). A real-life story (no stats or levels) is never asked."""
+    from . import tracker
+    d = story.get("dice") or {}
+    if d.get("mode") or d.get("offered"):      # (a prompt that already calls for rolls is offered too: the player can keep, soften or switch them off)
+        return False
+    try:
+        stats = check_stats(story)
+        fields = tracker.active_fields(story)
+    except Exception:
+        return False
+    has_levels = any(str(f.get("label", "")).strip().lower() in _LEVELISH or f.get("levels") for f in fields) or bool(_PROMPT_LEVELS.search(story.get("base_prompt") or ""))
+    return len(stats) >= 3 and has_levels
+
+
+def add_dice_rule(story: dict) -> bool:
+    """Append the standard dice paragraph to the story prompt (once). Returns True if it was added."""
+    bp = story.get("base_prompt") or ""
+    if prompt_calls_for_checks(story):
+        return False
+    story["base_prompt"] = bp.rstrip("\n") + "\n\n" + DICE_RULE + "\n"
+    return True
+
+
 # What each kind of stat is used for: the words in a move that point at it. A stat whose name is not here is matched on its own name.
 STAT_WORDS = {
-    ("strength", "might", "brawn", "power"): r"lift|push|pull|break|smash|force|wrestl\w*|grappl\w*|punch\w*|hit|strike|fight\w*|carry|throw|tackle|swing|slam|overpower|bend|drag|heave|crush|bash",
+    ("strength", "might", "brawn", "power", "body"): r"lift|push|pull|break|smash|force (?:open|the (?:door|lock|window|gate|hatch|bars?)|my way|through)|wrestl\w*|grappl\w*|punch\w*|hit|strike|fight\w*|carry|throw|tackle|swing|slam|overpower|bend|drag|heave|crush|bash",
     ("reflexes", "dexterity", "agility", "speed", "reflex"): r"dodg\w*|duck\w*|catch|jump\w*|leap\w*|dash\w*|evad\w*|parr\w*|balanc\w*|flip|climb\w*|twist|react\w*|slip|vault|roll away|scramble|swerve",
     ("aiming", "aim", "marksmanship", "accuracy", "shooting"): r"shoot\w*|aim\w*|fire|snip\w*|hurl\w*|target|toss|throw|launch",
     ("stamina", "endurance", "constitution", "toughness", "vitality"): r"run|sprint\w*|endur\w*|march\w*|swim\w*|outlast|keep going|push through|haul|trek|survive|hold my breath",
-    ("magic", "arcana", "sorcery"): r"cast\w*|spell\w*|conjur\w*|channel\w*|enchant\w*|invok\w*|ward\w*|summon\w*|magic",
-    ("knowledge", "intelligence", "lore", "wit"): r"recall\w*|remember\w*|study|studi\w*|analy[sz]\w*|identif\w*|recogni[sz]\w*|examin\w*|investigat\w*|deduc\w*|figure out|translat\w*|diagnos\w*|repair\w*|decipher\w*|work out",
-    ("willpower", "wisdom", "resolve", "spirit", "composure"): r"resist\w*|focus\w*|concentrat\w*|steel|refus\w*|hold firm|persist\w*|withstand|ignor\w* the pain|stay calm|stay focused|overcome fear",
+    ("magic", "arcana", "sorcery", "mana"): r"cast\w*|spell\w*|conjur\w*|channel\w*|enchant\w*|invok\w*|ward\w*|summon\w*|magic",
+    ("knowledge", "intelligence", "lore", "wit", "int"): r"recall\w*|remember\w*|study|studi\w*|analy[sz]\w*|identif\w*|recogni[sz]\w*|examin\w*|investigat\w*|deduc\w*|figure out|translat\w*|diagnos\w*|repair\w*|decipher\w*|work out",
+    ("willpower", "wisdom", "resolve", "spirit", "composure", "divinity"): r"pray\w*|bless\w*|purif\w*|resist\w*|focus\w*|concentrat\w*|steel|refus\w*|hold firm|persist\w*|withstand|ignor\w* the pain|stay calm|stay focused|overcome fear",
     ("recovery", "regeneration", "healing", "resilience"): r"recover\w*|heal\w*|rest|bandag\w*|treat|patch up|regenerat\w*|tend",
-    ("charisma", "persuasion", "presence", "social"): r"persuad\w*|convinc\w*|charm\w*|negotiat\w*|bargain\w*|bluff\w*|lie|intimidat\w*|inspir\w*|reassur\w*|haggl\w*|talk (?:him|her|them) (?:into|out)",
+    ("charisma", "persuasion", "presence", "social"): r"persuad\w*|convinc\w*|charm\w*|negotiat\w*|bargain\w*|bluff\w*|lie to|lie about|lying to|intimidat\w*|inspir\w*|reassur\w*|haggl\w*|talk (?:him|her|them) (?:into|out)|apolog\w*|i[’']?m (?:really |so |very |truly )?sorry|plead\w*|beg|begs|begging|begged|flirt\w*|compliment\w*|comfort\w*|consol\w*|smooth\w* (?:it|things) over|seduc\w*|entic\w*|tease|teasing|make amends|make it up to|win (?:her|him|them) over|schmooz\w*",
     ("perception", "awareness", "observation", "alertness"): r"spot|notice|search\w*|listen\w*|track\w*|scout\w*|watch\w*|look for|scan\w*",
     ("stealth", "sneaking", "subterfuge"): r"sneak\w*|hid(?:e|ing)|creep\w*|slip past|shadow\w*|steal\w*|pick(?:ing)? (?:the|a) lock",
 }
@@ -232,21 +273,53 @@ def check_stats(story: dict) -> list[dict]:
             continue
         v = num((tr.get("me") or {}).get(f["id"].split(".", 1)[1]))
         out.append({"id": f["id"], "label": f["label"], "value": v})
+    for f in tracker.active_fields(story):       # stats written as a grade, F to SSS, with an optional gauge ("C-[40/100]"): read as a number so they can be rolled against
+        if f.get("kind") == "number" or not f["id"].startswith("me.") or f["label"].strip().lower() in _NOT_A_STAT:
+            continue
+        g = grade_value((tr.get("me") or {}).get(f["id"].split(".", 1)[1]))
+        if g is not None:
+            out.append({"id": f["id"], "label": f["label"], "value": g})
     return out
 
 
-def auto_stat(story: dict, move: str) -> dict | None:
-    """Which stat does this move rely on? None when it is not a risky action (a question, a command, plain talk) or no tracked stat fits."""
-    text = " ".join(move.lower().split())
-    if len(text.split()) < 3 or text.startswith(("(", "/", "?")) or text.rstrip().endswith("?"):
+# Grades F to SSS as numbers on the same 1-10 scale as number stats (F = a civilian, B = mid expert, SSS = the top), so a D20 roll adds (value - 5).
+_GRADES = {"F": 1, "E": 2, "D": 3, "C": 4, "B": 5, "A": 6.5, "S": 8, "SS": 9, "SSS": 10}
+_GRADE = re.compile(r"^\s*(SSS|SS|S|A|B|C|D|E|F)([+-])?(?=\s|\[|$)")
+
+
+def grade_value(v) -> float | None:
+    m = _GRADE.match(str(v if v is not None else ""))
+    if not m:
         return None
+    return round(_GRADES[m.group(1)] + {"+": 0.34, "-": -0.34}.get(m.group(2), 0), 2)
+
+
+_SOCIAL = {"charisma", "persuasion", "presence", "social"}      # stats whose words count in spoken lines too (an apology or a plea is said aloud)
+
+
+def _narration(text: str) -> str:
+    """The move without the spoken lines: what the player's character DOES (a physical stat must not be rolled for a word that only appears in dialogue)."""
+    t = re.sub(r"\u201c[^\u201d]*\u201d|\"[^\"]*\"", " ", text)
+    return re.sub(r"(?<![A-Za-z0-9])'(?:[^'\n]|'(?=[A-Za-z]))+'(?![A-Za-z0-9])", " ", t)
+
+
+def auto_stat(story: dict, move: str) -> dict | None:
+    """Which stat does this move rely on? None when it is not a risky action (a question, a command, plain talk, handing out stat points) or no tracked stat fits.
+    Physical stats are matched against what the character does (outside quotation marks); social ones (Charisma...) also against what they say."""
+    text = " ".join(move.lower().split())
+    if len(text.split()) < 3 or text.startswith(("(", "/", "?")) or re.sub(r"[\s'\"\u201d\u2019*)]+$", "", text).endswith("?"):
+        return None
+    if re.search(r"\b(?:assign|allocate|spend|put (?:my |the |\d+ )?points?|points? (?:in|into|on|to))\b", text):
+        return None
+    action = _narration(text)
     best, score = None, 0
     for st in check_stats(story):
         label = st["label"].strip().lower()
-        pat = next((p for names, p in STAT_WORDS.items() if label in names or any(n in label for n in names)), None)
-        s = len(re.findall(r"\b(?:" + pat + r")\b", text)) if pat else 0
-        if re.search(r"\b" + re.escape(label) + r"\b", text):
-            s += 2
+        names, pat = next(((names, p) for names, p in STAT_WORDS.items() if label in names or any(n in label for n in names)), (None, None))
+        hay = text if names and _SOCIAL & set(names) else action
+        s = len(re.findall(r"\b(?:" + pat + r")\b", hay)) if pat else 0
+        if re.search(r"\b(?:my|use|using|with|roll|check|test|try|trying to)\s+" + re.escape(label) + r"\b", action):
+            s += 2           # the stat is named as the thing being used ("with my strength"), not merely mentioned
         if s > score:
             best, score = st, s
     return best

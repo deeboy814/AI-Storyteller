@@ -103,6 +103,10 @@ function renderNarrative(streamText = null, scroll = "bottom") {   // scroll: "b
     html += '<div class="empty">Your story is ready.<br><button class="primary" id="eBegin">Begin the story</button></div>';
   box.innerHTML = html;
   if ($("eBegin")) $("eBegin").onclick = () => send("Begin the story.");
+  box.querySelectorAll(".altpick").forEach((b) => b.onclick = async () => {
+    try { story = await api(`/stories/${story.id}/opening/choose`, { method: "POST", body: { index: +b.dataset.i } }); renderAll(false); }
+    catch (err) { alert(err.message); }
+  });
   box.style.scrollBehavior = "auto";
   if (scroll === "keep") box.scrollTop = keepY;
   else if (scroll === "anchor") { const mine = box.querySelectorAll(".turn.user"), el = mine[mine.length - 1]; if (el) box.scrollTop += el.getBoundingClientRect().top - box.getBoundingClientRect().top - 12; }
@@ -124,10 +128,11 @@ function renderSidebar() {
   let h = "";
   const av = (story && story.avatar) || {};
   const panel = panelSidebarHtml();   // the tracked side panel (scene, you, characters), when there is data
+  h += rollCardHtml();   // the latest dice roll, only while the most recent move had one
   const now = nowShowAvatar ? "" : nowCardHtml();   // who the player is talking to covers the avatar for now
   if (now) h += now;
   else if (story && story.art && story.art.now_card && nowShowAvatar && nowCardHtml()) h += `<div class="nowflipbar"><button class="nowflip" title="Show who I am talking to">↩ who I'm talking to</button></div>`;
-  if (!now && story && (story.avatar_image || (av.name && !panel))) {
+  if (!now && story && !panel && (story.avatar_image || av.name)) {
     h += "<h4>You</h4>" + (story.avatar_image ? `<img class="avatar" src="${story.avatar_image}" alt="">` : "") + (av.name ? `<div><b>${esc(av.name)}</b></div>` : "");
   }
   h += panel;
@@ -206,8 +211,24 @@ async function fetchReplies(manual = true) {
   catch (e) { renderReplies(false, e.message); }
   repliesFetching = false;
 }
+// The story's own command buttons (a package can ship them: Status, Shop, Assign points...): a row above the input box.
+function renderCmdBar() {
+  const bar = $("cmdBar"), list = (story && story.commands) || [];
+  if (!bar) return;
+  if (!list.length) { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
+  bar.classList.remove("hidden");
+  bar.innerHTML = list.map((c, i) => `<button data-i="${i}" title="${esc(c.kind === "points" ? "Spend your stat points (the app does the arithmetic, no AI call)" : c.kind === "edit" ? "Puts this in the box so you can finish it: " + c.text : "Sends: " + c.text)}">${esc(c.label)}</button>`).join("");
+  bar.querySelectorAll("button").forEach((b) => b.onclick = () => {
+    const c = list[+b.dataset.i]; if (!c || !story) return;
+    if (c.kind === "points") { showPoints(); return; }
+    if (c.kind === "edit") { const t = $("input"); t.value = (t.value.trim() ? t.value.trim() + " " : "") + c.text; autosize(); t.focus(); return; }
+    if (!busy) send(c.text);
+  });
+}
 function renderAll(keepScroll = true) { renderHeader(); renderNarrative(null, keepScroll ? "keep" : "bottom");   // stays where the reader is; only opening a story jumps to the end
-  renderSidebar(); renderChips(); renderReplies(); setBusy(busy); }
+  renderSidebar(); renderChips(); renderReplies(); setBusy(busy);
+  renderCmdBar();
+  if (typeof renderLeft === "function") { renderLeft(); loadLeftList(); } }
 function setBusy(b) {
   busy = b;
   for (const id of ["btnSend", "btnUndo", "btnRetry", "btnIllustrate", "input"]) $(id).disabled = b || !story;
@@ -234,10 +255,11 @@ async function send(text, override, forceBudget = false, note = "", redraw = fal
   const own = story.models && story.models.story;   // the story's own choice is used by the server; the header menu only matters for older stories
   const [provider, model] = override ? override.split("|") : own ? [undefined, undefined] : ($("modelSelect").value || "|").split("|");
   $("input").value = ""; autosize();
+  if (window.matchMedia("(pointer: coarse)").matches) $("input").blur();   // phone: close the keyboard now so it stays closed while the reply is written
   setBusy(true); renderChips();
   // optimistic display of the player's line + streaming reply
   story.turns.push({ role: "user", text, ...(cmds.length ? { cmds, cmd_opts: cmdOpts } : {}), ...(roll ? { roll } : {}) });
-  let acc = "", failed = null;
+  let acc = "", failed = null, srvNote = "";
   renderNarrative("", "anchor"); genStatus("writing", 0);
   try {
     const r = await fetch(`/api/stories/${story.id}/turn`, {
@@ -259,6 +281,7 @@ async function send(text, override, forceBudget = false, note = "", redraw = fal
         if (ev.t === "delta") { acc += ev.v; const ty = $("narrative").querySelector(".typing"); if (ty) ty.innerHTML = md(stripState(acc)); genStatus("writing", stripState(acc).split(/\s+/).filter(Boolean).length); }
         else if (ev.t === "done") story = ev.story;
         else if (ev.t === "error") failed = ev.v;
+        else if (ev.t === "note") srvNote = ev.v;
       }
     }
   } catch (e) { failed = e.message; }
@@ -277,6 +300,7 @@ async function send(text, override, forceBudget = false, note = "", redraw = fal
     $("narrative").insertAdjacentHTML("beforeend", `<div class="err">${esc(failed.replace(/^BUDGET: /, ""))}</div>`);
     $("narrative").scrollTop = $("narrative").scrollHeight;
   }
+  if (srvNote && !failed) $("narrative").insertAdjacentHTML("beforeend", `<div class="hint">${esc(srvNote)}</div>`);
   if (!failed) { genStatus("done", words); refreshTracker(); watchBackdrop(); watchNow(); wasAtBottom = false; if (narrativeAtBottom() && $("narrative").scrollHeight <= $("narrative").clientHeight + 40) maybeShowReplies(); }
   const lastT = story.turns[story.turns.length - 1];
   if (!failed && lastT && lastT.role === "assistant" && !(lastT.images || []).length && ((story.art && story.art.auto && lastT.scene) || redraw)) illustrate(story.turns.length - 1);
@@ -284,7 +308,8 @@ async function send(text, override, forceBudget = false, note = "", redraw = fal
   if (!failed && story.rule_check) watchRuleCheck(story.turns.length - 1);
   refreshBudget();
   if (failed && failed.startsWith("BUDGET:") && confirm(failed.slice(8) + "\n\nSend anyway, this once?")) { $("input").value = ""; return send(text, override, true, note, redraw); }
-  $("input").focus();
+  if (window.matchMedia("(pointer: coarse)").matches) { if (document.activeElement === $("input")) $("input").blur(); }
+  else $("input").focus();   // on a phone, focusing here would pop the keyboard up over the story the moment it finishes writing
 }
 // Rule check (story option): fetch the helper's verdict on the newest reply and show it under the reply.
 async function watchRuleCheck(i) {
@@ -435,6 +460,7 @@ function showPlayer() {
       <div class="avrow"><div id="avPreview">${preview()}</div>
         <div><input type="file" id="avFile" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:4px">
         <div class="actions" style="justify-content:flex-start;margin-top:8px"><button id="avGen" title="Draws four pictures from the Avatar fields below with this story's picture maker, and you pick one">✨ Draw 4 options from the info below</button><button class="danger" id="avRemove">Remove image</button></div>
+        <div class="actions" style="justify-content:flex-start;margin-top:4px"><button id="avBuild" title="Only have a name? The text model fills the empty boxes below from the story prompt, and you review them before saving">🪄 Build from story</button><span class="hint" id="avBuildNote"></span></div>
         <div id="avCand" class="hint">Upload your own, or generate one from the name, age, gender and appearance below (a safe-for-work description is written from them first). Uploads and removals apply immediately (PNG/JPEG/WebP/GIF, up to 8 MB). The picture also joins the Cast as you, so scenes can use it as a face reference; whether it is shown in scenes is up to your story prompt.</div></div></div>
       ${field("name", "Name (replaces {user} in the story prompt)")}
       <div class="grid2" style="grid-template-columns:1fr 1fr">${field("gender", "Gender")}${field("age", "Age")}</div>
@@ -481,6 +507,17 @@ function showPlayer() {
       else { if (fresh) avOpts = []; avOpts.push(...job.result.candidates); avLook = job.result.look; showAvOpts(); }
     } catch (err) { $("avCand").textContent = err.message; }
     $("avGen").disabled = false;
+  };
+  $("avBuild").onclick = async () => {
+    const avatar = {}; for (const k of ["name", "gender", "age", "appearance", "personality", "background", "abilities"]) avatar[k] = $("av_" + k).value;
+    const note = $("avBuildNote"); $("avBuild").disabled = true; note.textContent = "Reading the story prompt…";
+    try {
+      const r = await api(`/stories/${story.id}/avatar/suggest`, { method: "POST", body: { avatar } });
+      let n = 0;
+      for (const [k, v] of Object.entries(r.fields)) { const el = $("av_" + k); if (el && v && !el.value.trim()) { el.value = v; n++; } }   // only empty boxes are filled; what you wrote stays
+      note.textContent = n ? `Filled ${n} empty box${n > 1 ? "es" : ""}. Read them, change what you like, then press Save.` : "Every box already has text, so nothing was changed.";
+    } catch (err) { note.textContent = err.message; }
+    $("avBuild").disabled = false;
   };
   $("avGen").onclick = () => genAvatar(true);
   $("avRemove").onclick = async () => { story = await api(`/stories/${story.id}/avatar-image`, { method: "DELETE" }); refresh(); };
@@ -576,6 +613,7 @@ async function showSettings(tab = "AI") {
       <div class="aiBox" id="rtStatus"><span class="hint">Checking…</span></div>
       <div class="actions" style="justify-content:flex-start;margin-top:6px"><button id="rtRefresh">↻ Refresh</button><button id="rtFree" title="Unloads local text models and stops (or frees) ComfyUI right now">Free memory now</button></div>
       <h3>Text models (Ollama)</h3>
+      <label class="chk top"><input type="checkbox" id="sLocal" ${config.local_mode ? "checked" : ""}><span><b>Local-model mode (steadier writing)</b><span class="hint">One switch for the app's own writing helpers, which cost no AI calls. With any model, online or local: removes the unfinished last sentence of a reply cut off by the length limit, closes unclosed italics, bold and picture tags, and tells the narrator which phrases it keeps repeating and when replies drift from the story's usual length. With Ollama models only (an online model gains nothing from them): keeps the prompt inside the model's window (dropping the oldest history if needed, and folding history into the summary sooner), forces clean JSON from the helper jobs, uses steadier sampling, runs helper jobs one at a time after the reply is written, fills the right-now card and scene-picture prompts without the AI (mood read from the words around a name when there is no portrait tag), and logs key events once every third reply. Turn it off to go back to normal.</span></span></label>
       <label class="chk top"><input type="checkbox" id="sRtText" ${config.rt_text ? "checked" : ""}><span><b>Manage local text models automatically</b><span class="hint">When you open a story (or change its AI), its local model is loaded and ready, and local models no story is using are unloaded to free video memory. Turn off to leave Ollama alone.</span></span></label>
       <div class="grid2">${field("Unload an idle model after", `<input id="sKeep" value="${esc(config.keep_alive || "30m")}">`, "e.g. 10m, 30m, 2h. Ollama frees the model itself after this much time without a turn; it reloads automatically at your next turn.")}<div></div><div></div></div>
       <h3>Picture generator (ComfyUI)</h3>
@@ -724,7 +762,7 @@ async function showSettings(tab = "AI") {
     config.sidebar_default_mode = $("sbDefault").value;
     const styleDir = styleBox.get(), styleChanged = styleDir !== (story ? (story.art || {}).direction || "" : config.default_art_direction || "");
     if (styleChanged || styleDir) config.default_art_direction = styleDir;   // new stories start with it
-    config.rt_text = $("sRtText").checked; config.rt_comfy = $("sRtComfy").checked; config.rt_comfy_idle_min = +$("sRtIdle").value || 15; config.rt_comfy_mode = $("sRtMode").value; config.rt_comfy_cmd = $("sRtCmd").value.trim(); config.rt_swap = $("sRtSwap").checked;
+    config.local_mode = $("sLocal").checked; config.rt_text = $("sRtText").checked; config.rt_comfy = $("sRtComfy").checked; config.rt_comfy_idle_min = +$("sRtIdle").value || 15; config.rt_comfy_mode = $("sRtMode").value; config.rt_comfy_cmd = $("sRtCmd").value.trim(); config.rt_swap = $("sRtSwap").checked;
     config.avatar_library = $("sAvLib").checked; config.reuse_art = $("sReuse").checked;
     config.lan_access = $("sLan").checked;
     config.keep_warm = $("sWarm").checked; config.keep_warm_hours = +$("sWarmH").value || 2;
@@ -778,7 +816,13 @@ async function openStory(id) {
   localStorage.setItem("story", id);
   syncModelSelect(); hideHome(); renderAll(false); applyTheme(config); refreshCache(); refreshArtSuggestions(); runtimeSelect(); refreshBudget();
   api(`/stories/${id}/beats/ensure`, { method: "POST" }).catch(() => {});
-  setTimeout(() => maybeAskPoints(), 600);        // stat points waiting at the start of a story: offer the assign dialog once      // the first time: read the story prompt for scheduled events (background)
+  startupAsks(id);         // a new game-like story (stats and levels): ask once how dice should work      // the first time: read the story prompt for scheduled events (background)
+}
+async function startupAsks(id) {   // what a story asks when it is opened, in this order: set-up first (who you are, art, adult content), then stat points, then dice
+  const same = () => story && story.id === id;
+  if (typeof maybeStorySetup === "function") { await new Promise((ok) => setTimeout(ok, 300)); if (!same()) return; await maybeStorySetup(); await new Promise((ok) => setTimeout(ok, 300)); if (!same()) return; }
+  await maybeAskPoints(); if (!same()) return;
+  setTimeout(() => { if (same()) maybeAskDice(); }, 800);
 }
 function runtimeSelect() {   // local-model auto-management (Settings → Local models): load what this story needs, release the rest
   if (story && config && (config.rt_text || config.rt_comfy)) api("/runtime/select", { method: "POST", body: { story_id: story.id } }).catch(() => {});
@@ -828,7 +872,7 @@ bindTools();
   const setSide = on => { sb.classList.toggle("open", on); document.body.classList.toggle("sideopen", on); tab.textContent = on ? "›" : "‹"; tab.title = on ? "Close the status panel" : "Open the status panel"; };
   $("btnSide").onclick = () => setSide(!sb.classList.contains("open"));
   tab.onclick = () => setSide(!sb.classList.contains("open"));
-  document.addEventListener("click", e => { if (sb.classList.contains("open") && !e.target.closest("#sidebar, #sideTab, #btnSide, .modal, #modal")) setSide(false); });
+  document.addEventListener("click", e => { if (sb.classList.contains("open") && e.target.isConnected && !e.target.closest("#sidebar, #sideTab, #btnSide, .modal, #modal")) setSide(false); });   // a tap on a panel tab redraws the panel, so its target is already detached: that is not a tap outside
   let sx = 0, sy = 0, st = 0;
   document.addEventListener("touchstart", e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st = Date.now(); }, { passive: true });
   document.addEventListener("touchend", e => {
@@ -866,10 +910,13 @@ $("modelSelect").onchange = async (e) => {
 };
 
 (async function init() {
-  await loadModels();
-  const list = await api("/stories");
-  const last = localStorage.getItem("story");
-  const id = list.find((s) => s.id === last) ? last : list[0] && list[0].id;
-  if (id) await openStory(id); else renderAll(false);
-  showHome();   // start on the Home screen; the last story is already loaded behind it
+  try {
+    await loadModels();
+    const list = await api("/stories");
+    const last = localStorage.getItem("story");
+    const id = list.find((s) => s.id === last) ? last : list[0] && list[0].id;
+    if (id) await openStory(id); else renderAll(false);
+    await showHome();   // start on the Home screen; the last story is already loaded behind it
+  } finally { document.body.classList.remove("booting"); }   // the story screen stays hidden until Home is up, so it never flashes first
+  setTimeout(() => { if (typeof maybeFirstRun === "function") maybeFirstRun(); }, 300);
 })();

@@ -9,7 +9,9 @@ To add a new provider type, write one function and register it in STREAMERS.
 on a message. Those flags mark prompt-cache breakpoints (Claude). Other providers ignore them, but the
 prompt layout is the same, so OpenAI-style automatic prefix caching and Ollama's KV-cache reuse also hit.
 """
+import asyncio
 import json
+import re
 from typing import AsyncIterator
 
 import httpx
@@ -77,6 +79,11 @@ async def _ollama(p, model, system, messages, temperature, max_tokens, num_ctx, 
         "keep_alive": extra.get("keep_alive") or "30m",
         "options": {"temperature": temperature, "num_predict": max_tokens, "num_ctx": num_ctx},
     }
+    if extra.get("local"):      # Local mode (Settings): steadier sampling for prose, and valid JSON forced for the helpers that ask for a JSON object
+        if JSON_ASK.search(system_text(system)):
+            body["format"] = "json"
+        elif temperature >= 0.6:
+            body["options"].update({"top_p": 0.92, "min_p": 0.05, "repeat_penalty": 1.08})
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as c:
             async with c.stream("POST", url, json=body) as r:
@@ -94,6 +101,8 @@ async def _ollama(p, model, system, messages, temperature, max_tokens, num_ctx, 
                         # prompt_eval_count is the TOTAL prompt size; how long it took to read is what shows reuse.
                         ev = d.get("eval_duration") or 0
                         yield Usage(
+                            cut=d.get("done_reason") == "length",      # stopped by the reply-length limit, not finished
+                            truncated=bool(extra.get("local") and d.get("prompt_eval_count", 0) >= num_ctx - 8),   # the model read a full window: the oldest text was cut off
                             input=d.get("prompt_eval_count", 0),
                             prompt_ms=round((d.get("prompt_eval_duration") or 0) / 1e6),
                             output=d.get("eval_count", 0),
@@ -137,7 +146,7 @@ async def _anthropic(p, model, system, messages, temperature, max_tokens, num_ct
         "model": model,
         "system": sys_out,
         "messages": msgs,
-        "max_tokens": max_tokens + int(extra.get("thinking_headroom") or 0),
+        "max_tokens": max_tokens + (int(extra.get("thinking_headroom") or 0) if extra.get("thinking") else 0),   # headroom only when Claude thinks; otherwise Max reply tokens is the real limit
         "temperature": min(temperature, 1.0),
         "stream": True,
     }
@@ -169,6 +178,8 @@ async def _anthropic(p, model, system, messages, temperature, max_tokens, num_ct
                     elif t == "message_delta":
                         u = d.get("usage", {})
                         use["output"] = u.get("output_tokens", use["output"])
+                        if (d.get("delta") or {}).get("stop_reason") == "max_tokens":
+                            use["cut"] = True          # stopped by the reply-length limit, not finished
                         use["thinking"] = (u.get("output_tokens_details") or {}).get("thinking_tokens", 0) or 0
                     elif t == "error":
                         raise ProviderError(d["error"].get("message", "unknown error"))
@@ -256,6 +267,7 @@ async def _openai(p, model, system, messages, temperature, max_tokens, num_ctx, 
                         q.add("no_effort"); continue
                     raise ProviderError(f"400 from {r.url.host}: {text[:500]}")
                 await _check(r)
+                cut = False
                 async for line in r.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -266,8 +278,10 @@ async def _openai(p, model, system, messages, temperature, max_tokens, num_ctx, 
                     u = d.get("usage")
                     if u:
                         cached = ((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
-                        yield Usage(input=max(0, (u.get("prompt_tokens") or 0) - cached), cache_read=cached, cache_write=0, output=u.get("completion_tokens") or 0)
+                        yield Usage(input=max(0, (u.get("prompt_tokens") or 0) - cached), cache_read=cached, cache_write=0, output=u.get("completion_tokens") or 0, cut=cut)
                     for ch in d.get("choices", []):
+                        if ch.get("finish_reason") == "length":
+                            cut = True
                         chunk = (ch.get("delta") or {}).get("content")
                         if chunk:
                             yield chunk
@@ -278,11 +292,39 @@ async def _openai(p, model, system, messages, temperature, max_tokens, num_ctx, 
 STREAMERS = {"ollama": _ollama, "anthropic": _anthropic, "openai": _openai}
 
 
+# Local mode: one local GPU serves one request well. The narrator goes first; helper jobs (side panel, key events...) run one at a time and wait
+# until no reply is being written.
+JSON_ASK = re.compile(r"ONLY (?:a )?JSON(?: patch)?(?: in the shape)?:?\s*\{")
+_pace = {"narr": 0, "lock": None}
+
+
+async def _paced(provider, extra, gen):
+    if not (extra.get("local") and provider.get("type") == "ollama"):
+        async for c in gen:
+            yield c
+        return
+    if extra.get("narrator"):
+        _pace["narr"] += 1
+        try:
+            async for c in gen:
+                yield c
+        finally:
+            _pace["narr"] -= 1
+        return
+    if _pace["lock"] is None:
+        _pace["lock"] = asyncio.Lock()
+    async with _pace["lock"]:
+        while _pace["narr"] > 0:
+            await asyncio.sleep(0.3)
+        async for c in gen:
+            yield c
+
+
 async def stream_chat(provider, model, system, messages, temperature=0.9, max_tokens=2048, num_ctx=8192, **extra) -> AsyncIterator:
     fn = STREAMERS.get(provider["type"])
     if not fn:
         raise ProviderError(f"Unknown provider type: {provider['type']}")
-    async for chunk in fn(provider, model, system, messages, temperature, max_tokens, num_ctx, extra):
+    async for chunk in _paced(provider, extra, fn(provider, model, system, messages, temperature, max_tokens, num_ctx, extra)):
         if isinstance(chunk, Usage):
             try:   # every call is logged for the usage report (see usage.py); never let that break a reply
                 usage.record({"kind": "text", "provider": provider["id"], "model": model, "ttl": extra.get("cache_ttl"),

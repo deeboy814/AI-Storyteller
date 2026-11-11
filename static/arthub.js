@@ -26,7 +26,7 @@ function showArtHub(tab = "Overview") {
       ${card("🌄", "Backgrounds", `Showing: ${esc(bd.name || (bd.url ? "a picture you chose" : "nothing yet"))}<br>Changes automatically: ${onoff(a.auto_backdrop)}${a.dynamic_backdrop ? " (also for dramatic moments)" : ""} · screen display: ${onoff(config && config.ui_backdrop)}`, `<button id="hBg">Backgrounds…</button>`)}
       ${card("📖", "Cover", story.cover ? "Has a cover on the Home card" : "No cover yet", `<button id="hCover">Cover art…</button>`)}
       ${card("🖼", "Intro panels", `${intro} picture${intro === 1 ? "" : "s"} shown at the start of the story`, `<button id="hIntro">Intro panels…</button>`)}
-      ${card("🎬", "Scene pictures", `Auto-illustrate: ${onoff(a.auto)} · a picture most turns: ${onoff(a.scene_often)} · shown ${({ panel: "in the side panel", banner_top: "as a banner above the narration", banner_bottom: "as a banner below the narration" })[a.scene_where] || "under the reply"}`, `<button id="hIllus" ${busy ? "disabled" : ""}>Illustrate the latest reply</button><button id="hStyle1">Options…</button>`)}
+      ${card("🎬", "Scene pictures", `Auto-illustrate: ${onoff(a.auto)} · a picture most turns: ${onoff(a.scene_often)}${(a.scene_gap || 1) > 1 ? " · one every " + a.scene_gap + " turns" : ""} · shown ${({ panel: "in the side panel", banner_top: "as a banner above the narration", banner_bottom: "as a banner below the narration" })[a.scene_where] || "under the reply"}`, `<button id="hIllus" ${busy ? "disabled" : ""}>Illustrate the latest reply</button><button id="hStyle1">Options…</button>`)}
     </div>
     <div id="hubStyle" class="hidden">${artTabHtml().replace('id="tabArt" class="hidden"', 'id="tabArt"')}
       <div class="actions sticky"><span class="hint" id="hubStyleNote"></span><span style="flex:1"></span><button class="primary" id="hubStyleSave">Save</button></div></div>
@@ -166,6 +166,8 @@ async function showSpecies(nav = {}) {
     return `<div class="aiBox spcard" data-key="${esc(key)}"><b>${esc(sp.name)}</b> <small class="muted">${m.length} character${m.length === 1 ? "" : "s"}: ${esc(m.map((c) => c.name).join(", ") || "none yet")}</small>
       <div class="bioTop">${sp.reference_url ? `<img class="bioimg" src="${thumbUrl(sp.reference_url, 360)}" alt="reference">` : '<div class="noart" style="width:110px;height:140px">No reference yet</div>'}
       <div style="flex:1"><label>What is true of the whole species <small class="hint">(skin or covering, eyes, crests, build, clothing: added to every member's picture prompt)</small></label><textarea class="short spDesc" rows="3">${esc(sp.description || "")}</textarea>
+        <label>Story traits <small class="hint">(abilities, weaknesses, senses, customs: given to the narrator so it stays consistent)</small></label><textarea class="short spTraits" rows="3">${esc(sp.traits || "")}</textarea>
+        <div class="actions" style="justify-content:flex-start;margin:2px 0 6px"><button class="spWrite" title="The helper model drafts both boxes from the story prompt and this species' members. Nothing is saved until you press Save.">✨ Write both from the story</button></div>
         <label>Picture maker for this species <small class="hint">(a character can still choose their own)</small></label><select class="spMaker"></select>
         <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><select class="spPick">${withPic.map((c) => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join("") || "<option value=''>(no pictures yet)</option>"}</select>
           <button class="spUse" ${withPic.length ? "" : "disabled"}>Use their picture as the reference</button>${sp.reference_url ? '<button class="spClear">Clear the reference</button>' : ""}</div></div></div></div>`;
@@ -175,15 +177,16 @@ async function showSpecies(nav = {}) {
     <div class="actions" style="justify-content:flex-start"><input id="spNew" placeholder="Add a species, e.g. Elf" style="max-width:220px"><button id="spAdd">Add</button><span style="flex:1"></span><span class="hint" id="spNote"></span><button class="primary" id="spSave">Save</button></div>
     <div class="actions" style="margin-top:8px"><button id="mClose">Close</button></div>`);
   $("mClose").onclick = () => { closeModal(); renderAll(); };
-  const body = () => ({ species: [...document.querySelectorAll(".spcard")].map((el) => ({ name: (story.species[el.dataset.key] || {}).name || el.dataset.key, description: el.querySelector(".spDesc").value, maker: el.querySelector(".spMaker").value })) });
+  const body = () => ({ species: [...document.querySelectorAll(".spcard")].map((el) => ({ name: (story.species[el.dataset.key] || {}).name || el.dataset.key, description: el.querySelector(".spDesc").value, traits: el.querySelector(".spTraits").value, maker: el.querySelector(".spMaker").value })) });
   document.querySelectorAll(".spcard").forEach((el) => {
     const key = el.dataset.key; makerSelect(el.querySelector(".spMaker"), choices, (story.species[key] || {}).maker || "");
     el.querySelector(".spUse").onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "POST", body: { slug: el.querySelector(".spPick").value } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } };
+    el.querySelector(".spWrite").onclick = async (e) => { e.target.disabled = true; $("spNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/write`, { method: "POST" }); el.querySelector(".spDesc").value = r.description; el.querySelector(".spTraits").value = r.traits; $("spNote").textContent = "Drafted. Edit if you like, then Save."; } catch (err) { $("spNote").textContent = err.message; } e.target.disabled = false; };
     const clr = el.querySelector(".spClear"); if (clr) clr.onclick = async () => { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "DELETE" }); showSpecies(nav); };
   });
   $("spAdd").onclick = async () => {
     const n = $("spNew").value.trim(); if (!n) return;
-    const b = body(); b.species.push({ name: n, description: "", maker: "" });
+    const b = body(); b.species.push({ name: n, description: "", traits: "", maker: "" });
     try { story = await api(`/stories/${story.id}/species`, { method: "PUT", body: b }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; }
   };
   $("spSave").onclick = async () => { try { story = await api(`/stories/${story.id}/species`, { method: "PUT", body: body() }); $("spNote").textContent = "✔ Saved."; } catch (err) { $("spNote").textContent = err.message; } };

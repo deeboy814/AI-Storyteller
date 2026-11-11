@@ -6,6 +6,7 @@ import os
 import io
 import zipfile
 import json
+import zlib
 import re
 import shutil
 import subprocess
@@ -23,7 +24,7 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import backup, beats, bugreport, characters, clock, images, lore, rules, importer, localrt, portrait_import, prompting, providers, store, tracker, usage
+from . import appstatus, backup, localfix, beats, bugreport, characters, clock, images, lore, rules, importer, localrt, portrait_import, prompting, providers, store, tracker, usage
 
 ROOT = Path(__file__).resolve().parent.parent
 # ---------------- keep-warm: refresh Claude's prompt cache while you're away ----------------
@@ -333,7 +334,73 @@ def _extras(cfg: dict) -> dict:
         "thinking": bool(cfg.get("claude_thinking", False)),
         "effort": cfg.get("claude_effort", "low") or None,
         "thinking_headroom": int(cfg.get("thinking_headroom", 4096)),
+        "local": bool(cfg.get("local_mode")),
     }
+
+
+def _local_on(cfg: dict, prov: dict | None) -> bool:
+    """Local-model mode applies to Ollama models only."""
+    return bool(cfg.get("local_mode")) and (prov or {}).get("type") == "ollama"
+
+
+def _steady_on(cfg: dict) -> bool:
+    """The code-side writing fixes (cut-off trim, format repair, variety and length notes) work with any provider, so the one switch turns them on everywhere."""
+    return bool(cfg.get("local_mode"))
+
+
+def _est_tokens(text: str) -> int:
+    return int(len(text) / 3.4) + 1          # rough: English prose and JSON average about 3.4 characters per token
+
+
+def _fit_context(system, messages: list[dict], cfg: dict) -> tuple[int, bool]:
+    """Local mode: drop the oldest history until the request fits the model's window (a full window makes Ollama silently cut the START, which is the
+    story prompt). Returns (messages dropped, still too big). The newest exchange is always kept."""
+    room = int(cfg.get("num_ctx", 8192)) - min(int(cfg.get("max_tokens", 1500)), 1500) - 200
+    base = _est_tokens(providers.system_text(system))
+    dropped = 0
+    while len(messages) > 2 and base + sum(_est_tokens(m["content"]) for m in messages) > room:
+        del messages[:2]
+        dropped += 2
+        if messages and messages[0]["role"] != "user":
+            del messages[0]
+            dropped += 1
+    return dropped, base + sum(_est_tokens(m["content"]) for m in messages) > room
+
+
+def _clean_alts(items) -> list[dict]:
+    out = []
+    for a in items if isinstance(items, list) else []:
+        if isinstance(a, dict) and str(a.get("text", "")).strip():
+            out.append({"name": " ".join(str(a.get("name", "")).split())[:60] or f"Start {len(out) + 2}", "text": str(a["text"]).strip()[:12000]})
+    return out[:6]
+
+
+def _apply_alt_openings(s: dict, body) -> None:
+    if body.alt_openings is not None:
+        s["alt_openings"] = _clean_alts(body.alt_openings)
+    if body.opening_name is not None:
+        s["opening_name"] = " ".join(body.opening_name.split())[:60]
+
+
+class OpeningChoiceIn(BaseModel):
+    index: int       # position in the story's alternate openings
+
+
+@app.post("/api/stories/{sid}/opening/choose")
+def choose_opening(sid: str, body: OpeningChoiceIn):
+    """Begin with one of the author's alternate openings instead of the main one. Only before the first move; the two simply trade places, so you can switch back."""
+    s = _story(sid)
+    if s["turns"]:
+        raise HTTPException(400, "The story has already begun, so its opening can no longer be changed.")
+    alts = s.get("alt_openings") or []
+    if not 0 <= body.index < len(alts):
+        raise HTTPException(400, "There is no such opening.")
+    cur = {"name": s.get("opening_name") or "Main opening", "text": s.get("opening", "")}
+    s["opening"], s["opening_name"] = alts[body.index]["text"], alts[body.index]["name"]
+    alts[body.index] = cur
+    s["alt_openings"] = alts
+    store.save_story(s)
+    return s
 
 
 class StoryIn(BaseModel):
@@ -348,6 +415,7 @@ class StoryIn(BaseModel):
     auto_replies: bool | None = None      # suggest three replies after every narrator reply
     rule_check: bool | None = None        # after every reply, the small helper checks it against the story's own rules
     clock: dict | None = None             # world clock settings {mode: auto|on|off, start: "06:00", minutes: 30}
+    app_status: bool | None = None        # the app writes the status line itself (the narrator leaves it out)
     format_fix: bool | None = None        # the app tidies a stray status line (moves it to the end, drops a duplicate) instead of flagging it
     code_check: bool | None = None        # the app checks each reply's format and numbers itself (free); on unless switched off
     narrator_acts: bool | None = None     # the narrator may decide some of the player character's routine actions (the story prompt says how far)
@@ -355,6 +423,9 @@ class StoryIn(BaseModel):
     description: str | None = None
     prologue: str | None = None
     opening_options: list[str] | None = None
+    commands: list[dict] | None = None    # story-defined buttons above the input box: [{label, kind: send|edit|points, text}]
+    alt_openings: list[dict] | None = None   # other ways to begin: [{name, text}], chosen before the first move
+    opening_name: str | None = None          # what the main opening is called in the chooser
     endings: list[dict] | None = None
     sidebar: dict | None = None           # suggested side panel: {mode, fields, schema}
     art: dict | None = None               # art direction / setting / negative suggested by the author
@@ -770,12 +841,29 @@ def _give_default_models(s: dict) -> None:
         s["art"] = {**(s.get("art") or {}), "direction": style}
 
 
+def _clean_commands(raw) -> list[dict]:
+    """A story's own command buttons, made safe: up to 12, each {label, kind, text}. "send" puts the text in as the player's move, "edit" puts it in the input box to change first,
+    "points" opens the stat-points window (the app does the arithmetic, no AI call)."""
+    out = []
+    for c in raw if isinstance(raw, list) else []:
+        if not isinstance(c, dict):
+            continue
+        label = " ".join(str(c.get("label") or "").split())[:24]
+        kind = c.get("kind") if c.get("kind") in ("send", "edit", "points") else "send"
+        text = str(c.get("text") or "").strip()[:400]
+        if label and (text or kind == "points"):
+            out.append({"label": label, "kind": kind, "text": text})
+    return out[:12]
+
+
 def _apply_creation_fields(s: dict, body: "StoryIn") -> None:
     """The story-creation extras (everything an author can premake)."""
     if body.description is not None:
         s["description"] = body.description.strip()
     if body.prologue is not None:
         s["prologue"] = body.prologue.strip()
+    if body.commands is not None:
+        s["commands"] = _clean_commands(body.commands)
     if body.opening_options is not None:
         s["opening_options"] = [o.strip() for o in body.opening_options if o.strip()][:6]
     if body.endings is not None:
@@ -814,6 +902,7 @@ def create_story(body: StoryIn):
     s["sidebar"]["mode"] = store.load_config().get("sidebar_default_mode", "prompt")
     if body.opening:
         s["opening"] = body.opening.strip()
+    _apply_alt_openings(s, body)
     if body.opening_in_context is not None:
         s["opening_in_context"] = body.opening_in_context
     if body.auto_replies is not None:
@@ -826,14 +915,15 @@ def create_story(body: StoryIn):
         s["code_check"] = body.code_check
     if body.format_fix is not None:
         s["format_fix"] = body.format_fix
+    if body.app_status is not None:
+        s["app_status"] = body.app_status
     if body.clock is not None:
         c = body.clock
-        s["clock"] = {"mode": c.get("mode") if c.get("mode") in ("auto", "on", "off") else "auto",
-                      "start": clock.fmt(clock.parse_time(c.get("start"))) if clock.parse_time(c.get("start")) is not None else "06:00",
-                      "minutes": max(1, min(int(c.get("minutes") or 30), 720))}
+        s["clock"] = clock.clean(c)
         if not clock.is_on(s):
             (s.get("tracker") or {}).pop("_clock", None)
     _apply_creation_fields(s, body)
+    tracker.seed_starts(s)
     store.save_story(s)
     if body.nsfw:
         s["nsfw"] = True
@@ -868,6 +958,7 @@ def update_story(sid: str, body: StoryIn):
     s["use_state_block"] = body.use_state_block
     if body.opening is not None:
         s["opening"] = body.opening.strip()
+    _apply_alt_openings(s, body)
     if body.opening_in_context is not None:
         s["opening_in_context"] = body.opening_in_context
     if body.auto_replies is not None:
@@ -880,11 +971,11 @@ def update_story(sid: str, body: StoryIn):
         s["code_check"] = body.code_check
     if body.format_fix is not None:
         s["format_fix"] = body.format_fix
+    if body.app_status is not None:
+        s["app_status"] = body.app_status
     if body.clock is not None:
         c = body.clock
-        s["clock"] = {"mode": c.get("mode") if c.get("mode") in ("auto", "on", "off") else "auto",
-                      "start": clock.fmt(clock.parse_time(c.get("start"))) if clock.parse_time(c.get("start")) is not None else "06:00",
-                      "minutes": max(1, min(int(c.get("minutes") or 30), 720))}
+        s["clock"] = clock.clean(c)
         if not clock.is_on(s):
             (s.get("tracker") or {}).pop("_clock", None)
     if body.nsfw is not None:
@@ -1064,6 +1155,93 @@ def _avatar_candidates_job(kind: str, owner: str, folder: Path, base: str, s: di
     return {"job": job["id"]}
 
 
+AVATAR_BUILD_SYSTEM = ("You fill in a player's character sheet for an interactive story, from the story's own prompt, for a player who only supplied a name or a few lines. "
+    "Fit the character to the world, the setting and how newcomers begin in it. Do not give them power, rank, wealth or secrets the story prompt does not allow a newcomer; "
+    "follow any starting-ability or stat rules the prompt gives (and its units: Imperial). Keep what the CURRENT SHEET already says and only fill what is empty or vague. "
+    "Fields: gender, age (an adult), appearance (build, hair, eyes, usual clothes, one memorable detail; 2 to 3 sentences, visual facts only, safe for work), "
+    "personality (2 sentences: under pressure, wants, one flaw), background (3 to 4 lines: where from, why they are here, one hook the story can use), "
+    "abilities (stats, skills and starting inventory in the same form the story prompt uses for its player sheet; modest). "
+    'Reply with ONLY JSON: {"gender": "", "age": "", "appearance": "", "personality": "", "background": "", "abilities": ""}. Write it in the third person; use the name given.')
+
+
+class AvatarBuildIn(BaseModel):
+    avatar: dict = {}
+
+
+@app.post("/api/stories/{sid}/avatar/suggest")
+async def suggest_avatar(sid: str, body: AvatarBuildIn):
+    """Build the player's sheet from the story prompt (one text-model call). Nothing is saved: the player reviews the boxes first."""
+    s, cfg = _story(sid), store.load_config()
+    keys = ("name", "gender", "age", "appearance", "personality", "background", "abilities")
+    cur = {k: str((body.avatar or {}).get(k, "") or "").strip()[:1500] for k in keys}
+    name = cur["name"] or s.get("player_name") or "the player"
+    prompt = (s.get("base_prompt") or "").replace("{user}", name)[:24000]
+    if not prompt.strip():
+        raise HTTPException(400, "This story has no prompt to build a character from.")
+    user = f"Player name: {name}\n\nCURRENT SHEET:\n{json.dumps(cur, ensure_ascii=False)}\n\nSTORY PROMPT:\n{prompt}"
+    prov, model = _events_model(cfg, s, "player sheet")
+    out = await providers.complete(prov, model, AVATAR_BUILD_SYSTEM, [{"role": "user", "content": user}], temperature=0.7, max_tokens=1500, num_ctx=cfg["num_ctx"], **_extras(cfg))
+    j = _json_in(out)
+    if not isinstance(j, dict):
+        raise HTTPException(502, "The text model did not return a character sheet. Try again.")
+    lim = {"gender": 40, "age": 20, "appearance": 700, "personality": 400, "background": 900, "abilities": 900}
+    fields = {k: ("\n".join(" ".join(ln.split()) for ln in str(j.get(k) or "").splitlines()).strip())[:n] for k, n in lim.items()}
+    return {"fields": fields}
+
+
+AVATAR_CLUES_SYSTEM = ("You help a player invent their own character for an interactive story, from the story's prompt. Do NOT write the character: give short CLUES about what fits this world, "
+    "as example hints a player can read and then write their own. "
+    "Reply with ONLY JSON: {\"fit\": \"one sentence: who a newcomer to this world can plausibly be\", \"hints\": {\"name\": \"name style of this world, 2 to 3 examples\", "
+    "\"gender\": \"\", \"age\": \"the usual range\", \"appearance\": \"what people here look and dress like\", \"personality\": \"traits that suit the story's tone\", "
+    "\"background\": \"where a newcomer could be from and why they are here\", \"abilities\": \"what a starting character can and cannot do, in the story's own terms and units\"}}. "
+    "Each hint is under 120 characters, specific to THIS world, never generic. Respect any starting-ability or stat rules in the prompt.")
+
+
+@app.post("/api/stories/{sid}/avatar/clues")
+async def avatar_clues(sid: str):
+    """Short hints for a blank player sheet, read from the story prompt (one helper call; nothing is saved)."""
+    s, cfg = _story(sid), store.load_config()
+    prompt = (s.get("base_prompt") or "").replace("{user}", "the player")[:20000]
+    if not prompt.strip():
+        raise HTTPException(400, "This story has no prompt to read clues from.")
+    prov, model = _events_model(cfg, s, "avatar clues")
+    out = await providers.complete(prov, model, AVATAR_CLUES_SYSTEM, [{"role": "user", "content": f"STORY: {s['title']}\n\n{prompt}"}], temperature=0.5, max_tokens=900, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+    j = _json_in(out)
+    if not isinstance(j, dict) or not isinstance(j.get("hints"), dict):
+        raise HTTPException(502, "The helper model did not return clues. Try again.")
+    hints = {k: " ".join(str(j["hints"].get(k) or "").split())[:160] for k in AVATAR_FIELDS}
+    return {"fit": " ".join(str(j.get("fit") or "").split())[:240], "hints": hints}
+
+
+class SetupIn(BaseModel):
+    nsfw: bool | None = None
+    art_direction: str | None = None
+    avatar: dict | None = None        # a sheet written in the setup pop-up (empty = leave the story's own)
+    clear_avatar: bool = False        # the player chose "decide later" or an empty blank sheet: the story's own starter character is removed (the plain "you")
+    done: bool = True
+
+
+@app.post("/api/stories/{sid}/setup")
+def story_setup(sid: str, body: SetupIn):
+    """The first-start pop-up of a story: art style, adult content and the player's sheet in one save, then the story counts as set up (the pop-up never returns)."""
+    s = _story(sid)
+    if body.nsfw is not None:
+        s["nsfw"] = body.nsfw
+    if body.art_direction is not None:
+        s["art"] = {**(s.get("art") or {}), "direction": body.art_direction.strip()[:600]}
+    if body.clear_avatar and not body.avatar:
+        s["avatar"], s["player_name"], s["avatar_id"], s["avatar_image"] = {}, "", "", ""
+    if body.avatar:
+        sheet = {k: str(body.avatar.get(k, "")).strip()[:1500] for k in AVATAR_FIELDS if str(body.avatar.get(k, "")).strip()}
+        if sheet:
+            s["avatar"] = sheet
+            s["player_name"] = sheet.get("name", s.get("player_name", ""))
+    if body.done:
+        s["setup_done"] = True
+    store.save_story(s)
+    return s
+
+
 class AvatarCandIn(BaseModel):
     avatar: dict[str, str] = {}      # the form as it is now (unsaved edits count)
     count: int = 4
@@ -1130,6 +1308,9 @@ class ArtIn(BaseModel):
     dynamic_backdrop: bool = False      # opt-in (with auto_backdrop): dramatic moments (alarm, fire, battle...) get their own variant of the background
     auto_backdrop: bool = False         # opt-in: the helper model changes the screen backdrop to match where the scene is
     scene_often: bool = False           # opt-in: the narrator adds a scene picture to most replies (Places pictures cover routine room-to-room moves)
+    scene_display: str = "normal"       # how big scene pictures are shown in the story: "normal", "large" or "full" (the whole width)
+    scene_scale: str = "normal"         # local ComfyUI only: draw scene pictures on a bigger canvas ("large" 1.25x, "xl" 1.5x)
+    scene_gap: int = 1                  # fewest replies between scene pictures: 1 = no limit, 3 = at most one every third reply
     scene_where: str = "reply"          # where scene pictures show: "reply" (under the reply), "banner_top" / "banner_bottom" (a wide strip above / below the narration) or "panel" (the side panel's right-now card)
     extended_moods: bool = False        # opt-in: new characters get the extended set of mood pictures by default, and the narrator is reminded each turn (after the first) to use the full range
     now_free: bool = False              # the "right now" card is filled from the narrator's portrait tags only (who and their mood): no AI call
@@ -1162,6 +1343,7 @@ class GenPortraitIn(BaseModel):
 
 class IllustrateIn(BaseModel):
     turn: int | None = None            # which reply (default: the latest)
+    shape: str | None = None           # reframe: draw this one as "portrait", "landscape", "square" or "wide" instead of the story's usual scene shape
     scene: str | None = None           # override the scene description
     characters: list[str] | None = None
     provider: str | None = None
@@ -1191,7 +1373,36 @@ def _img_provider(cfg: dict, override: str | None = None, s: dict | None = None)
 
 def _is_flux_model(name: str) -> bool:
     from . import catalog
-    return name in catalog.UNETS or catalog.is_flux(name)
+    return name in catalog.UNETS or bool(catalog.diffusion_kind(name))
+
+
+_WF_FILES = {"flux2": "comfyui-flux2-klein.json", "chroma": "comfyui-chroma.json", "qwen": "comfyui-qwen-image.json"}
+_WF_WANT = {"flux2": (r"qwen[_-]?3", r"flux2.*vae|flux.?2"), "chroma": (r"t5xxl", r"^ae\.|flux.*ae|(^|[_-])ae[_.]"), "qwen": (r"qwen.*2\.?5.*vl", r"qwen.*vae")}
+
+
+def _stock_workflow(model: str, plain_flux: bool = True) -> str:
+    """The built-in workflow that suits this model, with the text-encoder and VAE file names ComfyUI actually has filled in:
+    Chroma and Qwen-Image have their own, FLUX.2 uses the klein one, an ordinary checkpoint the plain starter. Qwen-Image Lightning gets its few-step settings."""
+    from . import catalog
+    kind = catalog.diffusion_kind(model) if (model in catalog.UNETS or catalog.diffusion_kind(model)) else ""
+    if not kind:
+        return json.dumps(images.STARTER_WORKFLOW, indent=2)
+    wf = json.loads((ROOT / "workflows" / _WF_FILES[kind]).read_text(encoding="utf-8"))
+    want = _WF_WANT[kind]
+    if kind == "flux2" and "9b" in model.lower():
+        want = (r"qwen[_-]?3.*8b", want[1])
+    for n in wf.values():
+        inp = n.get("inputs", {}) if isinstance(n, dict) else {}
+        for cls, field, pool, pat in (("CLIPLoader", "clip_name", "clips", want[0]), ("VAELoader", "vae_name", "vaes", want[1])):
+            have = catalog.FILES.get(pool) or []
+            if n.get("class_type") == cls and have and (inp.get(field) not in have or not re.search(pat, inp.get(field) or "", re.IGNORECASE)):
+                m = [f for f in have if re.search(pat, f, re.IGNORECASE)]
+                if m:
+                    inp[field] = m[0]
+        if kind == "qwen" and n.get("class_type") == "KSampler" and re.search(r"light|4.?step|8.?step", model, re.IGNORECASE):
+            inp["steps"] = 8 if re.search(r"8.?step", model, re.IGNORECASE) else 4
+            inp["cfg"] = 1.0
+    return json.dumps(wf, indent=2)
 
 
 def _bg_provider(cfg: dict, s: dict | None = None) -> dict:
@@ -1203,10 +1414,7 @@ def _bg_provider(cfg: dict, s: dict | None = None) -> dict:
     comfy = next((p for p in cfg.get("image_providers", []) if p.get("type") == "comfyui"), None)
     if not comfy:
         raise HTTPException(400, "The separate backdrop maker needs ComfyUI under Settings → Pictures.")
-    workflow = (bg.get("workflow") or "").strip()
-    if not workflow:
-        f = ROOT / "workflows" / "comfyui-flux2-klein.json"
-        workflow = f.read_text(encoding="utf-8") if f.is_file() else ""
+    workflow = (bg.get("workflow") or "").strip() or _stock_workflow(bg.get("model") or "flux-2-klein-4b-fp8.safetensors")   # empty = the one that suits the chosen model
     usage.set_ctx((s or {}).get("id"), "pictures")
     return {**comfy, "id": "comfyui-bg", "model": bg.get("model") or "flux-2-klein-4b-fp8.safetensors", "workflow": workflow, "workflow_ref": "",
             "prompt_style": "natural", "ref_mode": "characters", "extra_positive": "", "extra_negative": "", "model_tweaks": {}}
@@ -1247,11 +1455,23 @@ def _flux_provider(cfg: dict, s: dict | None = None, model: str | None = None) -
     if not comfy:
         raise HTTPException(400, "A FLUX picture maker needs ComfyUI under 🖼 Art → Picture makers.")
     bg = cfg.get("image_bg") or {}
+    model = model or bg.get("model") or "flux-2-klein-4b-fp8.safetensors"
+    from . import catalog
+    if catalog.diffusion_kind(model) in ("chroma", "qwen"):   # Chroma and Qwen-Image: their own workflows (text encoder, negative prompt); no reference pictures
+        cw = _stock_workflow(model)
+        lt0 = ((comfy.get("model_tweaks") or {}).get(model) or {}).get("loras") or ""
+        if catalog.diffusion_kind(model) == "chroma" and re.search(r"flash|turbo|lightning|hyper", lt0, re.IGNORECASE):     # a speed LoRA (Chroma Flash) is on: it needs the few-step Heun settings (8 steps, cfg 1) it was made for; the negative prompt is not used at cfg 1
+            wf = json.loads(cw)
+            for n in wf.values():
+                if n.get("class_type") == "KSampler":
+                    n["inputs"].update(steps=8, cfg=1.0, sampler_name="heun")
+            cw = json.dumps(wf, indent=2)
+        return {**comfy, "id": "comfyui-flux", "model": model, "workflow": cw, "workflow_ref": "", "prompt_style": "natural", "extra_positive": "",
+                "extra_negative": "", "model_tweaks": {model: {"loras": lt}} if (lt := ((comfy.get("model_tweaks") or {}).get(model) or {}).get("loras")) else {}, "ref_mode": "none"}
     plain = (bg.get("workflow") or "").strip() or (ROOT / "workflows" / "comfyui-flux2-klein.json").read_text(encoding="utf-8")
     ref = (ROOT / "workflows" / "comfyui-flux2-klein-ref.json").read_text(encoding="utf-8")
-    model = model or bg.get("model") or "flux-2-klein-4b-fp8.safetensors"
     return {**comfy, "id": "comfyui-flux", "model": model, "workflow": plain, "workflow_ref": ref, "prompt_style": "natural", "extra_positive": "", "extra_negative": "",
-            "model_tweaks": {}, "ref_mode": "characters"}
+            "model_tweaks": {model: {"loras": lt}} if (lt := ((comfy.get("model_tweaks") or {}).get(model) or {}).get("loras")) else {}, "ref_mode": "characters"}   # only the LoRAs chosen for this model carry over
 
 
 def _maker_spec(s: dict, ch: dict) -> str:
@@ -1270,7 +1490,7 @@ def _maker_provider(cfg: dict, s: dict, ch: dict | None, override: str | None = 
     elif spec.startswith("ckpt:") and base.get("type") == "comfyui":
         name = spec[5:]
         raw = next((p for p in cfg.get("image_providers", []) if p.get("id") == base.get("id")), base)   # the checkpoint workflow, even when the story itself draws with FLUX
-        prov = {**raw, "model": name, "workflow_ref": "", "prompt_style": "natural" if _model_family(name) == "real" else "tags"}
+        prov = {**raw, "model": name, "workflow_ref": "", "prompt_style": _remembered_style(raw, name) or ("natural" if _model_family(name) == "real" else "tags")}
     else:
         prov = base
     _model_ctx.set(prov.get("model", ""))
@@ -1392,7 +1612,9 @@ def _portrait_urls(ch: dict, hint: str | None = None, ext: bool = True) -> list[
     return out
 
 
-def _load_refs(urls: list[str], n: int) -> list[tuple[bytes, str]]:
+def _load_refs(urls: list[str], n: int, prov: dict | None = None) -> list[tuple[bytes, str]]:
+    if prov and prov.get("ref_mode") == "none":      # a maker that cannot take reference pictures (Chroma, Qwen-Image): the prompt must not talk about references either
+        return []
     refs = []
     for u in urls:
         r = _read_ref(u)
@@ -1426,9 +1648,15 @@ def update_art(sid: str, body: ArtIn):
         elif k == "now_pic":
             art[k] = v if v in ("portrait", "live") else "portrait"
         elif k == "portrait_size":
-            art[k] = v if v in ("small", "medium", "large") else "medium"
+            art[k] = v if v in ("small", "medium", "large", "xl") else "medium"
         elif k == "portrait_shape":
             art[k] = v if v in images.SHAPES else "landscape"
+        elif k == "scene_display":
+            art[k] = v if v in ("normal", "large", "full") else "normal"
+        elif k == "scene_scale":
+            art[k] = v if v in ("normal", "large", "xl") else "normal"
+        elif k == "scene_gap":
+            art[k] = max(1, min(int(v or 1), 20))
         elif k == "scene_where":
             art[k] = v if v in ("reply", "panel", "banner_top", "banner_bottom") else "reply"
         elif k == "setting":
@@ -1644,6 +1872,37 @@ def delete_mood(sid: str, slug: str, mood: str):
     return s
 
 
+class MoodRenameIn(BaseModel):
+    to: str
+
+
+@app.post("/api/stories/{sid}/cast/{slug}/mood/{mood}/rename")
+def rename_mood(sid: str, slug: str, mood: str, body: MoodRenameIn):
+    """Give a picture another name (its mood). If the new name is already used, this picture becomes the active one and the old one is kept as an earlier version."""
+    s = _story(sid)
+    ch = _char(s, slug)
+    old, new = mood.strip().lower(), " ".join(body.to.strip().lower().split())
+    if not re.fullmatch(r"[a-z0-9][a-z0-9 _-]{0,29}", new):
+        raise HTTPException(400, "Use up to 30 letters, numbers, spaces, hyphens or underscores for a picture name.")
+    moods = ch.setdefault("moods", {})
+    if old not in moods:
+        raise HTTPException(404, "That picture is not there any more.")
+    if new == old:
+        return s
+    alts = ch.setdefault("alts", {})
+    moved = [moods.pop(old)] + alts.pop(old, [])
+    if moods.get(new):
+        alts.setdefault(new, [])[:0] = moved[1:]
+        alts[new].insert(0, moods[new])
+    else:
+        alts.setdefault(new, [])[:0] = moved[1:]
+    moods[new] = moved[0]
+    if not alts.get(new):
+        alts.pop(new, None)
+    store.save_story(s)
+    return s
+
+
 @app.post("/api/stories/{sid}/cast/{slug}/mood/{mood}/use")
 def use_alternate(sid: str, slug: str, mood: str, url: str):
     """Make an earlier picture the active one for this mood (the current one becomes an alternate)."""
@@ -1677,6 +1936,23 @@ def delete_alternate(sid: str, slug: str, url: str):
     return s
 
 
+@app.delete("/api/stories/{sid}/cast/{slug}/pictures")
+def delete_all_pictures(sid: str, slug: str):
+    """Delete every picture this character has in the story: the active pictures for all moods, all earlier versions and any undecided draw options.
+    Pictures borrowed from other stories (references) are kept, and so is the character themselves."""
+    s = _story(sid)
+    ch = _char(s, slug)
+    urls = list((ch.get("moods") or {}).values()) + [u for lst in (ch.get("alts") or {}).values() for u in lst]
+    for u in urls:
+        f = _portrait_file(u)
+        if f:
+            f.unlink(missing_ok=True)
+    ch["moods"], ch["alts"] = {}, {}
+    shutil.rmtree(store.PORTRAITS / sid / "chars" / slug / "_candidates", ignore_errors=True)
+    store.save_story(s)
+    return s
+
+
 class FromImageIn(BaseModel):
     url: str
     mood: str = "default"
@@ -1694,6 +1970,23 @@ def portrait_from_scene(sid: str, slug: str, body: FromImageIn):
     _store_mood(s, ch, body.mood.strip() or "default", data, images.sniff(data)[0])
     store.save_story(s)
     return s
+
+
+_CLOTHES = re.compile(r"\b(blazer|blouse|skirt|shoes?|boots?|sandals|sneakers|heels|uniforms?|jackets?|coats?|hoodie|t-?shirt|shirts?|tee|dress(?:es|ed)?|gown|jeans|trousers|pants|shorts|slacks|suits?|neck-?ties?|ties?|scarf|hats?|caps?|beanie|sweater|cardigan|vest|apron|robes?|kimono|lanyard|badge|clipboard|backpack|satchel|belt|gloves?|stockings|tights|socks|leggings|bodysuit|jumpsuit|fatigues|outfit|clothes|clothing|wears?|wearing|worn|watch|bracelet|necklace|earrings?|holding|holds?|clutch(?:es|ing)?|carr(?:y|ies|ying)|tablet|phone|headset|name ?tag)\b", re.IGNORECASE)
+
+
+def _body_look(look: str) -> str:
+    """A character's looks without their everyday outfit and props (blazer, clipboard...): what the adult picture maker is given, so what they wear in this picture (or nothing) comes from the
+    picture's own description and not from their usual clothes. Face, hair, eyes, build, skin and glasses stay."""
+    out = []
+    for sent in re.split(r"(?<=[.!?])\s+", (look or "").strip()):
+        keep = [c.strip(" .") for c in re.split(r"[,;]\s*", sent) if c.strip(" .") and not _CLOTHES.search(c)]
+        if keep:
+            out.append(", ".join(keep))
+    return ". ".join(out).strip() + ("." if out else "")
+
+
+PLAIN_BG_NEGATIVE = "street, city, buildings, shop signs, neon lights, vending machines, outdoors, crowd, side view, profile view, turned away, looking away, waxy skin, plastic skin"
 
 
 async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None) -> dict:
@@ -1714,21 +2007,36 @@ async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None
         species_only = bool(urls)
         if species_only:
             prov = {**prov, "ref_megapixels": SPECIES_REF_MP}
-    refs = _load_refs(urls, int(cfg.get("image_max_refs", 3)))
+    refs = _load_refs(urls, int(cfg.get("image_max_refs", 3)), prov)
     art = _nsfw_art(await _art_with_setting(s, cfg), prov)
+    plain_bg = prov.get("ref_mode") == "none"       # Chroma / Qwen-Image: no reference pictures, and they paint any place named in the prompt behind the face, so the portrait leaves the world's setting out
+    if plain_bg:
+        art = {**art, "setting": ""}
     look = _full_appearance(s, ch)
+    adult_sdxl = bool(prov.get("nsfw_maker")) and prov.get("type") == "comfyui" and not _is_flux_model(prov.get("model", ""))
+    if adult_sdxl:
+        prov = {**prov, "_tight_face": True}     # only the face of the reference is used (its outfit and background must not carry over)
+        look = _body_look(look) or look          # no everyday outfit or props: what they wear in this picture comes from the picture's own description
     ext_only = bool(refs) and not species_only and not _portrait_urls(ch, mood, ext=False)
-    mood_text = None if mood == "default" else f"{mood} ({_mood_look(mood, bool(s.get('nsfw')))})"
+    mood_text = None if mood == "default" else f"{mood} ({_mood_look(mood, bool(s.get('nsfw')), s)})"
     prompt = images.portrait_prompt(art, ch["name"], look, mood_text, bool(refs), ext_only, nsfw=bool(s.get("nsfw")),
-                                    species_ref=(ch.get("species") or "") if species_only else "", framing=_framing(mood))
+                                    species_ref=(ch.get("species") or "") if species_only else "", framing=_framing(mood, s=s))
     negative = s["art"].get("negative", "")
+    if plain_bg:
+        prompt = prompt.replace("simple soft background", "plain soft studio backdrop, soft even light").replace("Simple soft background.", "Plain soft studio backdrop, soft even light.")
+        negative = (negative + ", " if negative else "") + PLAIN_BG_NEGATIVE
     if _wants_tags(prov):
         prompt, negative = await _portrait_tag_prompt(s, cfg, art, {**ch, "appearance": look}, mood)
     if prov.get("nsfw_maker"):
-        prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov))
+        if adult_sdxl and not _wants_tags(prov):
+            _, negative = _add_nsfw_words("", negative, prov, "")           # the explicit words go into the short prompt below; this only clears words that forbid nudity from the negative
+            prompt = images.nsfw_portrait_prompt(art, ch["name"], look, mood_text or "", _framing(mood, s=s), _nsfw_words(cfg, prov))
+            negative = (negative + ", " if negative else "") + "street, city, buildings, cars, outdoors, clothes the picture does not call for"
+        else:
+            prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov))
     try:
         shape = ((prov.get("model_tweaks") or {}).get(prov.get("model", "")) or {}).get("shape") if prov.get("nsfw_maker") else None
-        data, ext = await images.generate(prov, prompt, negative, shape if shape in images.SHAPES else s["art"].get("portrait_shape", "landscape"), refs)
+        data, ext = await images.generate(prov, prompt, negative, shape if shape in images.SHAPES else s["art"].get("portrait_shape", "landscape"), refs, seed=zlib.crc32(slug.encode()) if plain_bg else None)       # a steady seed per character keeps the face alike across moods when there are no reference pictures
     except images.ImageError as e:
         raise HTTPException(502, str(e))
     s = _story(sid)           # freshest copy right before saving: edits made while this was drawing are kept
@@ -1784,6 +2092,11 @@ async def _events_after_turn(sid: str, idx: int, ts: float | None = None) -> Non
             return
         raw = s["turns"][idx]["text"]
         text = _clean_for_scene(raw)
+        if _local_on(cfg, _events_model(cfg, s)[0]):
+            # Local-model mode: one helper call for every third reply (or at once when the reply announces a feat, level or quest), covering the replies since the last one
+            if ((idx + 1) // 2) % 3 and not rules.key_events(raw):
+                return
+            text = "\n\n---\n\n".join(_clean_for_scene(t["text"]) for t in [x for x in s["turns"][:idx + 1] if x["role"] == "assistant"][-3:])
         names = [c["name"] for c in s["cast"] if re.search(rf"\b{re.escape(c['name'].split()[0])}\b", text, re.IGNORECASE)]
         names = [n for n in names if not next((c.get("player") for c in s["cast"] if c["name"] == n), False)]       # the player's own events come from the notifications (free)
         if not names:
@@ -1927,6 +2240,7 @@ class EventIn(BaseModel):
 class SpeciesItemIn(BaseModel):
     name: str
     description: str = ""
+    traits: str = ""
     maker: str = ""
 
 
@@ -1947,7 +2261,7 @@ def update_species(sid: str, body: SpeciesIn):
             continue
         key = name.lower()
         prev = old.get(key, {})
-        new[key] = {"name": name, "description": it.description.strip()[:800], "maker": it.maker.strip()[:120],
+        new[key] = {"name": name, "description": it.description.strip()[:800], "traits": it.traits.strip()[:1200], "maker": it.maker.strip()[:120],
                     "reference_url": prev.get("reference_url", ""), "from": prev.get("from", "")}
     for key in old.keys() - new.keys():
         f = _portrait_file(old[key].get("reference_url", ""))
@@ -1956,6 +2270,32 @@ def update_species(sid: str, body: SpeciesIn):
     s["species"] = new
     store.save_story(s)
     return s
+
+
+SPECIES_SYSTEM = ("You write the reference entry for one species (or race, or kind of being) of an interactive story, from the story prompt and what is known of its members. "
+                  "Reply with ONLY JSON: {\"look\": \"...\", \"traits\": \"...\"}. "
+                  "\"look\": what is visibly true of EVERY member, for an image generator: skin or covering, eyes, ears, horns or crests, build and proportions, typical clothing; under 60 words, no names, nothing explicit. "
+                  "\"traits\": what the narrator must keep true of the species in the story: abilities, weaknesses, senses, lifespan, culture, how others treat them; under 90 words, plain sentences. "
+                  "Use only what the story prompt and the members' descriptions support; if the story says little, keep it short rather than inventing a lot.")
+
+
+@app.post("/api/stories/{sid}/species/{key}/write")
+async def write_species(sid: str, key: str):
+    """Draft a species' picture description and story traits from the story prompt and its members' looks (nothing is saved: the page puts them in the boxes to edit)."""
+    s, cfg = _story(sid), store.load_config()
+    sp = (s.get("species") or {}).get(key.strip().lower())
+    if not sp:
+        raise HTTPException(404, "That species is not in this story.")
+    members = [c for c in s.get("cast", []) if (c.get("species") or "").strip().lower() == key.strip().lower()]
+    who = "\n".join(f"- {c['name']}: {(c.get('appearance') or '').strip()[:300]}" for c in members[:8]) or "(no characters of this species yet)"
+    user = (f"SPECIES: {sp['name']}\n\nMEMBERS SO FAR:\n{who}\n\nCURRENT NOTES (keep what is right):\nlook: {sp.get('description', '')}\ntraits: {sp.get('traits', '')}"
+            f"\n\nSTORY: {s['title']}\n{s.get('base_prompt', '')[:7000]}")
+    prov, model = _role(cfg, s, "recaps", "species")
+    out = await providers.complete(prov, model, SPECIES_SYSTEM, [{"role": "user", "content": user}], temperature=0.3, max_tokens=500, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+    data = _json_in(out)
+    if not isinstance(data, dict) or not (data.get("look") or data.get("traits")):
+        raise HTTPException(502, "The helper model did not return a usable description. Try again.")
+    return {"description": " ".join(str(data.get("look") or "").split())[:800], "traits": " ".join(str(data.get("traits") or "").split())[:1200]}
 
 
 class SpeciesRefIn(BaseModel):
@@ -2501,9 +2841,9 @@ async def cast_candidates(sid: str, body: CandidatesIn):
             negative = st["art"].get("negative", "")
         folder = store.PORTRAITS / sid / "chars" / slug / "_candidates"
         folder.mkdir(parents=True, exist_ok=True)
-        cand_refs = _load_refs([r["url"] for r in c.get("ext_refs") or []], int(cf.get("image_max_refs", 3))) if not c.get("moods") else []
+        cand_refs = _load_refs([r["url"] for r in c.get("ext_refs") or []], int(cf.get("image_max_refs", 3)), prov) if not c.get("moods") else []
         if species_urls:
-            cand_refs = _load_refs(species_urls, 1)
+            cand_refs = _load_refs(species_urls, 1, prov)
         elif cand_refs and not _wants_tags(prov):
             prompt = images.portrait_prompt(art, c["name"], look, None, True, True, nsfw=bool(st.get("nsfw")))
         for i in range(count):
@@ -2774,8 +3114,15 @@ def _is_action(mood: str) -> bool:
     return _mood_base(mood) not in EXPRESSION_MOODS
 
 
-def _framing(mood: str, tags: bool = False) -> str:
+def _story_mood(s: dict | None, mood: str, key: str) -> str:
+    """A story can reword a picture type for itself: story["art"]["mood_looks"] / ["mood_framing"] / ["mood_framing_tags"] = {"dead": "..."} (the mood tag stays the same)."""
+    return str((((s or {}).get("art") or {}).get(key) or {}).get(_mood_base(mood), "")).strip()
+
+
+def _framing(mood: str, tags: bool = False, s: dict | None = None) -> str:
     base = _mood_base(mood)
+    if (own := _story_mood(s, mood, "mood_framing_tags" if tags else "mood_framing")):
+        return own
     if tags:
         return MOOD_FRAMING_TAGS.get(base) or (ACTION_FRAMING_TAGS if _is_action(mood) else "")
     return MOOD_FRAMING.get(base) or (ACTION_FRAMING if _is_action(mood) else "")
@@ -2788,8 +3135,10 @@ def _mood_base(mood: str) -> str:
     return re.sub(r"\s*\d+$", "", mood.strip().lower())
 
 
-def _mood_look(mood: str, adult: bool = False) -> str:
+def _mood_look(mood: str, adult: bool = False, s: dict | None = None) -> str:
     base = _mood_base(mood)
+    if (own := _story_mood(s, mood, "mood_looks")):
+        return own
     mine = {str(k).strip().lower(): str(v).strip() for k, v in (store.load_config().get("mood_looks") or {}).items() if str(v).strip()}
     return mine.get(base) or (adult and MOOD_LOOKS_ADULT.get(base)) or MOOD_LOOKS.get(base, f"{base} expression")
 
@@ -2841,12 +3190,21 @@ def _nsfw_provider(cfg: dict, s: dict) -> dict | None:
         # Explicit pictures use their OWN settings for this model (🖼 Art → Picture makers → Adult pictures), never the model's ordinary ones: tuned so the face
         # follows the character's first picture (Normal 1). Defaults: a strong face match from that one picture, cropped to the face.
         own = dict(((ns.get("tweaks") or {}).get(model)) or {})
+        direction = ((s.get("art") or {}).get("direction") or "").lower()
+        if (ns.get("style_mode") or "match") == "match" and re.search(r"photo|realistic", direction) and not re.search(r"semi-?realistic|paint|illustrat|anime|cartoon|comic|watercolor", direction):
+            # A photorealistic story: this model's extra style words (kept per model, tuned for another story) must not fight it: painterly words are dropped from the extra positive
+            # words, and "photo" words from the extra negative ones.
+            split = lambda t: [w for w in re.split(r"\s*,\s*", t or "") if w]
+            own["extra_positive"] = ", ".join(w for w in split(own.get("extra_positive")) if not re.search(r"paint|illustrat|anime|cartoon|semi-?realistic|brush|cel|sketch", w, re.IGNORECASE))
+            own["extra_negative"] = ", ".join(w for w in split(own.get("extra_negative")) if not re.fullmatch(r"(photos?|photograph|photographic|photorealistic|realistic|3d(?: render)?|render)", w, re.IGNORECASE))
         tw = {"ref_end": "0.95", "ref_crop": "face", "ref_count": "1", **own}
         if not own.get("ref_weight"):
             tw["ref_weight"] = str(float(ns.get("face") or 0.85))
         if not (own.get("style_override") or "").strip() and (ns.get("style_mode") or "match") == "own" and (ns.get("style") or "").strip():
             tw["style_override"] = ns["style"].strip()      # (older setting: one style for every model)
-        return {**prov, "model": model, "prompt_style": "natural" if _model_family(model) == "real" else "tags", "nsfw_maker": True,
+        if _remembered_style(prov, model):
+            tw["prompt_style"] = _remembered_style(prov, model)       # the explicit settings of a model replace its ordinary ones, but its remembered prompt style carries over
+        return {**prov, "model": model, "prompt_style": _remembered_style(prov, model) or ("natural" if _model_family(model) == "real" else "tags"), "nsfw_maker": True,
                 "ref_mode": "one_character", "model_tweaks": {**(prov.get("model_tweaks") or {}), model: tw}}
     return {**prov, "model": model or prov.get("model", ""), "nsfw_maker": True}
 
@@ -2877,9 +3235,24 @@ def _add_nsfw_words(prompt: str, negative: str, prov: dict, words: str) -> tuple
     return prompt, ", ".join(keep)
 
 
+def _remembered_style(prov: dict, model: str | None = None) -> str:
+    """The prompt style (tags or natural sentences) remembered for this picture model (Art → Picture makers: choose it once and it follows the model), or ''."""
+    m = model if model is not None else prov.get("model", "")
+    v = ((prov.get("model_tweaks") or {}).get(m) or {}).get("prompt_style")
+    return v if v in ("tags", "natural") else ""
+
+
 def _wants_tags(prov: dict) -> bool:
-    """Anime SDXL models (Animagine, Illustrious, NoobAI...) follow short Danbooru-style tags better than sentences."""
-    return (prov.get("prompt_style") or ("tags" if prov.get("type") == "comfyui" else "natural")) == "tags"
+    """Anime SDXL models (Animagine, Illustrious, NoobAI...) follow short Danbooru-style tags better than sentences. What was remembered for the model wins over the service-wide setting."""
+    mem = _remembered_style(prov)
+    if mem:
+        return mem == "tags"
+    st, was = prov.get("prompt_style"), prov.get("prompt_style_model")
+    if st and (not was or was == prov.get("model")):        # the service-wide style was set for this very model (or before models were told apart)
+        return st == "tags"
+    if prov.get("type") == "comfyui":                       # another model than the one the style was set for: the usual style for its kind
+        return _model_family(prov.get("model", "")) != "real"
+    return False
 
 
 async def _tag_prompt(s: dict, cfg: dict, art: dict, scene: str, chars: list[dict]) -> tuple[str, str]:
@@ -3001,19 +3374,19 @@ async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: st
     base = re.sub(r"\s*\d+$", "", mood.strip().lower())
     mine = {str(k).strip().lower(): str(v).strip() for k, v in (cfg.get("mood_looks") or {}).items() if str(v).strip()}
     adult = bool(s.get("nsfw"))
-    frame = _framing(mood, tags=True) or "upper body, looking at viewer"
+    frame = _framing(mood, tags=True, s=s) or "upper body, looking at viewer"
     def framed(pn: tuple[str, str]) -> tuple[str, str]:
         """Action pictures written by the helper AI: its portrait-framing tags go, the action framing is always there."""
         if not _is_action(mood):
             return pn
         tags = [x for x in re.split(r"\s*,\s*", pn[0]) if x and not re.search(r"^(upper body|portrait|close-up|looking at viewer|cowboy shot|face focus)$", x, re.IGNORECASE)]
         return ", ".join(tags + [frame]), pn[1]
-    if notes or (mood != "default" and (base in mine or base not in MOOD_TAGS)):
-        look = f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult)}") + (f", {notes}" if notes else "")
+    if notes or (mood != "default" and (base in mine or base not in MOOD_TAGS or _story_mood(s, mood, "mood_looks"))):
+        look = f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult, s)}") + (f", {notes}" if notes else "")
         return framed(await _tag_prompt(s, cfg, art, look, [ch]))
     tags = await _character_tags(s, cfg, art, ch)
     if not tags:
-        return framed(await _tag_prompt(s, cfg, art, f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult)}"), [ch]))
+        return framed(await _tag_prompt(s, cfg, art, f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult, s)}"), [ch]))
     parts = [t.strip() for t in tags.split(",") if t.strip()]
     head = [parts.pop(0)] if parts and _SUBJECT_TAG.match(parts[0]) else []
     parts = [t for t in parts if not _SUBJECT_TAG.match(t)]
@@ -3107,7 +3480,7 @@ async def illustrate(sid: str, body: IllustrateIn):
         raise HTTPException(400, "There is no narrator reply to illustrate yet.")
     turn = s["turns"][idx]
     scene, names, hints = (body.scene or turn.get("scene") or "").strip(), body.characters, {}
-    if not scene and (s.get("art") or {}).get("scene_template"):         # no AI call: built from the reply's portrait tags, place and text
+    if not scene and ((s.get("art") or {}).get("scene_template") or _local_on(cfg, _role(cfg, s, "small")[0])):         # no AI call: built from the reply's portrait tags, place and text
         scene, found, hints = _template_scene(s, turn["text"])
         names = names or found
     if not scene:
@@ -3128,7 +3501,7 @@ async def illustrate(sid: str, body: IllustrateIn):
     if mode == "one_character":
         for c in chars:
             ch = by_slug.get(c.get("slug"))
-            got = _load_refs(_portrait_urls(ch, hints.get(c["name"].lower())), max_refs) if ch else []
+            got = _load_refs(_portrait_urls(ch, hints.get(c["name"].lower())), max_refs, prov) if ch else []
             if got:
                 refs, c["ref"] = got, True   # the first character with pictures is the one whose face is matched
                 break
@@ -3140,11 +3513,15 @@ async def illustrate(sid: str, body: IllustrateIn):
             urls = _portrait_urls(ch, hints.get(c["name"].lower())) if ch else ([c["ref_url"]] if c.get("ref_url") else [])
             if not urls and c.get("slug") is None and s.get("avatar_image"):
                 urls = [s["avatar_image"]]
-            got = _load_refs(urls, 1)
+            got = _load_refs(urls, 1, prov)
             if got:
                 refs.append(got[0]); c["ref"] = True
     art = _nsfw_art(s["art"], prov)
-    prompt = images.scene_prompt(art, scene, chars, max_refs, nsfw=bool(s.get("nsfw")))
+    adult_sdxl = bool(prov.get("nsfw_maker")) and prov.get("type") == "comfyui" and not _is_flux_model(prov.get("model", ""))
+    if adult_sdxl:      # an explicit picture: what they wear comes from the scene, not from their everyday outfit
+        prov = {**prov, "_tight_face": True}
+        chars = [{**c, "appearance": _body_look(c.get("appearance", "")) or c.get("appearance", "")} for c in chars]
+    prompt = images.scene_prompt(art, scene, chars, max_refs, nsfw=bool(s.get("nsfw")), clothes_from_ref=not adult_sdxl)
     negative = art.get("negative", "")
     if _wants_tags(prov):
         prompt, negative = await _scene_tag_prompt(s, cfg, art, scene, chars)
@@ -3152,10 +3529,13 @@ async def illustrate(sid: str, body: IllustrateIn):
         prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov))
     try:
         shape = "landscape" if str(art.get("scene_where", "")).startswith("banner") else art.get("size", "portrait")   # a wide strip needs a wide picture
-        data, ext = await images.generate(prov, prompt, negative, shape, refs)
+        if body.shape in images.SHAPES:
+            shape = body.shape
+        scale = {"large": 1.25, "xl": 1.5}.get(art.get("scene_scale"), 0)
+        data, ext = await images.generate({**prov, "_scale": scale} if scale and prov.get("type") == "comfyui" else prov, prompt, negative, shape, refs)
     except images.ImageError as e:
         raise HTTPException(502, str(e))
-    img = {"url": _save_scene_image(sid, data, ext), "scene": scene, "provider": prov["id"], "ts": time.time()}
+    img = {"url": _save_scene_image(sid, data, ext), "scene": scene, "provider": prov["id"], "ts": time.time(), **({"shape": body.shape} if body.shape in images.SHAPES else {})}
     # Drawing takes a while: add the picture to the freshest copy of the story. Saving the copy loaded before drawing would undo anything that changed meanwhile
     # (the side panel, the "right now" card, the background, edits).
     fresh = _story(sid)
@@ -3225,16 +3605,32 @@ def nsfw_tuned_for(model: str):
 
 @app.get("/api/images/bg-models")
 async def bg_models():
-    """Diffusion models (the UNET loader's list) that the local ComfyUI has: what a separate backdrop maker like FLUX can use."""
+    """Models the local ComfyUI has that a separate backdrop maker can use: diffusion models the app knows (FLUX.2, Chroma, Qwen-Image) and ordinary checkpoints."""
+    from . import catalog
     cfg = store.load_config()
     comfy = next((p for p in cfg.get("image_providers", []) if p.get("type") == "comfyui"), None)
     base = ((comfy or {}).get("base_url") or "http://127.0.0.1:8188").rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=6) as c:
             info = (await c.get(f"{base}/object_info/UNETLoader")).json()
-        return {"models": sorted(info["UNETLoader"]["input"]["required"]["unet_name"][0]), "up": True}
+        unets = [m for m in info["UNETLoader"]["input"]["required"]["unet_name"][0] if catalog.diffusion_kind(m)]
+        cks = []
+        try:
+            async with httpx.AsyncClient(timeout=6) as c:
+                cks = (await c.get(f"{base}/object_info/CheckpointLoaderSimple")).json()["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+        except Exception:
+            pass
+        await catalog.comfy_checkpoints({"base_url": base})       # also refreshes the text-encoder / VAE lists the workflows are fitted to
+        stock = [_stock_workflow(m) for m in unets + list(cks)]
+        return {"models": sorted(unets) + sorted(cks), "kinds": {m: catalog.diffusion_kind(m) or "checkpoint" for m in unets + list(cks)}, "stock": stock, "up": True}
     except Exception:
-        return {"models": [], "up": False}
+        return {"models": [], "kinds": {}, "stock": [], "up": False}
+
+
+@app.get("/api/images/model-workflow")
+def model_workflow(model: str):
+    """The built-in workflow for one model (what the backdrop-maker box fills in when you pick it)."""
+    return json.loads(_stock_workflow(model))
 
 
 class BgTestIn(BaseModel):
@@ -3469,6 +3865,46 @@ def _deleted_dir(sid: str) -> Path:
     return store.AUTO / sid
 
 
+def _picture_exists(url: str) -> bool:
+    u = str(url or "").split("?")[0]
+    f = _portrait_file(u) if u.startswith("/portraits/") else _local_file(u, store.IMAGES, "/images/") if u.startswith("/images/") else None
+    return bool(f and f.exists())
+
+
+def _strip_missing_pictures(s: dict) -> int:
+    """Forget picture links whose files are gone (for example a story restored after its pictures were deleted), so nothing shows as a broken image and a package can put them back."""
+    n = 0
+    def keep(u):
+        nonlocal n
+        ok = _picture_exists(u)
+        n += 0 if ok else 1
+        return ok
+    for c in s.get("cast", []):
+        c["moods"] = {m: u for m, u in (c.get("moods") or {}).items() if keep(u)}
+        c["alts"] = {m: [u for u in us if keep(u)] for m, us in (c.get("alts") or {}).items()}
+        c["alts"] = {m: us for m, us in c["alts"].items() if us}
+    for p in s.get("places", []):
+        if p.get("url") and not keep(p["url"]):
+            p["url"] = ""
+    for sp in (s.get("species") or {}).values():
+        if sp.get("reference_url") and not keep(sp["reference_url"]):
+            sp["reference_url"] = ""
+    for key in ("cover", "avatar_image"):
+        if s.get(key) and not keep(s[key]):
+            s[key] = ""
+    if (s.get("backdrop") or {}).get("url") and not keep(s["backdrop"]["url"]):
+        s["backdrop"] = {}
+    s["backdrops"] = {k: v for k, v in (s.get("backdrops") or {}).items() if not (isinstance(v, dict) and v.get("url")) or keep(v["url"])}
+    s["intro_images"] = [i for i in s.get("intro_images", []) if keep(i.get("url"))]
+    for t in s.get("turns", []):
+        for holder in [t] + list(t.get("attempts") or []):
+            if holder.get("images"):
+                holder["images"] = [im for im in holder["images"] if keep(im.get("url"))]
+    if (s.get("now") or {}).get("image") and not keep(s["now"]["image"]):
+        s["now"]["image"] = ""
+    return n
+
+
 @app.post("/api/deleted-stories/{sid}/restore")
 def restore_deleted_story(sid: str):
     """Bring a deleted story back from its newest backup (its pictures too, if they were kept)."""
@@ -3476,6 +3912,7 @@ def restore_deleted_story(sid: str):
     snap = sorted(d.glob("*.json"))[-1]
     s = json.loads(snap.read_text(encoding="utf-8"))
     s["id"], s["updated"] = sid, time.time()
+    _strip_missing_pictures(s)
     store.save_story(s)
     return _story(sid)
 
@@ -3770,7 +4207,12 @@ async def _maybe_summarize(story: dict, cfg: dict, prov: dict, model: str, narra
     keep = max(min(int(cfg.get("keep_recent", 10)), when - 2), 2)
     over = len(story["turns"]) - start
     if over <= when:
-        return
+        local = bool(cfg.get("local_mode")) and (narrator or {}).get("type") == "ollama"
+        if not (local and over > keep + 2):
+            return
+        b = prompting.build(story)           # local mode: also fold history early when it would fill most of the model's window
+        if _est_tokens(b.system_text) + sum(_est_tokens(m["content"]) for m in b.messages) < int(cfg.get("num_ctx", 8192)) * 0.7:
+            return
     # Rewriting the summary changes the cached part of the prompt, so the next reply has to pay to write it again. While the cache is warm that is a
     # real cost; once it has gone cold (you were away) it costs nothing extra. So a warm cache gets a grace period of extra history (which is cheap, cached).
     if (narrator and narrator.get("type") == "anthropic" and cfg.get("prompt_cache", True) and over <= when * SUMMARY_DEFER
@@ -3801,6 +4243,25 @@ async def _maybe_summarize(story: dict, cfg: dict, prov: dict, model: str, narra
     )
     story["summary"], story["summary_upto"] = summary.strip(), cut
     store.save_story(story)
+
+
+async def _draw_status(story: dict, cfg: dict, move: str, narration: str) -> str:
+    """App-drawn status line (see appstatus.py): the reply with its status block added, or the reply unchanged when anything goes wrong."""
+    try:
+        labels = rules.expected_labels(story)
+        if appstatus.find_block(narration, labels):
+            return narration                      # the narrator wrote its own: leave it
+        block = appstatus.last_block(story)
+        if not block:
+            return narration
+        prov, model = _role(cfg, story, "small", "status line")
+        system, user = appstatus.request(story, block, move, narration)
+        out = await asyncio.wait_for(providers.complete(prov, model, system, [{"role": "user", "content": user}], temperature=0.1, max_tokens=500,
+                                                        num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False}), 30)
+        new, _n = appstatus.apply_reply(block, _json_in(out))
+        return narration.rstrip() + "\n\n" + new
+    except Exception:
+        return narration
 
 
 @app.post("/api/stories/{sid}/turn")
@@ -3852,34 +4313,51 @@ async def turn(sid: str, body: TurnIn):
                                    **({"pts": pend_pts} if pend_pts else {}), **({"roll": roll} if roll else {})})
             beats_note = beats.prepare(story, beats.moves(story))       # story beats that are due (hidden from the player; sent with this request only)
             _beats_persist(sid, story)
-            built = prompting.build(story, beats_note=_hidden_notes(story, beats_note, pend_pts, roll))
+            built = prompting.build(story, beats_note=_hidden_notes(story, beats_note, pend_pts, roll), local=_steady_on(cfg))
             usage.set_ctx(sid, "story narration", why=_cache_why(sid, built, cfg))
             system, messages = built.request()
+            trimmed, too_big = _fit_context(system, messages, cfg) if (cfg.get("local_mode") and prov.get("type") == "ollama") else (0, False)
             if cmd_note and messages and messages[-1]["role"] == "user":
                 messages[-1]["content"] += "\n\n" + cmd_note
             if body.note.strip() and messages and messages[-1]["role"] == "user":
                 messages[-1]["content"] += ("\n\n(OOC: This is a rewrite of your previous reply to the message above, which the player discarded. "
                                            "Write the reply again with these changes: " + body.note.strip()[:1500] + ")")
-            full, use = "", {}
+            full, use, cut_note = "", {}, ""
             async for chunk in providers.stream_chat(
                 prov, model, system, messages,
                 temperature=cfg["temperature"], max_tokens=cfg["max_tokens"], num_ctx=cfg["num_ctx"],
-                **_extras(cfg),
+                **{**_extras(cfg), "narrator": True},
             ):
                 if isinstance(chunk, providers.Usage):
                     use = dict(chunk)
                     continue
                 full += chunk
                 yield _sse({"t": "delta", "v": chunk})
+            if use.get("cut") and _steady_on(cfg):
+                full, did = localfix.trim_unfinished(full)
+                if did:
+                    cut_note = "The reply hit the length limit, so its unfinished last sentence was removed. Raise Max reply tokens in Settings if replies are being cut often."
+            if cut_note:
+                yield _sse({"t": "note", "v": cut_note})
+            if use.get("truncated") or too_big:
+                yield _sse({"t": "note", "v": "The story prompt is bigger than the model's window, so part of it may be cut off. Raise the context size in Settings (Models), or use a shorter story prompt."})
+            elif trimmed:
+                yield _sse({"t": "note", "v": f"Local mode left out the {trimmed} oldest messages of this move's history so the prompt fits the model's window. Raising the context size or summarizing sooner keeps more."})
             narration, upd = prompting.split_state(prompting.expand_tags(full))
             _add_new_chars(story, prompting.extract_newchars(narration))
             narration, scene = prompting.split_scene(narration)
+            if scene and not prompting.scene_due(story):
+                scene = ""                       # too soon after the last scene picture (Art → Scene pictures → turns between)
             if not narration:
                 hint = " It spent its whole reply budget thinking: raise Max reply tokens or turn Claude thinking off in Settings." if use.get("thinking") else ""
                 raise providers.ProviderError("The model returned an empty reply." + hint)
             untidied, tidy_notes = narration, []
             if story.get("format_fix", True):
                 narration, tidy_notes = rules.tidy(story, narration)          # a stray or doubled status line is put where the story prompt wants it (free)
+            if _steady_on(cfg):
+                narration, _fixed = localfix.fix_format(narration)           # unclosed italics / bold and picture tags are closed
+            if story.get("app_status"):
+                narration = await _draw_status(story, cfg, text, narration)   # the app writes the status line (the narrator was told to leave it out)
             story["turns"].append(
                 {"role": "assistant", "text": narration, "ts": time.time(), "model": f"{prov['id']}/{model}", "before": before, "cast_before": cast_before,
                  "usage": use, **({"tidied": tidy_notes, "untidied": untidied} if tidy_notes else {}), **({"scene": scene} if scene else {}), **({"attempts": pend["attempts"], "attempt_no": 1 + max(a.get("attempt_no", 0) for a in pend["attempts"])} if pend else {})}
@@ -3909,8 +4387,8 @@ async def turn(sid: str, body: TurnIn):
 
 
 # ---------------- share packs: prompt + cast + art settings, no save ----------------
-PACK_FIELDS = ("title", "subtitle", "description", "base_prompt", "opening", "opening_in_context", "use_state_block", "art", "art_dismissed", "group_cast",
-               "prologue", "opening_options", "endings", "sidebar", "beats", "lore")
+PACK_FIELDS = ("title", "subtitle", "description", "base_prompt", "opening", "opening_in_context", "use_state_block", "app_status", "art", "art_dismissed", "group_cast",
+               "prologue", "opening_options", "alt_openings", "opening_name", "endings", "sidebar", "beats", "lore", "clock", "dice", "commands")
 
 
 @app.get("/api/stories/{sid}/pack")
@@ -4107,7 +4585,7 @@ async def import_pack(request: Request):
     s = store.new_story(meta.get("title") or "Shared story", meta.get("subtitle", ""), meta.get("base_prompt", ""))
     sid = s["id"]
     for k in PACK_FIELDS:
-        if meta.get(k) is not None and k not in ("title", "subtitle", "base_prompt", "sidebar", "beats", "lore"):
+        if meta.get(k) is not None and k not in ("title", "subtitle", "base_prompt", "sidebar", "beats", "lore", "clock", "dice"):
             s[k] = meta[k]
     save_file = _pack_saver(z)
     s["cast"] = [_pack_char(c, sid, save_file) for c in meta.get("cast", []) if isinstance(c, dict) and c.get("name")]
@@ -4119,6 +4597,14 @@ async def import_pack(request: Request):
     _pack_places(meta, s, save_file)
     if (sb := _pack_sidebar(meta)):
         s["sidebar"] = sb
+        tracker.seed_starts(s)
+    s["commands"] = _clean_commands(meta.get("commands"))
+    if isinstance(meta.get("clock"), dict):       # the author's world clock setting (a story whose narrator keeps the time itself ships it off)
+        c = meta["clock"]
+        s["clock"] = clock.clean(c)
+    if isinstance(meta.get("dice"), dict):        # and its dice setting (auto | manual | off)
+        d = meta["dice"]
+        s["dice"] = {k: v for k, v in (("mode", d.get("mode") if d.get("mode") in ("auto", "manual", "off") else None), ("difficulty", d.get("difficulty") if d.get("difficulty") in rules.DIFFICULTY else None)) if v}
     if isinstance(meta.get("lore"), dict):        # the author's lore entries
         s["lore"] = {"on": bool(meta["lore"].get("on", True)), "items": lore.clean_list(meta["lore"].get("items"))}
     if isinstance(meta.get("beats"), dict):       # the author's story beats (a package never says which have gone out)
@@ -4149,8 +4635,9 @@ async def update_from_pack(sid: str, request: Request, parts: str = "text,tracke
     store.snapshot_story(sid, "before package update")
     save_file = _pack_saver(z)
     changed = []
+    _strip_missing_pictures(s)         # links to pictures that no longer exist are dropped, so the package can put its pictures back
     if "text" in want:
-        for k in ("base_prompt", "prologue", "opening", "opening_options", "endings", "opening_in_context", "use_state_block"):
+        for k in ("base_prompt", "prologue", "opening", "opening_name", "alt_openings", "opening_options", "endings", "opening_in_context", "use_state_block"):
             if meta.get(k) is not None:
                 s[k] = meta[k]
         changed.append("story text")
@@ -4161,8 +4648,23 @@ async def update_from_pack(sid: str, request: Request, parts: str = "text,tracke
             if new:
                 lb["items"] += new
                 changed.append(f"{len(new)} lore entries")
+        if isinstance(meta.get("beats"), dict):       # beats the game does not have yet are added by title (the ones it has, and which have gone out, are left alone)
+            bb = beats.get(s)
+            have = {i["title"].lower() for i in bb["items"]}
+            nb = [{**beats.clean_item(i), "fired": None} for i in (meta["beats"].get("items") or []) if isinstance(i, dict) and str(i.get("title", "")).lower() not in have]
+            if nb:
+                bb["items"] = (bb["items"] + nb)[:beats.MAX_ITEMS]
+                bb["extracted"] = True
+                changed.append(f"{len(nb)} story beats")
+        if meta.get("commands") is not None:
+            s["commands"] = _clean_commands(meta["commands"])
+            changed.append("command buttons")
+        if isinstance(meta.get("clock"), dict) and (s.get("clock") or {}).get("mode", "auto") == "auto" and meta["clock"].get("mode") in ("on", "off"):
+            s["clock"] = {**(s.get("clock") or {}), **{k: meta["clock"][k] for k in ("mode", "start", "minutes", "weekdays", "start_day") if k in meta["clock"]}}
+            changed.append("world clock")
     if "trackers" in want and (sb := _pack_sidebar(meta)):
         s["sidebar"] = {**(s.get("sidebar") or {}), **sb}
+        tracker.seed_starts(s)                         # starting values for trackers the game did not have
         changed.append(f"{len(sb['custom'])} trackers")
     if "art" in want and isinstance(meta.get("art"), dict):
         s["art"] = {**(s.get("art") or {}), **meta["art"]}
@@ -4171,11 +4673,29 @@ async def update_from_pack(sid: str, request: Request, parts: str = "text,tracke
         _pack_places(meta, s, save_file)
         _pack_species(meta, s, save_file)
         changed.append("places and species")
+        if meta.get("cover") and not s.get("cover") and save_file(meta["cover"], store.PORTRAITS / sid / f"cover{Path(meta['cover']).suffix}"):
+            s["cover"] = f"/portraits/{sid}/cover{Path(meta['cover']).suffix}?v={int(time.time())}"
+            changed.append("cover")
+        if meta.get("backdrop") and not (s.get("backdrop") or {}).get("url") and save_file(meta["backdrop"], store.PORTRAITS / sid / f"backdrop{Path(meta['backdrop']).suffix}"):
+            s["backdrop"] = {"url": f"/portraits/{sid}/backdrop{Path(meta['backdrop']).suffix}?v={int(time.time())}", "source": "package"}
+            changed.append("backdrop")
     if "cast" in want:
         known = {c["name"].lower() for c in s.get("cast", [])} | {c["slug"] for c in s.get("cast", [])}
         new = [c for c in meta.get("cast", []) if isinstance(c, dict) and c.get("name") and c["name"].lower() not in known and _slug(c.get("slug") or c["name"]) not in known]
         s.setdefault("cast", []).extend(_pack_char(c, sid, save_file) for c in new)
         changed.append(f"{len(new)} new character{'s' if len(new) != 1 else ''}")
+        n_pic = 0                          # characters the game has but with no pictures (for example after their pictures were deleted): the package's pictures are put back
+        by = {c["name"].lower(): c for c in s["cast"]} | {c["slug"]: c for c in s["cast"]}
+        for pc in meta.get("cast", []):
+            ex = by.get(str(pc.get("name", "")).lower()) or by.get(_slug(pc.get("slug") or pc.get("name") or ""))
+            if ex and not ex.get("moods") and pc.get("moods"):
+                got = _pack_char(pc, sid, save_file)
+                if got["moods"]:
+                    ex["moods"] = got["moods"]
+                    ex["appearance"] = ex.get("appearance") or got["appearance"]
+                    n_pic += 1
+        if n_pic:
+            changed.append(f"pictures for {n_pic} character{'s' if n_pic != 1 else ''}")
     store.save_story(s)
     return {**_story(sid), "import_notes": notes, "updated_parts": changed}
 
@@ -5452,7 +5972,7 @@ async def _update_now(sid: str) -> None:
             return cast.get(n) or next((v for k, v in cast.items() if k.split()[0] == n.split()[0]), "") if n else ""
         tags = [(canon(a), b.strip()) for a, b in _PORTRAIT_TAG.findall(last)]
         tags = [(n, m) for n, m in tags if n]
-        if (s.get("art") or {}).get("now_free"):          # tags only: who and their mood come from the narrator's own portrait tags, with no AI call
+        if (s.get("art") or {}).get("now_free") or _local_on(cfg, _role(cfg, s, "small")[0]):          # tags only: who and their mood come from the narrator's own portrait tags, with no AI call
             if tags:
                 s2 = _story(sid)
                 old_now = s2.get("now") or {}
@@ -5460,6 +5980,22 @@ async def _update_now(sid: str) -> None:
                 s2["now"] = {"name": tags[-1][0], "mood": tags[-1][1].lower().strip()[:30], "doing": old_now.get("doing", "") if same else "", "wearing": old_now.get("wearing", "") if same else "",
                              "turn": len(s2["turns"]), **{k: old_now[k] for k in ("image", "image_key") if old_now.get(k)}}
                 store.save_story(s2)
+            elif _local_on(cfg, _role(cfg, s, "small")[0]):      # no portrait tag: read the mood from the words around a character's name
+                best = None
+                for c in s.get("cast", []):
+                    if c.get("player") or c["name"].lower() == player or not c.get("moods"):
+                        continue
+                    n = len(re.findall(rf"\b{re.escape(c['name'].split()[0])}\b", last, re.I))
+                    if n and (best is None or n > best[0]):
+                        best = (n, c)
+                if best:
+                    mood = localfix.guess_mood(last, best[1]["name"], list(best[1]["moods"]))
+                    s2 = _story(sid)
+                    old_now = s2.get("now") or {}
+                    same = old_now.get("name") == best[1]["name"]
+                    s2["now"] = {"name": best[1]["name"], "mood": mood, "doing": old_now.get("doing", "") if same else "", "wearing": old_now.get("wearing", "") if same else "",
+                                 "turn": len(s2["turns"]), **{k: old_now[k] for k in ("image", "image_key") if old_now.get(k)}}
+                    store.save_story(s2)
             return
         hint = f"Hint from the narrator's portrait tags (the last one is the latest): {tags[-1][0]} looks {tags[-1][1]}." if tags else ""
         prev = s.get("now") or {}
@@ -5517,7 +6053,7 @@ async def _draw_now(sid: str, key: str) -> None:
             if _is_explicit(scene + " " + now.get("wearing", ""), cfg) and (ns := _nsfw_provider(cfg, s)):
                 prov = ns
             _model_ctx.set(prov.get("model", ""))
-            refs = _load_refs(_portrait_urls(ch, mood or None), int(cfg.get("image_max_refs", 3)))
+            refs = _load_refs(_portrait_urls(ch, mood or None), int(cfg.get("image_max_refs", 3)), prov)
             art = _nsfw_art(await _art_with_setting(s, cfg), prov)
             where = ((s.get("backdrop") or {}).get("name") or "").strip()
             look = _full_appearance(s, ch)
@@ -5991,7 +6527,7 @@ async def _cover_text(s: dict, cfg: dict, prov: dict) -> str:
     tprov_model = _role(cfg, s, "recaps", "cover art")
     tags = _wants_tags(prov)
     system = ("You write one prompt for an image generator: key art for the cover of an interactive story. Show the setting and the main "
-              "character or characters in a striking, cinematic composition. No text, letters, logos or UI. Keep it safe for work: no nudity or explicit content. "
+              "character or characters in a striking, cinematic composition framed for a tall portrait (vertical) cover. No text, letters, logos or UI. Keep it safe for work: no nudity or explicit content. "
               + ("Reply with ONE line of comma-separated lowercase Danbooru-style tags (subject count first, hair, eyes, clothing, pose, setting, lighting, framing). No names, no sentences."
                  if tags else "Reply with 2 or 3 descriptive sentences. No names of real people.") + " Output only the prompt.")
     basis = (s.get("description") or "") + "\n\n" + s["base_prompt"][:5000] + ("\n\nCharacters:\n" + "\n".join(f"{c['name']}: {c['appearance']}" for c in s["cast"][:6] if c.get("appearance")) if s.get("cast") else "")
@@ -6003,14 +6539,30 @@ def _cover_prompt(s: dict, prov: dict, text: str) -> str:
     """The full prompt sent to the picture maker: the story's art style, plus the (editable) cover description."""
     art = s["art"]
     if _wants_tags(prov):
-        return ", ".join(x for x in (images.plain(art.get("direction") or "").strip(), "masterpiece, best quality, cover art, wide shot", text) if x)
+        return ", ".join(x for x in (images.plain(art.get("direction") or "").strip(), "masterpiece, best quality, cover art, vertical composition, portrait orientation", text) if x)
     return "\n\n".join(x for x in (images.plain(art.get("direction") or "").strip(), text, images.SAFE_LINE) if x)
+
+
+def _cover_provider(cfg: dict, s: dict, provider: str | None, model: str | None) -> dict:
+    """The picture maker for a cover: the one chosen in the cover dialog (any picture service and model, so different ones can be tried), else the story's own."""
+    if not provider:
+        return _img_provider(cfg, None, s)
+    prov = next((p for p in cfg.get("image_providers", []) if p["id"] == provider), None)
+    if not prov:
+        raise HTTPException(400, "That picture maker is not set up. Choose another one, or set it up under 🖼 Picture makers.")
+    usage.set_ctx(s.get("id"), "pictures")
+    if model:
+        prov = {**prov, "model": model}
+    if prov.get("type") == "comfyui" and _is_flux_model(prov.get("model", "")):
+        return {**_flux_provider(cfg, s, prov["model"]), "id": prov["id"]}
+    return prov
 
 
 @app.get("/api/stories/{sid}/cover/prompt")
 def get_cover_prompt(sid: str):
-    """The last cover picture description (written by the text model or edited by the player), or ''."""
-    return {"prompt": _story(sid).get("cover_prompt", "")}
+    """The last cover picture description (written by the text model or edited by the player), or ''. Also the picture maker last used for a cover."""
+    s = _story(sid)
+    return {"prompt": s.get("cover_prompt", ""), "maker": s.get("cover_maker") or {}}
 
 
 @app.post("/api/stories/{sid}/cover/describe")
@@ -6028,13 +6580,17 @@ class CoverCandIn(BaseModel):
     prompt: str = ""                 # the cover description (as edited by the player); empty = have the text model write one first
     count: int = 4
     fresh: bool = True               # false = add to the options already drawn
+    provider: str = ""               # the picture service to draw with (empty = the story's own maker) and its model: lets different makers be tried for a cover
+    model: str = ""
 
 
 @app.post("/api/stories/{sid}/cover/candidates")
 async def cover_candidates(sid: str, body: CoverCandIn):
     """Draw several candidate cover pictures (default 4) from the editable description. Nothing changes on the card until .../cover/choose."""
     s, cfg = _story(sid), store.load_config()
-    prov = _img_provider(cfg, None, s)
+    prov = _cover_provider(cfg, s, body.provider.strip() or None, body.model.strip() or None)
+    s["cover_maker"] = {"provider": body.provider.strip(), "model": body.model.strip()} if body.provider.strip() else {}
+    store.save_story(s)
     count, text = max(1, min(int(body.count), 8)), body.prompt.strip()
     job = _new_job("cover", sid, count)
     job["result"] = {"candidates": [], "prompt": text}
@@ -6056,7 +6612,7 @@ async def cover_candidates(sid: str, body: CoverCandIn):
         for i in range(count):
             j["current"] = f"Drawing option {i + 1} of {count}…"
             try:
-                data, ext = await images.generate(prov, prompt, negative, "landscape")
+                data, ext = await images.generate(prov, prompt, negative, "portrait")     # covers are portrait, like the cards on the Home screen
             except images.ImageError as e:
                 raise HTTPException(502, str(e))
             f = folder / f"cand-{int(time.time() * 1000)}-{i}.{ext}"
@@ -6629,7 +7185,24 @@ def get_dice(sid: str):
     s = _story(sid)
     d = s.get("dice") or {}
     return {"mode": d.get("mode", ""), "effective": rules.dice_mode(s), "prompt_calls_for_checks": rules.prompt_calls_for_checks(s), "difficulty": d.get("difficulty", "medium"),
-            "stats": rules.check_stats(s), "difficulties": rules.DIFFICULTY}
+            "stats": rules.check_stats(s), "difficulties": rules.DIFFICULTY, "offer": rules.dice_offer(s)}
+
+
+class DiceOfferIn(BaseModel):
+    mode: str = "off"               # auto = the app rolls for risky moves (and the dice rule is added to the prompt if it has none) | manual = only the 🎲 button | off
+
+
+@app.post("/api/stories/{sid}/dice/offer")
+def answer_dice_offer(sid: str, body: DiceOfferIn):
+    """The answer to the one-time question shown for a story that has stats and levels. It is never asked again."""
+    s = _story(sid)
+    d = s.setdefault("dice", {})
+    d["offered"] = True
+    d["mode"] = body.mode if body.mode in ("auto", "manual", "off") else "off"
+    if d["mode"] == "auto":
+        rules.add_dice_rule(s)
+    store.save_story(s)
+    return get_dice(sid)
 
 
 @app.put("/api/stories/{sid}/dice")
@@ -6740,13 +7313,17 @@ def _clock_view(s: dict) -> dict:
     c = clock.settings(s)
     m = clock.current(s)
     return {"mode": c["mode"], "start": c["start"], "minutes": c["minutes"], "detected": clock.prompt_uses_clock(s), "on": clock.is_on(s),
-            "time": clock.fmt(m) if m is not None else "", "part": clock.part_of_day(m) if m is not None else ""}
+            "time": clock.fmt(m) if m is not None else "", "part": clock.part_of_day(m) if m is not None else "",
+            "weekdays": c["weekdays"], "start_day": c["start_day"], "weekdays_on": clock.weekdays_on(s), "weekdays_detected": clock.prompt_uses_weekdays(s),
+            "weekday": clock.WEEKDAYS[clock.current_weekday(s)] if clock.current_weekday(s) is not None else ""}
 
 
 class ClockIn(BaseModel):
     mode: str | None = None          # auto | on | off
     start: str | None = None         # "06:00": where a new day starts
     minutes: int | None = None       # how far each reply moves time on
+    weekdays: str | None = None      # auto | on | off: keep the day of the week (Monday, Tuesday...)
+    start_day: str | None = None     # the weekday of Day 1 ("" = what the story prompt says, else Monday)
 
 
 @app.get("/api/stories/{sid}/clock")
@@ -6764,8 +7341,15 @@ def put_clock(sid: str, body: ClockIn):
         c["start"] = clock.fmt(clock.parse_time(body.start))
     if body.minutes is not None:
         c["minutes"] = max(1, min(int(body.minutes), 720))
+    if body.weekdays in ("auto", "on", "off"):
+        c["weekdays"] = body.weekdays
+    if body.start_day is not None:
+        i = clock.weekday_index(body.start_day)
+        c["start_day"] = clock.WEEKDAYS[i] if i is not None else ""
     if not clock.is_on(s):
         (s.get("tracker") or {}).pop("_clock", None)
+    if not clock.weekdays_on(s) or body.start_day is not None:
+        (s.get("tracker") or {}).pop("_wd", None)
     store.save_story(s)
     return _clock_view(s)
 
@@ -6776,21 +7360,36 @@ class ClockSetIn(BaseModel):
 
 @app.post("/api/stories/{sid}/clock/set")
 def set_clock(sid: str, body: ClockSetIn):
-    """Set the in-world time by hand (for example after a time skip the narrator did not mention). The narrator is told the new time with the next move."""
+    """Set the in-world time and/or day of the week by hand ("14:30", "Tuesday", "Tuesday 2:30 pm"), for example after a time skip the narrator did not mention.
+    The narrator is told the new time with the next move."""
     s = _story(sid)
-    m = clock.parse_time(body.time)
-    if m is None:
-        raise HTTPException(400, "Type a time like 14:30 or 2:30 pm.")
-    if not clock.is_on(s):
-        raise HTTPException(400, "The world clock is off for this story (✏️ Edit story → Options).")
+    text = body.time or ""
+    wd = clock.weekday_index(text) if clock._WD_FULL.search(text) or clock._WD.search(text) else None
+    rest = clock._WD.sub(" ", text).strip(" ,;-")
+    m = clock.parse_time(rest) if rest else None
+    if m is None and wd is None:
+        raise HTTPException(400, "Type a time like 14:30 or 2:30 pm, a day like Tuesday, or both.")
     tr = s.setdefault("tracker", tracker.blank())
-    st = tr.get("_clock") or {"day": clock._day(s), "t": len(s["turns"]) // 2, "shown": None}
-    st["min"] = m
-    tr["_clock"] = st
-    tf = clock._field(s, ("time", "clock", "time of day"))
-    if tf:
-        sec, k = tf["id"].split(".", 1)
-        tr.setdefault(sec, {})[k] = clock.fmt(m); st["shown"] = clock.fmt(m)
+    if m is not None:
+        if not clock.is_on(s):
+            raise HTTPException(400, "The world clock is off for this story (✏️ Edit story → Options).")
+        st = tr.get("_clock") or {"day": clock._day(s), "t": len(s["turns"]) // 2, "shown": None}
+        st["min"] = m
+        tr["_clock"] = st
+        tf = clock._field(s, ("time", "clock", "time of day"))
+        if tf:
+            sec, k = tf["id"].split(".", 1)
+            tr.setdefault(sec, {})[k] = clock.fmt(m); st["shown"] = clock.fmt(m)
+    if wd is not None:
+        if not clock.weekdays_on(s):
+            raise HTTPException(400, "Days of the week are off for this story (✏️ Edit story → Options → World clock).")
+        st = tr.get("_wd") or {"day": clock._day(s), "t": len(s["turns"]) // 2, "shown": None}
+        st["i"] = wd
+        tr["_wd"] = st
+        wf = clock._wd_field(s)
+        if wf:
+            sec, k = wf["id"].split(".", 1)
+            tr.setdefault(sec, {})[k] = clock.WEEKDAYS[wd]; st["shown"] = clock.WEEKDAYS[wd]
     store.save_story(s)
     return {"clock": _clock_view(s), "story": s}
 
