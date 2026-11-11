@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
          "api_key": "", "models": []},
         {"id": "xai", "type": "openai", "name": "Grok (xAI)", "base_url": "https://api.x.ai/v1", "api_key": "", "models": []},
     ],
+    "setup_done": False,        # the first-run "choose your key settings" pop-up has been answered (or skipped). Installs that already have a config are treated as done
     "budget_daily": 0,          # spending limit per day in dollars (0 = none); estimates from the usage log
     "budget_monthly": 0,        # ...per month
     "budget_action": "warn",    # "warn" = show a warning; "stop" = stop paid calls once a limit is reached (you can still override)
@@ -98,6 +99,7 @@ DEFAULT_CONFIG = {
     "cache_ttl": "5m",         # how long Claude keeps the cached prompt: "5m" (cheaper writes) or "1h"
     "keep_warm": False,        # re-send the story shortly before the Claude cache expires, so it stays cached while you are away
     "keep_warm_hours": 2,      # ...but stop this many hours after your last real turn
+    "local_mode": False,       # one switch for local-only play: context guard, JSON-forced helpers, steadier sampling, one helper at a time
     "keep_alive": "30m",       # how long Ollama keeps the model + its KV cache loaded between turns
     "summarize_when": 24,      # fold older turns into the memory summary once history exceeds this many messages
     "keep_recent": 10,         # ...leaving this many recent messages verbatim
@@ -117,6 +119,8 @@ def load_config() -> dict:
         cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     else:
         cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    if CONFIG.exists() and "setup_done" not in cfg:
+        cfg["setup_done"] = True          # an existing install is not a first run
     for k, v in DEFAULT_CONFIG.items():
         cfg.setdefault(k, v)
     if isinstance(cfg.get("mood_sets"), dict):      # sets added after the config was saved (for example "action") are filled in; the player's own lists stay as written
@@ -176,7 +180,7 @@ def new_story(title: str, subtitle: str, base_prompt: str, player_name: str = ""
         "models": {},          # this story's AI choices: story / recaps / images -> {"provider", "model"} (empty = use app defaults)
         "user_notes": "",      # standing instructions from the player, sent every turn
         "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "action_moods": True, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
+                "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "action_moods": True, "extended_moods": False, "scene_often": False, "scene_gap": 1, "scene_display": "normal", "scene_scale": "normal", "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
         "art_dismissed": [],   # names the player said never to ask about
         "cast": [],            # characters: name, appearance (for image prompts), moods {mood: portrait url}
         "opening": "",         # the story's first scene (markdown), shown before the first move; ![](intro:It1) shows an intro panel
@@ -207,7 +211,7 @@ STORY_DEFAULTS = {
     "cover": "", "description": "",
     "auto_replies": False, "reply_options": {}, "group_cast": True, "models": {}, "avatar": {}, "avatar_image": "", "user_notes": "", "cast": [], "opening": "", "opening_in_context": True, "intro_images": [],
     "art": {"direction": "", "negative": "low quality, blurry, deformed hands, watermark, text",
-            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "action_moods": True, "extended_moods": False, "scene_often": False, "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
+            "size": "portrait", "auto": False, "portraits": True, "portrait_size": "medium", "portrait_shape": "landscape", "suggest": True, "newchar": False, "exact_moods": False, "action_moods": True, "extended_moods": False, "scene_often": False, "scene_gap": 1, "scene_display": "normal", "scene_scale": "normal", "scene_where": "reply", "auto_backdrop": False, "dynamic_backdrop": False, "now_card": False, "now_pic": "portrait"},
     "art_dismissed": [],
 }
 

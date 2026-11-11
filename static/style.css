@@ -91,7 +91,7 @@ footer { padding: 8px 16px 16px; border-top: 1px solid var(--line); }
   input, select, textarea { font-size: 16px; }   /* stops iOS from zooming into fields */
   #modal { padding: 0; align-items: stretch; }
   .card { width: 100%; max-height: 100%; border-radius: 0; padding: 16px 14px 24px; }
-  .hwrap { padding: 12px 12px 30px; } .hgrid { grid-template-columns: 1fr; }
+  .hwrap { padding: 12px 12px 30px; }
   .hhead { flex-wrap: wrap; }
 }
 
@@ -202,12 +202,13 @@ button.charcard { padding: 0; text-align: left; border-radius: 12px; overflow: h
 .hwrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
 .hhead { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
 .hhead h1 { margin: 0; font-size: 24px; }
-.hgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; }
+.hgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
 .hcard { background: var(--panel2); border-radius: 14px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; border: 1px solid transparent; text-align: left; padding: 0; }
 .hcard:hover { border-color: var(--accent, #8b7cf6); }
-.hcover { position: relative; aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center; font-size: 56px; font-weight: 700; color: rgba(255,255,255,.55); overflow: hidden; }
+.hcover { position: relative; aspect-ratio: 600 / 914;   /* the proportions of a portrait cover (Lumencia Academy's), so it is shown whole */
+   display: flex; align-items: center; justify-content: center; font-size: 56px; font-weight: 700; color: rgba(255,255,255,.55); overflow: hidden; }
 .hcover img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.hcover.small { max-width: 320px; font-size: 32px; border-radius: 10px; margin-bottom: 8px; }
+.hcover.small { max-width: 200px; font-size: 32px; border-radius: 10px; margin-bottom: 8px; }
 .hedit { position: absolute; top: 8px; right: 8px; border-radius: 999px; padding: 0 10px; height: 26px; width: auto; font-size: 15px; line-height: 1; background: rgba(0,0,0,.55); }
 .hmeta { padding: 10px 14px 14px; display: flex; flex-direction: column; gap: 4px; }
 .hmeta p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
@@ -354,7 +355,7 @@ body.has-backdrop #app { background: var(--bg); box-shadow: 0 0 70px rgba(0,0,0,
   .tools { flex-wrap: wrap; overflow-x: visible; }   /* all the header buttons stay visible on a phone */
   .tools select { flex: 1 1 100%; max-width: none; }
   button.icon { width: 40px; height: 40px; }
-  .hcover { aspect-ratio: 2 / 1; font-size: 40px; }
+  .hcover { font-size: 40px; }
 }
 
 .trow { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin: 6px 0; background: var(--panel2); }
@@ -539,3 +540,111 @@ button.spend { width: 22px; height: 22px; padding: 0; line-height: 1; font-weigh
 .dlbadge { font-size: 11px; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; margin-left: 4px; color: var(--muted); } .dlbadge.over { color: #fff; background: #c0504d; border-color: #c0504d; }
 /* button rows in dialogs wrap instead of running off the edge (a phone is narrow) */
 .card .actions { flex-wrap: wrap; }
+
+/* the latest dice roll, top of the side panel (gone on the next move without a roll) */
+.rollcard { border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 8px; padding: 8px 10px; margin: 0 0 10px; background: rgba(255,255,255,.03); }
+.rollcard .rcl { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--muted); } .rollcard .rcl small, .rollcard .rcm small { color: var(--muted); }
+.rollcard .rcm { display: flex; align-items: baseline; gap: 10px; margin: 2px 0; } .rollcard .rcn { font-size: 26px; font-weight: 700; line-height: 1.1; } .rollcard .rcsum { font-size: 12.5px; color: var(--muted); }
+.rollcard .rco { font-size: 13px; font-weight: 600; text-transform: capitalize; }
+.rollcard.crit { border-left-color: var(--gold); } .rollcard.crit .rco { color: var(--gold); } .rollcard.win { border-left-color: var(--teal); } .rollcard.win .rco { color: var(--teal); }
+.rollcard.part { border-left-color: #d49b4a; } .rollcard.part .rco { color: #d49b4a; } .rollcard.lose, .rollcard.fumble { border-left-color: var(--danger); } .rollcard.lose .rco, .rollcard.fumble .rco { color: var(--danger); }
+
+/* phone: two story cards per row (the portrait covers would be huge in one column) */
+@media (max-width: 760px) { .hgrid { grid-template-columns: 1fr 1fr; gap: 10px; } .hcard .hcover { font-size: 34px; } }
+
+/* alternate openings: a row of buttons above the opening scene, before the first move */
+.altopen{margin:6px 0 10px;padding:10px 12px;border:1px solid var(--line,#444);border-radius:10px}
+.altopen .altbtns{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 6px}
+.altopen .altbtns button[disabled]{opacity:1;cursor:default}
+
+/* while the app starts, show nothing of the story screen: Home opens first */
+body.booting #app{visibility:hidden}
+
+/* scene picture sizes (Art options -> Scene pictures) and the Reframe menu */
+.scenefig.disp-large img.scene { max-width: min(100%, 860px); max-height: 88vh; }
+.scenefig.disp-full img.scene { max-width: 100%; width: 100%; max-height: none; }
+.scenefig.banner.disp-large img.scene, .scenefig.banner.disp-full img.scene { height: clamp(230px, 46vw, 460px); }
+.scenebar select.reframe { font-size: 12px; padding: 2px 4px; }
+
+/* first-start set-up pop-up */
+.suopts, .sustyles { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 8px; }
+.suopt, .sustyle { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); cursor: pointer; }
+.suopt:has(input:checked), .sustyle:has(input:checked) { border-color: var(--accent2); background: var(--panel); }
+.suopt input, .sustyle input { margin-top: 3px; flex: none; }
+.sustyles { display: grid; grid-template-columns: 1fr 1fr; } @media (max-width: 560px) { .sustyles { grid-template-columns: 1fr; } }
+.suclue { margin: 4px 0 8px; padding: 8px 10px; border-left: 3px solid var(--accent2); background: var(--panel2); border-radius: 0 8px 8px 0; font-size: 13px; }
+.suopt input, .sustyle input { width: auto; flex: none; padding: 0; margin: 3px 0 0; }
+.suopt > span, .sustyle > span { flex: 1; min-width: 0; }
+
+/* ---- side panel, tabbed style: underline tabs, a "you" card, cards for people ---- */
+#sidebar { padding: 0 0 16px; }
+#sidebar > *:not(.ptabs):not(.chgbar) { margin-left: 14px; margin-right: 14px; }
+.ptabs { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: nowrap; gap: 0; margin: 0 !important; padding: 0 6px; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; align-items: stretch; }
+.ptabs::-webkit-scrollbar { display: none; }
+.ptab { flex: 1 0 auto; padding: 11px 9px 9px; font-size: 12.5px; background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); }
+.ptab:hover { color: var(--text); }
+.ptab.on { color: var(--text); border-bottom-color: var(--accent2); background: none; font-weight: 600; }
+.pmin { flex: none; background: none; border: 0; color: var(--muted); padding: 0 8px; }
+.chgbar { margin: 0 !important; padding: 5px 14px; font-size: 11.5px; }
+.ppane { padding: 12px 14px 0; }
+.ppane h4 { margin: 14px 0 6px; }
+.ppane h4:first-child { margin-top: 2px; }
+.youcard { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel2); margin-bottom: 4px; }
+.youtxt { flex: 1; min-width: 0; display: flex; flex-direction: column; } .youtxt small { color: var(--muted); font-size: 11.5px; }
+.youedit { flex: none; background: none; border: 0; color: var(--muted); padding: 2px 6px; cursor: pointer; } .youedit:hover { color: var(--text); }
+.pav { flex: none; width: 44px; height: 44px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--muted); overflow: hidden; }
+.pav img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; display: block; }
+.pav.sm { width: 34px; height: 34px; border-radius: 8px; font-size: 14px; }
+#sidebar .pchar { border: 1px solid var(--line); border-radius: 12px; background: var(--panel2); padding: 9px 10px; margin: 0 0 8px; }
+#sidebar .pchar > .row:first-child { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+#sidebar .pchar .pname { flex: 1; min-width: 0; font-weight: 600; cursor: pointer; }
+#sidebar .pchar.dead { opacity: .6; }
+body.seethru #sidebar .ptabs { background: var(--app-panel); }
+
+/* ---- left panel: your stories and shortcuts ---- */
+#leftbar { width: 244px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px 12px 10px; border-right: 1px solid var(--line); background: var(--panel); font-size: 14px; overflow: hidden; }
+#leftbar.hidden { display: none; }
+.lbhead { display: flex; align-items: center; font-size: 15px; } .lbclose { background: none; border: 0; color: var(--muted); font-size: 16px; padding: 0 4px; cursor: pointer; }
+.lbnew { width: 100%; padding: 9px 10px; }
+.lbsearch { width: 100%; }
+.lbtabs { display: flex; gap: 14px; border-bottom: 1px solid var(--line); }
+.lbtab { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 4px 0 6px; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+.lbtab.on { color: var(--text); border-bottom-color: var(--accent2); font-weight: 600; } .lbtab small { color: var(--muted); }
+.lblist { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; margin: 0 -4px; padding: 0 4px; }
+.lbitem { display: flex; gap: 9px; align-items: center; text-align: left; width: 100%; padding: 6px 7px; background: none; border: 1px solid transparent; border-radius: 10px; color: var(--text); cursor: pointer; }
+.lbitem:hover { background: var(--panel2); } .lbitem.on { background: var(--panel2); border-color: var(--line); box-shadow: inset 3px 0 0 var(--accent2); }
+.lbthumb { flex: none; width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 700; color: rgba(255,255,255,.8); overflow: hidden; }
+.lbthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.lbtxt { min-width: 0; display: flex; flex-direction: column; } .lbtxt b { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .lbtxt small { color: var(--muted); font-size: 11.5px; }
+.lbnav { border-top: 1px solid var(--line); padding-top: 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.lbnav button { display: flex; gap: 7px; align-items: center; padding: 6px 8px; background: none; border: 1px solid transparent; border-radius: 8px; color: var(--muted); font-size: 12.5px; cursor: pointer; text-align: left; }
+.lbnav button:hover:not(:disabled) { background: var(--panel2); color: var(--text); } .lbnav button:disabled { opacity: .4; cursor: default; }
+body.seethru #leftbar { background: var(--app-panel); }
+.lefttab { display: none; }
+button.icon.mobonly { display: none; }
+@media (max-width: 760px) { #leftbar, .lefttab { display: none !important; } button.icon.mobonly { display: inline-flex; } }
+}
+
+/* the stories panel already has Home, Art and Settings: hide their copies in the top bar while it is open (wide screens) */
+@media (min-width: 761px) { body.leftopen #btnHome, body.leftopen #btnArt, body.leftopen #btnSettings { display: none; } }
+
+/* wide screens: when the stories panel is closed, a small tab on the left edge brings it back (the 📚 button does too) */
+@media (min-width: 761px) {
+  .lefttab { display: flex; align-items: center; justify-content: center; position: fixed; left: 0; top: 46%; z-index: 9; width: 20px; height: 64px; padding: 0; border: 1px solid var(--line); border-left: 0; border-radius: 0 10px 10px 0; background: var(--panel); color: var(--muted); opacity: .7; cursor: pointer; }
+  .lefttab:hover { opacity: 1; color: var(--text); }
+  body.leftopen .lefttab, body:has(#home:not(.hidden)) .lefttab { display: none; }
+}
+
+/* the story's own command buttons */
+.cmdbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px 0; }
+.cmdbar button { padding: 4px 12px; font-size: 12.5px; border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); color: var(--text); cursor: pointer; }
+.cmdbar button:hover { border-color: var(--accent2); }
+
+/* lore library: read-only cards first, with an Edit button */
+.lorecard .lrtitle { font-size: 15px; }
+.lorecard .lrbadge { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); }
+.lorecard .lrbadge.off { color: var(--danger, #e07a7a); }
+.lorecard .lrkeys { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 6px; }
+.lorecard .lrkey { font-size: 11.5px; padding: 1px 8px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); color: var(--accent2); }
+.lorecard .lrtext { white-space: pre-wrap; line-height: 1.5; font-size: 13.5px; }
+.loreitem.editing { border-color: var(--accent2); }
