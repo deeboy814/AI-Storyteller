@@ -25,9 +25,9 @@ from . import localrt, usage
 
 TIMEOUT = httpx.Timeout(connect=10, read=300, write=60, pool=10)
 
-SHAPES = {"portrait": (832, 1216), "landscape": (1216, 832), "square": (1024, 1024)}   # sizes for local SDXL-class models
-OPENAI_SIZES = {"portrait": "1024x1536", "landscape": "1536x1024", "square": "1024x1024"}
-SHAPE_WORDS = {"portrait": "portrait orientation (2:3)", "landscape": "landscape orientation (3:2)", "square": "square (1:1)"}
+SHAPES = {"portrait": (832, 1216), "landscape": (1216, 832), "square": (1024, 1024), "wide": (1344, 768)}   # sizes for local SDXL-class models
+OPENAI_SIZES = {"portrait": "1024x1536", "landscape": "1536x1024", "square": "1024x1024", "wide": "1536x1024"}
+SHAPE_WORDS = {"portrait": "portrait orientation (2:3)", "landscape": "landscape orientation (3:2)", "square": "square (1:1)", "wide": "wide cinematic landscape (16:9)"}
 
 
 class ImageError(Exception):
@@ -153,6 +153,60 @@ def _tw_num(tw: dict, key: str, lo: float, hi: float):
         return None
 
 
+def parse_loras(text) -> list[tuple[str, float]]:
+    """The LoRA list from a checkpoint's settings: one per line, "file.safetensors @ 0.8" (no "@" = strength 1). Strength is kept between -2 and 2."""
+    out = []
+    for ln in re.split(r"[\n;]", str(text or "")):
+        name, _, st = ln.strip().partition("@")
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            s = max(-2.0, min(2.0, float(st))) if st.strip() else 1.0
+        except ValueError:
+            s = 1.0
+        out.append((name, s))
+    return out[:6]
+
+
+_MODEL_LOADERS = ("CheckpointLoaderSimple", "CheckpointLoader", "UNETLoader", "UnetLoaderGGUF", "DiffusionModelLoader")
+_CLIP_LOADERS = ("CLIPLoader", "DualCLIPLoader", "CLIPLoaderGGUF", "TripleCLIPLoader")
+
+
+def add_loras(wf: dict, loras: list[tuple[str, float]]) -> dict:
+    """Put the chosen LoRAs between the workflow's model loader and everything that uses its model (and its text encoder, when it has one): a chain of LoraLoader nodes.
+    Works for checkpoint workflows (SDXL, Pony, Illustrious) and for diffusion-model workflows (FLUX.2) alike; a workflow it cannot read is left as it was."""
+    if not loras:
+        return wf
+    mid = next((k for k, n in wf.items() if isinstance(n, dict) and n.get("class_type") in _MODEL_LOADERS), None)
+    if mid is None:
+        return wf
+    msrc = [mid, 0]
+    if wf[mid]["class_type"].startswith("Checkpoint"):
+        csrc = [mid, 1]
+    else:
+        cid = next((k for k, n in wf.items() if isinstance(n, dict) and n.get("class_type") in _CLIP_LOADERS), None)
+        csrc = [cid, 0] if cid is not None else None
+    prev_m, prev_c, made = msrc, csrc, []
+    for i, (name, st) in enumerate(loras):
+        nid = f"lora{i + 1}"
+        inputs = {"lora_name": name, "strength_model": st, "model": prev_m}
+        if prev_c:
+            inputs.update({"strength_clip": st, "clip": prev_c})
+        wf[nid] = {"class_type": "LoraLoader" if prev_c else "LoraLoaderModelOnly", "inputs": inputs}
+        made.append(nid)
+        prev_m, prev_c = [nid, 0], ([nid, 1] if prev_c else None)
+    for k, n in wf.items():
+        if k in made or not isinstance(n, dict) or not isinstance(n.get("inputs"), dict):
+            continue
+        for key, v in n["inputs"].items():
+            if v == msrc:
+                n["inputs"][key] = prev_m
+            elif csrc and v == csrc:
+                n["inputs"][key] = prev_c
+    return wf
+
+
 def tweak_workflow(wf: dict, tw: dict) -> dict:
     """Per-checkpoint settings applied to the workflow's own numbers (the workflow itself stays shared):
     ref_weight / ref_end go to the IPAdapter node that applies the reference to the model, hires_denoise to the second (refining)
@@ -209,7 +263,7 @@ def tweak_workflow(wf: dict, tw: dict) -> dict:
     return wf
 
 
-def face_region(data: bytes) -> bytes:
+def face_region(data: bytes, tight: bool = False) -> bytes:
     """Crop a reference picture to where the face is: the app draws portraits upper-body, centred and facing the viewer, so the middle half
     of the width and the top 62% holds the head and shoulders. The face model only sees a small square of the whole picture, so a tight
     crop gives it much more of the face to match. Returns the picture unchanged if it can't be read."""
@@ -218,7 +272,11 @@ def face_region(data: bytes) -> bytes:
         im = Image.open(io.BytesIO(data)).convert("RGB")
         w, h = im.size
         out = io.BytesIO()
-        im.crop((int(w * 0.25), 0, int(w * 0.75), max(1, int(h * 0.62)))).save(out, "PNG")
+        if tight:     # only the face, about square: for pictures where the clothes and the place must change (explicit pictures), so the outfit and background of the reference do not carry over
+            box = (0.37, 0.05, 0.63, 0.34) if w >= h else (0.30, 0.03, 0.70, 0.27)
+            im.crop((int(w * box[0]), int(h * box[1]), int(w * box[2]), max(2, int(h * box[3])))).save(out, "PNG")
+        else:
+            im.crop((int(w * 0.25), 0, int(w * 0.75), max(1, int(h * 0.62)))).save(out, "PNG")
         return out.getvalue()
     except Exception:
         return data
@@ -232,6 +290,8 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
     except ValueError as e:
         raise ImageError(f"The ComfyUI workflow in Settings is not valid JSON: {e}")
     w, h = SHAPES[shape]
+    if p.get("_scale"):       # "Larger scene pictures" (story art options): a bigger canvas, rounded to what the model likes (multiples of 64)
+        w, h = (int(round(v * float(p["_scale"]) / 64)) * 64 for v in (w, h))
     if p.get("ref_megapixels"):   # a species reference is shown at a tiny size, so only its broad look (colours, crests, ears, build) carries over, not the individual's face
         for n in wf.values():
             if isinstance(n, dict) and n.get("class_type") == "ImageScaleToTotalPixels":
@@ -243,7 +303,10 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
         if n:
             refs = refs[: int(n)]
         if str(tw.get("ref_crop", "")).strip().lower() == "face":
-            refs = [(face_region(d), "image/png") for d, m in refs]
+            refs = [(face_region(d, bool(p.get("_tight_face"))), "image/png") for d, m in refs]
+    loras = parse_loras(tw.get("loras"))      # LoRAs chosen for this checkpoint (Settings -> Pictures -> Local)
+    if loras:
+        wf = add_loras(wf, loras)
     # optional tweaks added to every picture; a checkpoint's own words replace the shared ones
     xpos = (tw.get("extra_positive") or "").strip() or (p.get("extra_positive") or "").strip()
     xneg = (tw.get("extra_negative") or "").strip() or (p.get("extra_negative") or "").strip()
@@ -269,6 +332,8 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
                     values[f"ref{i + 1}"] = names[min(i, len(names) - 1)]
             wf = fill_workflow(wf, values)
             sub = await c.post(base + "/prompt", json={"prompt": wf, "client_id": uuid.uuid4().hex})
+            if sub.status_code >= 400 and "lora_name" in sub.text and "not in list" in sub.text.lower():
+                raise ImageError("A LoRA chosen for this checkpoint is not in ComfyUI's loras folder (or its name changed). Remove it or pick another under Settings → Pictures → Local → Settings for this checkpoint.")
             if sub.status_code >= 400:
                 raise ImageError(f"ComfyUI rejected the workflow ({sub.status_code}): {sub.text[:600]}")
             pid = sub.json()["prompt_id"]
@@ -349,7 +414,7 @@ STYLE_PRESETS = [   # id, label, art direction (added to every picture prompt of
 STYLE_MATCH = "Draw in exactly the same art style as the reference pictures (their style, line work and colors take priority over any style words above)."
 
 
-def scene_prompt(art: dict, scene: str, chars: list[dict], max_refs_used: int, nsfw: bool = False) -> str:
+def scene_prompt(art: dict, scene: str, chars: list[dict], max_refs_used: int, nsfw: bool = False, clothes_from_ref: bool = True) -> str:
     """Scene prompt: art direction + the scene + who is in it. `chars` items: {"name", "appearance", "ref": bool}."""
     lines = [plain(art.get("direction") or "").strip(), f"Scene: {scene.strip()}"]
     if chars:
@@ -359,10 +424,21 @@ def scene_prompt(art: dict, scene: str, chars: list[dict], max_refs_used: int, n
             n = refd.index(c) + 1 if c in refd else None
             lines.append(f"- {c['name']}: {c.get('appearance', '').strip()}" + (f" (reference image {n})" if n else ""))
         if refd:
-            lines.append("Reference images are attached. For each character, copy the face, hair and clothing from their reference "
-                         "image. Do NOT copy the reference's background, pose, camera angle or lighting: those come from the scene above. " + STYLE_MATCH)
+            lines.append(("Reference images are attached. For each character, copy the face, hair and clothing from their reference "
+                          "image. Do NOT copy the reference's background, pose, camera angle or lighting: those come from the scene above. " if clothes_from_ref else
+                          "Reference images are attached. For each character, copy only the face and hair from their reference image. Their clothing, pose, camera angle, "
+                          "background and lighting all come from the scene above (what they wear, or do not wear, is decided there). ") + STYLE_MATCH)
     lines.append(content_line(nsfw))
     return "\n\n".join(x for x in lines if x)
+
+
+def nsfw_portrait_prompt(art: dict, name: str, look: str, mood: str, framing: str, words: str) -> str:
+    """A short, subject-first prompt for the adult picture maker (an SDXL-style model that reads words, not instructions): the story's style, who (face and body only, no outfit),
+    what the picture shows (the mood and its explicit words) and the framing. Long instruction sentences and the character's everyday outfit are left out: they pull the picture back to
+    a clothed, neutral portrait."""
+    head = plain(art.get("direction") or "").strip()
+    who = f"{name}: {look}".strip(": ")
+    return "\n\n".join(x for x in (head, who, (mood + ". Make the expression and body language show it clearly.") if mood else "", words, framing, "Plain, softly lit, simple indoor background.", ADULT_LINE) if x)
 
 
 MOOD_EMPHASIS = ("The mood must be unmistakable at a glance: show it strongly in the face (eyes, eyebrows, mouth) AND in the body language (head tilt, "

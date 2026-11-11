@@ -3,7 +3,7 @@ import copy
 import json
 import re
 
-from . import characters, store, tracker
+from . import appstatus, characters, localfix, store, tracker
 
 ENGINE_CORE = """\
 === ENGINE RULES (added by the app; always follow) ===
@@ -171,6 +171,12 @@ def _place_rows(story: dict) -> list[str]:
     return sorted(f"- {p['name']}" + (f": {p['description']}" if (p.get("description") or "").strip() else "") for p in story.get("places") or [] if p.get("url"))
 
 
+def species_block(story: dict) -> str:
+    """What is true of each species that has story traits (Art → Species), so the narrator keeps abilities, weaknesses and customs consistent."""
+    rows = [f"- {sp.get('name', k)}: {sp['traits'].strip()}" for k, sp in (story.get("species") or {}).items() if (sp.get("traits") or "").strip()]
+    return ("=== SPECIES (what is true of each kind of being in this story; keep it consistent) ===\n" + "\n".join(rows)) if rows else ""
+
+
 def places_block(story: dict) -> str:
     """Static place pictures the narrator can show: rooms and locations the story returns to again and again (only places that have a picture)."""
     if not _place_rows(story):
@@ -316,6 +322,23 @@ def endings_block(story: dict) -> str:
     return out
 
 
+def scene_due(story: dict) -> bool:
+    """False while the story is inside its "turns between scene pictures" gap (art.scene_gap, default 1 = no limit), counting replies since the last one that carried a scene."""
+    gap = int((story.get("art") or {}).get("scene_gap") or 1)
+    if gap <= 1:
+        return True
+    since = 0
+    for t in reversed(story.get("turns") or []):
+        if t.get("role") != "assistant":
+            continue
+        if t.get("scene"):
+            break
+        since += 1
+    else:
+        return True                          # no scene picture yet
+    return since + 1 >= gap
+
+
 def _past_first_turn(story: dict) -> bool:
     """True once the narrator has already replied: the story prompt is no longer fresh, so the app has to carry the reminder."""
     return any(t.get("role") == "assistant" for t in story.get("turns") or [])
@@ -397,7 +420,9 @@ def picture_reminder(story: dict) -> str:
     if action_moods_on(story) and any(c.get("moods") for c in story.get("cast") or []) and _past_first_turn(story) and _in_action_scene(story):
         lines.append("The story is in an action scene right now: for the portrait tags of the characters involved use ACTION moods (" + _action_names(story) + ") that match what each is physically "
                      "doing, not calm expression moods, until the action is over.")
-    if art.get("auto") and art.get("scene_often"):
+    if art.get("auto") and not scene_due(story):
+        lines.append("Do NOT end this reply with a <scene> frame; the app is spacing scene pictures out.")
+    elif art.get("auto") and art.get("scene_often"):
         has_places = any(p.get("url") for p in story.get("places") or [])
         lines.append("End this reply with a <scene>…</scene> frame unless it is only a short back-and-forth" + (" or only moves the characters into a listed place" if has_places else "")
                      + ". One or two named characters, their poses, expressions, clothing and the lighting.")
@@ -406,12 +431,15 @@ def picture_reminder(story: dict) -> str:
     return ("[PICTURE REMINDER, for the narrator only] " + " ".join(lines)) if lines else ""
 
 
-def build(story: dict, beats_note: str = "") -> Built:
+def build(story: dict, beats_note: str = "", local: bool = False) -> Built:
     use_state = story.get("use_state_block", True)
     core_rules = ENGINE_CORE.replace("Never decide the\nplayer character's actions or words beyond what the player stated.", ACTS_RULE) if story.get("narrator_acts") else ENGINE_CORE
     rules = core_rules + ("\n" + ENGINE_STATE if use_state else "")
+    drawn = appstatus.last_block(story) if story.get("app_status") else None     # the app writes the status line, so the narrator leaves it out
+    if drawn:
+        rules += "\n\n" + appstatus.RULE
     name = player_name(story)
-    core = "\n\n".join(p for p in (story.get("base_prompt", "").strip(), avatar_block(story), cast_block(story), names_block(story), endings_block(story), images_block(story), rules, content_block(story)) if p)
+    core = "\n\n".join(p for p in (story.get("base_prompt", "").strip(), avatar_block(story), cast_block(story), species_block(story), names_block(story), endings_block(story), images_block(story), rules, content_block(story)) if p)
     extras = []
     if story.get("prologue", "").strip():
         extras.append("=== PROLOGUE (events before the story begins; established background the narrator knows) ===\n" + story["prologue"].strip())
@@ -432,6 +460,8 @@ def build(story: dict, beats_note: str = "") -> Built:
         tail = (tail + "\n\n" if tail else "") + panel
     if beats_note:     # story beats that are due (the app's schedule); hidden from the player
         tail = (tail + "\n\n" if tail else "") + beats_note
+    if drawn:      # the narrator no longer sees the status line in its earlier replies, so it is told the current values here
+        tail = (tail + "\n\n" if tail else "") + "[CURRENT STATUS LINE, drawn by the app: never write it, but keep the story consistent with these values]\n" + drawn
     pic = pictures_available(story)
     if pic:
         tail = (tail + "\n\n" if tail else "") + pic
@@ -441,8 +471,13 @@ def build(story: dict, beats_note: str = "") -> Built:
     rem = picture_reminder(story)
     if rem:
         tail = (tail + "\n\n" if tail else "") + rem
+    if local:      # Local-model mode: steadier prose from code (no AI call)
+        for note in (localfix.repeat_note(story), localfix.length_note(story)):
+            if note:
+                tail = (tail + "\n\n" if tail else "") + note
     start = min(story.get("summary_upto", 0), len(story["turns"]))
-    messages = [{"role": t["role"], "content": BEGIN_NOTE if _is_begin(story, t) else (compact_tags(t["text"]) if t["role"] == "assistant" else t["text"])} for t in story["turns"][start:]]
+    labels = appstatus.rules.expected_labels(story) if drawn else []
+    messages = [{"role": t["role"], "content": BEGIN_NOTE if _is_begin(story, t) else (compact_tags(appstatus.strip(t["text"], labels) if drawn else t["text"]) if t["role"] == "assistant" else t["text"])} for t in story["turns"][start:]]
     opening = opening_for_model(story)
     if opening and start == 0:   # the opening is the story's first message (older, summarized stories no longer need it)
         messages = [{"role": "user", "content": "(The story begins.)"}, {"role": "assistant", "content": opening}] + messages

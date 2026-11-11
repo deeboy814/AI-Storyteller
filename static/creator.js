@@ -3,16 +3,24 @@
 // (their cast and media are managed in the Cast screen / Home card).
 function editStory(s) { showStoryForm(s); }
 
+// Command buttons as plain lines: "Label | text" (text "@points" = the stat-points window, "@edit ..." = put it in the box)
+const cmdsToText = (list) => (list || []).map((c) => `${c.label} | ${c.kind === "points" ? "@points" : c.kind === "edit" ? "@edit " + c.text : c.text}`).join("\n");
+function cmdsFromText(t) {
+  return String(t || "").split("\n").map((ln) => { const [a, ...r] = ln.split("|"); const label = (a || "").trim(), x = r.join("|").trim(); if (!label) return null;
+    if (/^@points\b/i.test(x)) return { label, kind: "points", text: "" };
+    if (/^@edit\b/i.test(x)) return { label, kind: "edit", text: x.replace(/^@edit\s*/i, "") };
+    return x ? { label, kind: "send", text: x } : null; }).filter(Boolean).slice(0, 12);
+}
 async function showStoryForm(s) {
   const isNew = !s;
   if (!TRACKER_FIELDS.length) TRACKER_FIELDS = await api("/tracker-fields");
   const D = {   // the draft
     title: s ? s.title : "", subtitle: s ? s.subtitle || "" : "", description: s ? s.description || "" : "", base_prompt: s ? s.base_prompt : "",
     prologue: s ? s.prologue || "" : "", opening: s ? s.opening || "" : "", opening_in_context: !s || s.opening_in_context !== false,
-    opening_options: s ? [...(s.opening_options || [])] : [], endings: s ? (s.endings || []).map((e) => ({ ...e })) : [],
+    opening_options: s ? [...(s.opening_options || [])] : [], alt_openings: s ? (s.alt_openings || []).map((a) => ({ ...a })) : [], opening_name: s ? s.opening_name || "" : "", commands: s ? (s.commands || []).map((c) => ({ ...c })) : [], endings: s ? (s.endings || []).map((e) => ({ ...e })) : [],
     sidebar: s ? JSON.parse(JSON.stringify(s.sidebar || {})) : { mode: (config && config.sidebar_default_mode) || "prompt", fields: TRACKER_FIELDS.map((f) => f.id), schema: null, custom: [] },
     art: { direction: s && s.art ? s.art.direction || "" : (config.default_art_direction || ""), setting: s && s.art ? s.art.setting || "" : "" },
-    use_state_block: !s || s.use_state_block !== false, auto_replies: !!(s && s.auto_replies), rule_check: !!(s && s.rule_check), narrator_acts: !!(s && s.narrator_acts), code_check: !s || s.code_check !== false, format_fix: !s || s.format_fix !== false, clock: (s && s.clock) || { mode: "auto", start: "06:00", minutes: 30 }, nsfw: false,
+    use_state_block: !s || s.use_state_block !== false, auto_replies: !!(s && s.auto_replies), rule_check: !!(s && s.rule_check), narrator_acts: !!(s && s.narrator_acts), code_check: !s || s.code_check !== false, format_fix: !s || s.format_fix !== false, app_status: !!(s && s.app_status), clock: (s && s.clock) || { mode: "auto", start: "06:00", minutes: 30 }, nsfw: false,
     cast: [], cover: null, intro: [], backdrop: null, models: null,
   };
   const tabs = isNew ? ["Basics", "Cast", "Story start", "Trackers & endings", "Media", "Options"] : ["Basics", "Story start", "Trackers & endings", "Options"];
@@ -27,13 +35,13 @@ async function showStoryForm(s) {
   const collect = () => {
     if (tab === "Basics") { D.title = val("fTitle"); D.subtitle = val("fSub"); D.description = val("fDesc"); D.base_prompt = val("fPrompt"); }
     if (tab === "Cast") document.querySelectorAll(".ccard").forEach((el) => { const c = D.cast[+el.dataset.i]; for (const k of ["name", "appearance", "personality", "bio"]) c[k] = el.querySelector(`[data-k="${k}"]`).value; });
-    if (tab === "Story start") { D.prologue = val("fPro"); D.opening = val("fOpening"); D.opening_in_context = $("fOpenCtx").checked; D.opening_options = [...document.querySelectorAll(".optrow input")].map((i) => i.value).filter((x) => x.trim()); }
+    if (tab === "Story start") { D.prologue = val("fPro"); D.opening = val("fOpening"); D.opening_in_context = $("fOpenCtx").checked; D.opening_name = val("fOpenName"); D.alt_openings = [...document.querySelectorAll(".altrow")].map((r) => ({ name: r.querySelector("[data-k=name]").value, text: r.querySelector("[data-k=text]").value })); D.opening_options = [...document.querySelectorAll(".optrow input")].map((i) => i.value).filter((x) => x.trim()); }
     if (tab === "Trackers & endings") {
       D.sidebar.mode = val("sfMode"); if (D.sidebar.mode === "player") { D.sidebar.fields = [...document.querySelectorAll("#sfFields input:checked")].map((i) => i.dataset.f); if (trk) D.sidebar.custom = trk.get(); }
       D.endings = [...document.querySelectorAll(".endrow")].map((r) => ({ title: r.querySelector("input").value, text: r.querySelector("textarea").value })).filter((e) => e.title.trim() || e.text.trim());
       D.art.direction = val("sfArtDir"); D.art.setting = val("sfArtSet");
     }
-    if (tab === "Options") { D.use_state_block = $("fState").checked; D.auto_replies = $("fAutoRep").checked; D.rule_check = $("fRuleChk").checked; D.narrator_acts = $("fActs").checked; D.code_check = $("fCode").checked; D.format_fix = $("fFix").checked; D.clock = { mode: $("fClockMode").value, start: $("fClockStart").value || "06:00", minutes: +$("fClockMin").value || 30 }; if ($("fNsfw")) D.nsfw = $("fNsfw").checked; if (picker) D.models = picker.get(); }
+    if (tab === "Options") { D.use_state_block = $("fState").checked; D.auto_replies = $("fAutoRep").checked; D.rule_check = $("fRuleChk").checked; D.narrator_acts = $("fActs").checked; D.code_check = $("fCode").checked; D.format_fix = $("fFix").checked; D.app_status = $("fAppSt").checked; D.clock = { mode: $("fClockMode").value, start: $("fClockStart").value || "06:00", minutes: +$("fClockMin").value || 30, weekdays: $("fWdMode").value, start_day: $("fWdStart").value }; if ($("fNsfw")) D.nsfw = $("fNsfw").checked; if ($("fCmds")) D.commands = cmdsFromText($("fCmds").value); if (picker) D.models = picker.get(); }
   };
 
   // ---- panes
@@ -58,6 +66,10 @@ async function showStoryForm(s) {
       <h3>Opening scene <small class="muted">(optional)</small></h3><div class="hint">The story's first message, shown before the first move. <code>![](intro:It1)</code> places an intro panel.</div>
       <textarea id="fOpening" style="min-height:160px">${esc(D.opening)}</textarea>${aiBtn("aiOpen", "Write an opening scene")}
       ${chk("fOpenCtx", D.opening_in_context, "The narrator sees the opening", "Includes the opening scene as the story's first message so the narrator continues from it.")}
+      <h3>Alternate openings <small class="muted">(optional)</small></h3><div class="hint">Other ways to begin. Before the first move the player picks one from a row of buttons above the opening scene. Give the main opening a short name too.</div>
+      <div class="field"><label>Name of the main opening</label><input id="fOpenName" value="${esc(D.opening_name)}" placeholder="Main opening"></div>
+      <div id="altList">${D.alt_openings.map((a, i) => `<div class="field altrow"><input data-k="name" value="${esc(a.name)}" placeholder="Name shown on the button"><textarea data-k="text" style="min-height:120px" placeholder="The alternate opening scene">${esc(a.text)}</textarea><button class="x altdel" data-i="${i}">Remove this opening</button></div>`).join("")}</div>
+      <div class="actions" style="justify-content:flex-start"><button id="altAdd">＋ Add an alternate opening</button></div>
       <h3>Suggested first moves</h3><div class="hint">Up to 4 options shown under the opening scene. The player picks one, edits it and sends it.</div>
       <div id="optList">${D.opening_options.map((o) => `<div class="optrow"><input value="${esc(o)}"><button class="x optdel" title="Remove">×</button></div>`).join("")}</div>
       <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="optAdd">＋ Add an option</button>${aiBtn("aiOpts", "Suggest first moves")}<span class="hint" id="startNote"></span></div>`,
@@ -80,15 +92,21 @@ async function showStoryForm(s) {
       <h3>Backdrop</h3><div class="hint">A picture for the sides of the screen (Settings → Appearance). Or generate one later from the story's setting.</div>
       <div class="actions" style="justify-content:flex-start;align-items:center"><label class="btnlike">${D.backdrop ? "Change backdrop…" : "Choose a backdrop…"}<input type="file" id="mBack" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>${D.backdrop ? `<img class="bdprev" style="max-width:200px;margin:0" src="${D.backdrop.url}" alt=""><button class="x" id="mBackDel">×</button>` : ""}</div>`,
     "Options": () => `<h3>Options</h3>
+      <label>Command buttons <small class="hint">(a row of buttons above the input box; one per line: <b>Label | what it sends</b>. Start the text with <b>@edit</b> to put it in the box instead of sending, or write just <b>@points</b> to open the stat-points window, which needs no AI call)</small></label>
+      <textarea class="short" id="fCmds" rows="4" placeholder="Status | Show my status&#10;Shop | Open the shop&#10;Assign points | @points">${esc(cmdsToText(D.commands))}</textarea>
       ${chk("fState", D.use_state_block, "Let the app track the story state", "Fills the sidebar from a hidden block. Turn off if your prompt prints its own status panel.")}
       ${chk("fAutoRep", D.auto_replies, "Suggest three replies after every narrator reply", "Otherwise use the 💡 button. Costs one small call each time.")}
       ${chk("fRuleChk", D.rule_check, "Check each reply against this story's rules", "The small helper AI reads the story prompt and the reply and flags clear slips (a missing status line, a quest without its notice, points spent for you). A flagged reply gets a one-click fix. Costs one small call per reply (it reads the whole story prompt).")}
       ${chk("fActs", D.narrator_acts, "Let the narrator decide some of my character's routine actions", "Lets the narrator write routine, in-character actions, thoughts and short lines for your character (following an order, a habitual reaction), based on their backstory, stats, skills, quests and the story so far, which keeps replies long and scenes moving. It still follows exactly what you write, and the story prompt says how far it may go. Off: only you decide what your character does or says.")}
       ${chk("fCode", D.code_check, "Check each reply's format and numbers in the app (free)", "The app itself (no AI, no cost) flags a status line printed twice or not last, labels missing, Day, XP or Lives moving the wrong way, XP past the next level's total, stat points changed without you spending them, and a number change with no status line. It only runs when the story prompt shows a status line. Flags appear under the reply with a one-click Fix.")}
+      ${chk("fAppSt", D.app_status, "Let the app draw the status line (saves the narrator about 100 to 250 words per reply)", "For stories whose replies end with a status line or block (Label: value pairs). The narrator leaves it out; the app writes it from the story's last status block, asking a small helper only which values changed. It switches on once the story has a status block in its recent replies (the first reply is still the narrator's), and does nothing for other formats such as ```Info panels or notification boxes. Untick to go back.")}
       ${chk("fFix", D.format_fix, "Tidy each reply's status line (free)", "When the story prompt describes a status line: an earlier copy of it in the same reply is removed, and it is moved to the end when the prompt says it is the last line. What was done is noted under the reply (the original wording is kept in the turn's data). Lines inside a code block are left alone.")}
       <label>World clock <small class="hint">(the app keeps the in-world time and tells the narrator each turn, so the time of day stops drifting)</small></label>
       <div class="grid2" style="grid-template-columns:2fr 1fr 1fr"><select id="fClockMode"><option value="auto" ${D.clock.mode === "auto" ? "selected" : ""}>Let the story prompt decide (on when it talks about a clock or a Time value)</option><option value="on" ${D.clock.mode === "on" ? "selected" : ""}>On</option><option value="off" ${D.clock.mode === "off" ? "selected" : ""}>Off</option></select>
         <div><label style="margin:0">Day starts at</label><input id="fClockStart" type="time" value="${esc(D.clock.start || "06:00")}"></div><div><label style="margin:0">Minutes per reply</label><input id="fClockMin" type="number" min="1" max="720" value="${esc(String(D.clock.minutes || 30))}"></div></div>
+      <label>Days of the week <small class="hint">(the app keeps Monday, Tuesday… and tells the narrator, moving on when a day ends: the Day number, or the clock passing midnight)</small></label>
+      <div class="grid2" style="grid-template-columns:2fr 1fr"><select id="fWdMode"><option value="auto" ${(D.clock.weekdays || "auto") === "auto" ? "selected" : ""}>Let the story prompt decide (on when it names days of the week or has a Weekday value)</option><option value="on" ${D.clock.weekdays === "on" ? "selected" : ""}>On</option><option value="off" ${D.clock.weekdays === "off" ? "selected" : ""}>Off</option></select>
+        <div><select id="fWdStart"><option value="">Day 1 is: what the prompt says (else Monday)</option>${["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d) => `<option value="${d}" ${D.clock.start_day === d ? "selected" : ""}>Day 1 is a ${d}</option>`).join("")}</select></div></div>
       ${isNew ? chk("fNsfw", D.nsfw, "Adult (NSFW) content", "Allows explicit content between adult characters, in the text and in scene pictures. Off by default; change it later in Settings.") : ""}
       ${isNew ? '<h3>Which AI should run this story?</h3><div id="aiPick"></div><div class="hint">A one-time choice for this story. You can change it later in Settings.</div>' : ""}`,
   };
@@ -116,6 +134,8 @@ async function showStoryForm(s) {
     if (tab === "Story start") {
       ai("aiPro", "prologue", "startNote", (t) => { $("fPro").value = t; });
       ai("aiOpen", "opening", "startNote", (t) => { $("fOpening").value = t; });
+      $("altAdd").onclick = () => { collect(); if (D.alt_openings.length < 6) D.alt_openings.push({ name: "", text: "" }); render(); };
+      document.querySelectorAll(".altdel").forEach((b) => b.onclick = () => { collect(); D.alt_openings.splice(+b.dataset.i, 1); render(); });
       $("optAdd").onclick = () => { collect(); if (D.opening_options.length < 4) D.opening_options.push(""); render(); const r = document.querySelectorAll(".optrow input"); if (r.length) r[r.length - 1].focus(); };
       document.querySelectorAll(".optdel").forEach((b, i) => b.onclick = () => { collect(); D.opening_options.splice(i, 1); render(); });
       ai("aiOpts", "opening_options", "startNote", (list) => { D.opening_options = list.map(String).slice(0, 4); render(); });
@@ -160,8 +180,8 @@ async function showStoryForm(s) {
     if (!D.title.trim()) { tab = "Basics"; render(); alert("Give the story a title."); return; }
     const prog = (t) => { const e = $("sfProg"); if (e) e.textContent = t; };
     $("mSave").disabled = true;
-    const body = { title: D.title, subtitle: D.subtitle, base_prompt: D.base_prompt, description: D.description, prologue: D.prologue, opening: D.opening, opening_in_context: D.opening_in_context,
-      opening_options: D.opening_options, endings: D.endings, auto_replies: D.auto_replies, rule_check: D.rule_check, narrator_acts: D.narrator_acts, code_check: D.code_check, format_fix: D.format_fix, clock: D.clock, use_state_block: D.use_state_block, art: D.art,
+    const body = { commands: D.commands, title: D.title, subtitle: D.subtitle, base_prompt: D.base_prompt, description: D.description, prologue: D.prologue, opening: D.opening, opening_in_context: D.opening_in_context,
+      opening_options: D.opening_options, alt_openings: D.alt_openings, opening_name: D.opening_name, endings: D.endings, auto_replies: D.auto_replies, rule_check: D.rule_check, narrator_acts: D.narrator_acts, code_check: D.code_check, format_fix: D.format_fix, app_status: D.app_status, clock: D.clock, use_state_block: D.use_state_block, art: D.art,
       sidebar: D.sidebar.mode === "player" ? { mode: "player", fields: D.sidebar.fields, custom: D.sidebar.custom || [] } : D.sidebar.mode === "ai" ? { mode: "ai", schema: D.sidebar.schema } : { mode: "prompt" } };
     try {
       if (!isNew) { story = await api("/stories/" + s.id, { method: "PUT", body }); localStorage.setItem("story", story.id); closeModal(); renderAll(); applyTheme(config); return; }

@@ -281,8 +281,8 @@ function showExport() {
       <label class="chk"><input type="checkbox" class="upPart" value="text" checked> Story text (prompt, prologue, opening, endings)</label>
       <label class="chk"><input type="checkbox" class="upPart" value="trackers" checked> Side-panel trackers (current values kept)</label>
       <label class="chk"><input type="checkbox" class="upPart" value="art"> Art settings</label>
-      <label class="chk"><input type="checkbox" class="upPart" value="world"> Places and species (new ones added, pictures kept)</label>
-      <label class="chk"><input type="checkbox" class="upPart" value="cast"> Characters this game does not have yet</label>
+      <label class="chk"><input type="checkbox" class="upPart" value="world"> Places and species (new ones added, missing pictures, cover and backdrop filled in)</label>
+      <label class="chk"><input type="checkbox" class="upPart" value="cast"> Characters this game does not have yet, and pictures for characters that have none</label>
       <label class="btnlike">Choose package…<input type="file" id="xUpd" accept=".zip,application/zip" hidden></label> <span class="hint" id="xUpdNote"></span></div>
     <div class="aiBox"><b>Backups</b><div class="hint">This story: the app keeps copies of it automatically (before a summary, an edit or a restore, and every 5 turns) and you can restore one. Everything: one .zip with all stories, pictures, avatars and settings.</div>
       <button id="xSnaps">This story's backups…</button> <button id="xAll">Back up everything…</button></div>
@@ -348,7 +348,31 @@ function bindTools() {   // called by app.js once $ and the page exist
 }
 
 
-// ---- 🎲 dice: the app rolls d20 + (stat - 5) against a difficulty and sends the result with your move
+// A new story with stats and levels (a game, not real life): ask once how dice should work. The player can have the app roll for risky moves, keep dice to the 🎲
+// button, or switch them off (also when the story's own prompt already calls for rolls).
+async function maybeAskDice(tries = 0) {
+  if (!story || (story.turns || []).length > 2) return;
+  let d; try { d = await api(`/stories/${story.id}/dice`); } catch (e) { return; }
+  if (!d.offer) return;
+  if (!$("modal").classList.contains("hidden")) { if (tries < 6) setTimeout(() => maybeAskDice(tries + 1), 2500); return; }     // another window is open: try again shortly
+  const sid = story.id, stats = d.stats.map((x) => x.label).join(", ");
+  modal(`<h2>🎲 Dice checks for this story?</h2>
+    <p class="hint">This story tracks stats and levels (${esc(stats)}). ${d.prompt_calls_for_checks
+      ? "Its prompt already talks about rolls, so the app would roll for risky moves by itself."
+      : "Dice make outcomes fair: when your move is risky, the app rolls a d20 plus your stat against a difficulty and the narrator must play out the result, so the story cannot simply let you win."}
+      Choose how you want them (you can change this later in ⚡ → 🎲).</p>
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap">
+      <button class="primary" id="dcAuto">${d.prompt_calls_for_checks ? "Keep automatic dice" : "Turn on automatic dice"}</button>
+      <button id="dcMan">Only when I press 🎲</button><button id="dcOff">No dice</button></div>
+    <div class="hint" id="dcMsg">${d.prompt_calls_for_checks ? "" : "Automatic also adds a short dice rule to the story prompt (you can edit it in ✏️ Edit story)."}</div>`);
+  const answer = (mode) => async () => {
+    try { await api(`/stories/${sid}/dice/offer`, { method: "POST", body: { mode } }); story = await api(`/stories/${sid}`); } catch (e) { $("dcMsg").textContent = e.message; return; }
+    closeModal(); renderAll(false);
+  };
+  $("dcAuto").onclick = answer("auto"); $("dcMan").onclick = answer("manual"); $("dcOff").onclick = answer("off");
+}
+
+// ---- 🎲 dice: the app rolls d20 + the stat's bonus (stat - 5, easing off above 10) against a difficulty and sends the result with your move
 async function diceForm() {
   const box = $("qDice"); if (!box || !story) return;
   if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
@@ -359,7 +383,7 @@ async function diceForm() {
     <label>Difficulty <select id="dDiff">${Object.entries(d.difficulties).map(([k, v]) => `<option value="${esc(k)}" ${k === d.difficulty ? "selected" : ""}>${esc(k)} (${v})</option>`).join("")}</select></label>
     <label>Dice <select id="dAdv"><option value="">one d20</option><option value="adv">advantage (best of two)</option><option value="dis">disadvantage (worst of two)</option></select></label>
     <button class="primary" id="dGo">🎲 Roll and send</button></div>
-    <div class="hint">Your move is whatever is in the box (or “I attempt it.”). Result = d20 + (stat − 5) against the difficulty; the app rolls, so the narrator cannot fudge it.</div>
+    <div class="hint">Your move is whatever is in the box (or “I attempt it.”). Result = d20 + the stat's bonus (stat − 5, easing off above 10 so a high-level stat stays meaningful) against the difficulty; the app rolls, so the narrator cannot fudge it.</div>
     <div class="lrow" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px"><label>Automatic rolls <select id="dMode"><option value="">Let the story prompt decide (${d.prompt_calls_for_checks ? "it calls for rolls: automatic" : "it does not mention rolls: only when I press 🎲"})</option><option value="auto">Automatic: the app rolls for risky actions</option><option value="manual">Only when I press 🎲</option><option value="off">Never</option></select></label></div></div>`;
   $("dMode").value = d.mode || "";
   $("dMode").onchange = () => api(`/stories/${story.id}/dice`, { method: "PUT", body: { mode: $("dMode").value } }).catch((e) => alert(e.message));

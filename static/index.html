@@ -6,7 +6,7 @@
 <title>AI Storyteller</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="booting">
 <script>
 // Errors the page noticed, kept for the bug report (memory only, never sent anywhere by itself)
 window.__bugErr = [];
@@ -27,8 +27,12 @@ window.__bugErr = [];
     <button class="icon hmenu" id="btnMenu" title="Menu: story tools and settings" aria-expanded="false">☰</button>
     <div class="tools" id="tools">
       <select id="modelSelect" title="Model"></select>
+      <button class="icon" id="btnLeft" title="Stories panel: switch story, search, shortcuts">📚</button>
       <button class="icon" id="btnSide" title="Status panel">ℹ️</button>
       <button class="icon" id="btnHome" title="Home: all your stories">🏠</button>
+      <button class="icon mobonly" id="btnAvatars" title="Avatar library">🧑</button>
+      <button class="icon mobonly" id="btnLore" title="Lore library">📖</button>
+      <button class="icon mobonly" id="btnUsage" title="Usage and costs">💲</button>
       <span class="tsep"></span>
       <button class="icon" id="btnArt" title="Art: every picture tool of this story (characters, places, backgrounds, cover, style)">🖼️</button>
       <button class="icon" id="btnCast" title="Cast, portraits &amp; gallery">🎭</button>
@@ -44,8 +48,10 @@ window.__bugErr = [];
     </div>
   </header>
 
+  <button id="leftTab" class="lefttab" title="Open your stories" aria-label="Stories panel">›</button>
   <button id="sideTab" class="sidetab" title="Open the status panel" aria-label="Status panel">‹</button>
   <main>
+    <aside id="leftbar" class="hidden"></aside>
     <section id="narrative"></section>
     <aside id="sidebar"></aside>
   </main>
@@ -56,6 +62,7 @@ window.__bugErr = [];
     <div id="updateNote" class="budgetnote hidden"></div>
     <div id="budgetNote" class="budgetnote hidden"></div>
     <div id="genStatus" class="genstatus hidden"></div>
+    <div id="cmdBar" class="cmdbar hidden"></div>
     <div id="quickBar" class="quickbar hidden"></div>
     <div id="replyOpts" class="replyopts hidden"></div>
     <div id="chips"></div>
@@ -88,9 +95,12 @@ window.__bugErr = [];
 <script src="/static/tools.js"></script>
 <script src="/static/avatars.js"></script>
 <script src="/static/home.js"></script>
+<script src="/static/firstrun.js"></script>
+<script src="/static/storysetup.js"></script>
 <script src="/static/images.js"></script>
 <script src="/static/arthub.js"></script>
 <script src="/static/lightbox.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/leftbar.js"></script>
 </body>
 </html>

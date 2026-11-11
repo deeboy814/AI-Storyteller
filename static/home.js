@@ -1,4 +1,15 @@
 // Home screen: a card for every story (cover art + short description), a blank capsule to start a new story, and one to import a save.
+// The Home screen is not "inside" a story: its Settings, Picture makers, Usage and Avatars windows work on the app-wide defaults. The open story is set aside while such a
+// window is open and put back when it closes (so "Back to story" still works).
+async function asHomeDefaults(fn) {
+  const keep = story; story = null;
+  const back = () => { if (story === null) story = keep; };
+  try { await fn(); } catch (e) { back(); throw e; }
+  const m = $("modal");
+  if (m.classList.contains("hidden")) { back(); return; }
+  const obs = new MutationObserver(() => { if (m.classList.contains("hidden")) { obs.disconnect(); back(); } });
+  obs.observe(m, { attributes: true, attributeFilter: ["class"] });
+}
 function hideHome() { $("home").classList.add("hidden"); }
 function gradientFor(title) { let h = 0; for (const ch of title) h = (h * 31 + ch.charCodeAt(0)) % 360; return `linear-gradient(135deg, hsl(${h} 45% 28%), hsl(${(h + 50) % 360} 50% 16%))`; }
 // Rename a story in place: replaces `el` with a text box (Enter or clicking away saves, Esc cancels). `done(newTitle)` runs after a save.
@@ -50,13 +61,13 @@ async function showHome() {
   home.querySelectorAll(".hedit").forEach((b) => b.onclick = () => showCardEditor(list.find((s) => s.id === b.dataset.edit)));
   $("hNew").onclick = () => editStory(null);
   $("hImp").onclick = () => showImport(list);
-  $("hMk").onclick = () => showArtHub("Makers");
-  $("hSet").onclick = () => showSettings();
+  $("hMk").onclick = () => asHomeDefaults(() => showArtHub("Makers"));
+  $("hSet").onclick = () => asHomeDefaults(() => showSettings());
   $("hQuit").onclick = () => quitApp();
-  $("hUse").onclick = () => showUsage();
+  $("hUse").onclick = () => asHomeDefaults(() => showUsage());
   $("hBug").onclick = () => showBugReport(() => showHome());
   $("hStore").onclick = () => showStorage();
-  if ($("hAv")) $("hAv").onclick = () => showAvatarLibrary();
+  if ($("hAv")) $("hAv").onclick = () => asHomeDefaults(() => showAvatarLibrary());
   $("hPack").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
     const lbl = e.target.closest("label"), old = lbl ? lbl.firstChild.textContent : "";
@@ -79,13 +90,15 @@ function showCardEditor(s, nav = {}) {   // nav.back: where to go when closed in
     <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><label class="btnlike">Upload…<input type="file" id="cvUp" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>${s.cover ? '<button id="cvDel">Remove</button>' : ""}</div>
     <label>Picture description (what the artist is told: edit it freely)</label>
     <textarea class="short" id="cvPrompt" rows="3" placeholder="Leave empty and the text model writes one from the story prompt when you draw. Your art style is added automatically."></textarea>
+    <label>Picture maker for the cover <small class="hint">(try different ones: each draw uses the one chosen here)</small></label>
+    <select id="cvMaker"><option value="">The story's own picture maker</option></select>
     <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="cvWritePrompt" title="Have the text model write the description from the story prompt">✨ Write it from the story</button><button class="primary" id="cvGen">Draw 4 options</button></div>
-    <p class="hint" id="cvNote">Uses this story's picture maker (Settings → AI & story) and its recap model for the description. Nothing changes on the card until you pick one.</p>
+    <p class="hint" id="cvNote">Draws with the picture maker chosen above (the story's own by default) and uses its recap model for the description. Nothing changes on the card until you pick one.</p>
     <div id="cvOpts"></div>
     <label>Description (shown on the card)</label>
     <textarea class="short" id="cvDesc" style="min-height:70px" maxlength="400">${esc(s.description || "")}</textarea>
     <div class="actions" style="justify-content:flex-start"><button id="cvWrite">✨ Write it for me</button></div>
-    <div class="actions"><button id="cvBk">Backups…</button><button id="cvPack" title="Export this story (prompt, cast with pictures, prologue, opening, trackers, endings, media) as a package. No turns, memory or notes.">Export story…</button><button id="cvRestart" title="Start this story again from the beginning as a separate copy. Your current game stays as it is.">↺ Restart from the beginning…</button><button class="danger" id="cvRm">Delete story</button><span style="flex:1"></span><button id="cvClose">Close</button><button class="primary" id="cvSave">Save</button></div>`);
+    <div class="actions"><button id="cvBk">Backups…</button><label class="btnlike" title="Bring a newer version of this story's package into this game: new story text, trackers, beats, lore, command buttons, places, and pictures that are missing. Your turns, memory, avatar and notes are kept; a backup is made first.">⟳ Update from a package…<input type="file" id="cvUpd" accept=".zip,application/zip" hidden></label><button id="cvPack" title="Export this story (prompt, cast with pictures, prologue, opening, trackers, endings, media) as a package. No turns, memory or notes.">Export story…</button><button id="cvRestart" title="Start this story again from the beginning as a separate copy. Your current game stays as it is.">↺ Restart from the beginning…</button><button class="danger" id="cvRm">Delete story</button><span style="flex:1"></span><button id="cvClose">Close</button><button class="primary" id="cvSave">Save</button></div>`);
   const done = async () => { closeModal(); if (nav.back) await nav.back(); else await showHome(); };
   const busyNote = (t) => { $("cvNote").textContent = t; };
   $("cvClose").onclick = done;
@@ -95,7 +108,19 @@ function showCardEditor(s, nav = {}) {   // nav.back: where to go when closed in
     done();
   };
   $("cvWrite").onclick = async (e) => { e.target.disabled = true; busyNote("Writing…"); try { const r = await api(`/stories/${s.id}/description/generate`, { method: "POST" }); $("cvDesc").value = r.description; busyNote("Written. Edit it if you like, then Save."); } catch (err) { busyNote(err.message); } e.target.disabled = false; };
-  api(`/stories/${s.id}/cover/prompt`).then((r) => { if (!$("cvPrompt").value) $("cvPrompt").value = r.prompt || ""; }).catch(() => {});
+  let lastMaker = "";
+  api(`/stories/${s.id}/cover/prompt`).then((r) => { if (!$("cvPrompt").value) $("cvPrompt").value = r.prompt || ""; const m = r.maker || {}; lastMaker = m.provider ? `${m.provider}|${m.model || ""}` : ""; if ($("cvMaker") && lastMaker) $("cvMaker").value = lastMaker; }).catch(() => {});
+  api("/model-options").then((o) => {   // every picture maker and model this computer can use (online ones need a key and bill separately)
+    const sel = $("cvMaker"); if (!sel) return;
+    const groups = (o.images || []).map((p) => {
+      const note = p.local ? (p.ready ? " (on this computer, free)" : " (not available)") : p.has_key ? " (online, billed by the service)" : " (needs a key)";
+      const usable = p.local ? p.ready : p.has_key;
+      const models = p.models.length ? p.models : [{ id: "" }];
+      return `<optgroup label="${esc(p.name + note)}">${models.map((m) => `<option value="${esc(p.id + "|" + m.id)}" ${usable ? "" : "disabled"}>${esc(m.id || p.name)}${m.size_gb ? ` · ${m.size_gb} GB` : ""}</option>`).join("")}</optgroup>`;
+    }).join("");
+    sel.insertAdjacentHTML("beforeend", groups);
+    if (lastMaker) sel.value = lastMaker;
+  }).catch(() => { /* the story's own maker still works */ });
   $("cvWritePrompt").onclick = async (e) => {
     e.target.disabled = true; busyNote("Writing the description…");
     try { const r = await api(`/stories/${s.id}/cover/describe`, { method: "POST" }); $("cvPrompt").value = r.prompt; busyNote("Written. Edit it if you like, then draw."); } catch (err) { busyNote(err.message); }
@@ -110,7 +135,7 @@ function showCardEditor(s, nav = {}) {   // nav.back: where to go when closed in
   const drawOpts = async (fresh) => {
     $("cvGen").disabled = true; busyNote("Starting…");
     try {
-      const r = await api(`/stories/${s.id}/cover/candidates`, { method: "POST", body: { prompt: $("cvPrompt").value, count: 4, fresh } });
+      const r = await api(`/stories/${s.id}/cover/candidates`, { method: "POST", body: { prompt: $("cvPrompt").value, count: 4, fresh, provider: ($("cvMaker").value || "|").split("|")[0], model: ($("cvMaker").value || "|").split("|").slice(1).join("|") } });
       const job = await watchJob(r.job, (j) => busyNote(j.current || "Drawing…"));
       if (job.status === "error") { busyNote("Could not draw: " + job.error); }
       else {
@@ -152,6 +177,16 @@ function showCardEditor(s, nav = {}) {   // nav.back: where to go when closed in
   };
   $("cvPack").onclick = () => { window.location = `/api/stories/${s.id}/pack?pictures=all`; };
   $("cvBk").onclick = () => showBackups(s.id);
+  $("cvUpd").onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (!confirm(`Update “${s.title}” from this package?\n\nIts turns, memory, avatar and notes are kept and a backup is made first. It brings in the package's story text, trackers, beats, lore, buttons, places and any missing pictures.`)) { e.target.value = ""; return; }
+    try {
+      const r = await uploadZip(`/api/stories/${s.id}/update-from-pack?parts=text,trackers,world,cast`, f, () => {});
+      alert("Updated: " + ((r.updated_parts || []).join(", ") || "nothing new") + ".");
+      closeModal(); await showHome();
+    } catch (err) { alert("Could not update: " + err.message); }
+    e.target.value = "";
+  };
   $("cvRm").onclick = async () => {
     let n = 0;
     try { n = (await api(`/stories/${s.id}/art-count`)).files; } catch (e) { /* count is only informational */ }

@@ -13,6 +13,17 @@ let panelTab = (() => { try { return localStorage.getItem("panelTab") || ""; } c
 let panelMin = (() => { try { return localStorage.getItem("panelMin") === "1"; } catch (e) { return false; } })();
 const openQuests = new Set();   // quest rows the player has opened (kept across updates)
 
+// The latest dice roll the app made, at the top of the side panel. It belongs to the player's most recent move: the moment a later move has no roll, it is gone.
+function rollCardHtml() {
+  if (!story) return "";
+  const last = [...(story.turns || [])].reverse().find((t) => t.role === "user");
+  const r = last && last.roll; if (!r) return "";
+  const kind = /critical success/.test(r.outcome) ? "crit" : /critical failure/.test(r.outcome) ? "fumble" : /partial/.test(r.outcome) ? "part" : /success/.test(r.outcome) ? "win" : "lose";
+  const sign = (n) => (n >= 0 ? "+" : "−") + Math.abs(n);
+  const dice = r.rolls && r.rolls.length > 1 ? `d20 ${r.die} <small>(${r.rolls.join(", ")})</small>` : `d20 ${r.die}`;
+  return `<div class="rollcard ${kind}" title="Rolled by the app. The narrator had to play this outcome."><div class="rcl"><span>🎲 ${esc(r.label || "Plain d20")}${r.label ? ` <small>${sign(r.mod)}</small>` : ""}</span><span class="rcdc">vs ${r.dc} · ${esc(r.difficulty)}</span></div>
+    <div class="rcm"><span class="rcn">${r.total}</span><span class="rcsum">${dice} ${sign(r.mod)}</span></div><div class="rco">${esc(r.outcome)}${r.margin ? ` <small>by ${Math.abs(r.margin)}</small>` : ""}</div></div>`;
+}
 function panelSidebarHtml() {
   const tr = story && story.tracker; if (!tr) return "";
   const F = activeFields(), byId = Object.fromEntries(F.map((f) => [f.id, f])), changes = tr.changes || [];
@@ -29,7 +40,8 @@ function panelSidebarHtml() {
     const fill = v >= 0 && lo < 0 ? `left:${zero}%;width:${pos - zero}%` : v < 0 ? `left:${pos}%;width:${zero - pos}%` : `left:0;width:${pos}%`;
     return `<div class="aff${mark(ch)}"><i class="${v < 0 ? "neg" : ""}" style="${fill}"></i>${lo < 0 ? `<b style="left:${zero}%"></b>` : ""}</div>`;
   };
-  const kv = (sec) => F.filter((f) => f.id.startsWith(sec + ".") && f.id !== "me.status" && f.kind !== "quests" && (tr[sec] || {})[f.id.split(".")[1]] != null && tr[sec][f.id.split(".")[1]] !== "")
+  const isItem = (f) => f.kind !== "slider" && /\b(items?|inventory|gear|equipment|loot|bag|belongings|possessions|weapons?|supplies)\b/i.test(f.label || "");
+  const kv = (sec, pick = () => true) => F.filter((f) => pick(f) && f.id.startsWith(sec + ".") && f.id !== "me.status" && f.kind !== "quests" && (tr[sec] || {})[f.id.split(".")[1]] != null && tr[sec][f.id.split(".")[1]] !== "")
     .map((f) => {
       const k = f.id.split(".")[1], c = find(sec, null, k), v = tr[sec][k];
       if (f.kind === "slider" && typeof v === "number") {
@@ -41,23 +53,28 @@ function panelSidebarHtml() {
       const spendBtns = spendIds.has(f.id) ? ` <span class="spendbtns">${pendingOf(f.id) > 0 ? `<button class="spend" data-id="${esc(f.id)}" data-n="-1" title="Take back a point you just spent">−</button>` : ""}${pointsNow > 0 && !(pf.spend_cap && Number(v) >= pf.spend_cap) ? `<button class="spend" data-id="${esc(f.id)}" data-n="1" title="Spend a point on ${esc(f.label)}">+</button>` : ""}</span>` : "";
       return `<div class="kv${mark(c)}"><small>${esc(f.label)}</small> ${esc(String(v))}${nxt ? ` <span class="muted">/ ${nxt}</span>` : ""}${f.kind === "number" && f.unit ? " " + esc(f.unit) : ""}${spendBtns}</div>`;
     }).join("");
-  let info = "", chars = "", qh = "", qn = 0, artN = 0;
+  let info = "", rel = "", castH = "", qh = "", qn = 0, artN = 0;
   const clk = tr._clock && Number.isFinite(tr._clock.min) ? tr._clock.min : null;
   const hhmm = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
-  const clockPill = clk == null ? "" : `<div class="kv clockpill" title="The in-world time, kept by the app. Click to set it."><small>Clock</small> <b>${hhmm(clk)}</b> <span class="muted">${["night", "dawn", "morning", "midday", "afternoon", "evening"][(() => { const h = clk / 60; return h < 5 || h >= 21 ? 0 : h < 7 ? 1 : h < 11 ? 2 : h < 14 ? 3 : h < 17 ? 4 : 5; })()]}</span></div>`;
+  const wdN = tr._wd && Number.isInteger(tr._wd.i) ? ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][tr._wd.i % 7] : "";
+  const clockPill = clk == null && !wdN ? "" : clk == null ? `<div class="kv clockpill" title="The in-world day of the week, kept by the app. Click to set it."><small>Day</small> <b>${wdN}</b></div>` : `<div class="kv clockpill" title="The in-world time and day, kept by the app. Click to set it."><small>Clock</small> <b>${wdN ? wdN.slice(0, 3) + " " : ""}${hhmm(clk)}</b> <span class="muted">${["night", "dawn", "morning", "midday", "afternoon", "evening"][(() => { const h = clk / 60; return h < 5 || h >= 21 ? 0 : h < 7 ? 1 : h < 11 ? 2 : h < 14 ? 3 : h < 17 ? 4 : 5; })()]}</span></div>`;
   const scene = clockPill + kv("scene");
+  const placeF = F.find((f) => f.id.startsWith("scene.") && /\b(place|location|where)\b/i.test(f.label || "")), placeV = placeF && (tr.scene || {})[placeF.id.split(".")[1]];
+  const myName = (tr.me && tr.me.name) || (story.avatar && story.avatar.name) || "You", myPic = story.avatar_image;
+  info += `<div class="youcard"><span class="pav">${myPic ? `<img src="${thumbUrl(myPic, 96)}" alt="">` : esc(myName.charAt(0).toUpperCase())}</span><div class="youtxt"><b>${esc(myName)}</b>${placeV ? `<small>📍 ${esc(String(placeV))}</small>` : ""}</div><button class="youedit" title="Edit your character (Player)">✎</button></div>`;
   if (scene) info += `<h4>Scene${tr.turn ? ` · turn ${tr.turn}` : ""}</h4>${scene}`;
   const pointsBanner = pf && pointsNow > 0 ? `<div class="ptsbanner">⭐ <b>${pointsNow}</b> ${esc(pf.label.toLowerCase())} to spend <button class="ptsopen">Assign…</button></div>` : "";
   const meStatus = byId["me.status"] && tr.me && tr.me.status ? `<div>${chip(tr.me.status, find("me", null, "status"))}</div>` : "";
-  const me = pointsBanner + meStatus + kv("me");
-  if (me) info += `<h4>${esc((tr.me && tr.me.name) || "You")}</h4>${me}`;
+  const me = pointsBanner + meStatus + kv("me", (f) => !isItem(f));
+  if (me) info += `<h4>Stats</h4>${me}`;
+  const itemsHtml = kv("me", isItem);
   const cf = F.filter((f) => f.id.startsWith("chars."));
   const names = Object.keys(tr.chars || {}).filter((n) => cf.some((f) => tr.chars[n][f.id.split(".")[1]] != null));
   if (cf.length && names.length) {
     const sl = cf.filter((f) => f.kind === "slider"), main = sl[0];
     const sortKey = main ? main.id.split(".")[1] : null;
     names.sort((a, b) => (sortKey ? (tr.chars[b][sortKey] ?? -1e9) - (tr.chars[a][sortKey] ?? -1e9) : a.localeCompare(b)));
-    chars += names.map((n) => {
+    const names2 = names; const build = (n) => {
       const c = tr.chars[n], cast = (story.cast || []).find((x) => x.name.toLowerCase().split(" ")[0] === n.toLowerCase().split(" ")[0]);
       const needArt = cast && !Object.keys(cast.moods || {}).length && !(story.art_dismissed || []).some((d) => d.toLowerCase() === cast.name.toLowerCase()) && (story.art || {}).suggest !== false;
       if (needArt) artN++;
@@ -67,11 +84,15 @@ function panelSidebarHtml() {
         const vals = names.map((x) => tr.chars[x][k]).filter((x) => typeof x === "number"), lo = Math.min(f.min ?? 0, ...vals, 0), hi = Math.max(f.max ?? 100, ...vals), span = hi - lo || 1;
         const zero = (-lo / span) * 100, pos = ((v - lo) / span) * 100, fill = v >= 0 ? `left:${zero}%;width:${pos - zero}%` : `left:${pos}%;width:${zero - pos}%`, ch = find("chars", n, k);
         const d = ch && typeof ch.b === "number" && typeof ch.a === "number" ? ch.a - ch.b : 0;
-        return `<div class="aff${mark(ch)}"><i class="${v < 0 ? "neg" : ""}" style="${fill}"></i><b style="left:${zero}%"></b></div><div class="row"><small>${esc(f.label)} ${v}${d ? ` <span class="${d > 0 ? "up" : "down"}">${d > 0 ? "+" : ""}${d}</span>` : ""}</small></div>`;
+        return `<div class="row"><small>${esc(f.label)} ${v}${d ? ` <span class="${d > 0 ? "up" : "down"}">${d > 0 ? "+" : ""}${d}</span>` : ""}</small></div><div class="aff${mark(ch)}"><i class="${v < 0 ? "neg" : ""}" style="${fill}"></i><b style="left:${zero}%"></b></div>`;
       }).join("");
       const lines = cf.filter((f) => f.kind === "text" || f.kind === "number" || (f.kind === "status" && f !== st)).map((f) => { const k = f.id.split(".")[1]; if (c[k] == null || c[k] === "") return ""; const ch = find("chars", n, k); return `<div class="kv${mark(ch)}"><small>${esc(f.label)}</small> ${esc(String(c[k]))}${f.kind === "number" && f.unit ? " " + esc(f.unit) : ""}</div>`; }).join("");
-      return `<div class="pchar ${stv === "dead" ? "dead" : ""}"><div class="row"><span class="pname" ${cast ? `data-slug="${esc(cast.slug)}"` : ""}>${esc(n)}${isNew ? ` <span class="newtag" title="First appeared this turn">new</span>` : ""}</span>${needArt ? `<button class="artneed" data-art="${esc(cast.name)}" title="${esc(cast.name)} has no pictures yet. Click to create some.">🎨</button>` : ""}${stv ? chip(stv, find("chars", n, st.id.split(".")[1])) : ""}</div>${sliders}${lines}</div>`;
-    }).join("");
+      const pic = cast && normalUrl(cast) ? `<img src="${thumbUrl(normalUrl(cast), 96)}" alt="">` : esc(n.charAt(0).toUpperCase());
+      const head = `<span class="pav sm">${pic}</span>`;
+      const mk = (body) => `<div class="pchar ${stv === "dead" ? "dead" : ""}"><div class="row">${head}<span class="pname" ${cast ? `data-slug="${esc(cast.slug)}"` : ""}>${esc(n)}${isNew ? ` <span class="newtag" title="First appeared this turn">new</span>` : ""}</span>${needArt ? `<button class="artneed" data-art="${esc(cast.name)}" title="${esc(cast.name)} has no pictures yet. Click to create some.">🎨</button>` : ""}${stv ? chip(stv, find("chars", n, st.id.split(".")[1])) : ""}</div>${body}</div>`;
+      return { rel: sliders ? mk(sliders) : "", cast: lines ? mk(lines) : "" };
+    };
+    names2.forEach((n) => { const r = build(n); rel += r.rel; castH += r.cast; });
   }
   for (const f of F.filter((x) => x.kind === "quests")) {
     const k = f.id.split(".")[1], list = (tr.me || {})[k]; if (!Array.isArray(list)) continue;
@@ -97,7 +118,7 @@ function panelSidebarHtml() {
   }
   if (!info && !chars && !qh) return "";
   const list = changes.map((c) => { const f = byId[`${c.s}.${c.k}`]; return `${c.n ? c.n + " · " : ""}${c.k === "*" ? "new character" : (f ? f.label : c.k) + ": " + fmtVal(c.b) + " → " + fmtVal(c.a)}`; });
-  const panes = [["info", "Info", info], ["chars", artN ? "Characters 🎨" : "Characters", chars], ["quests", qn ? `Quests · ${qn}` : "Quests", qh]].filter((x) => x[2]);
+  const panes = [["status", "Status", info], ["rel", "Relations", rel], ["cast", artN ? "Cast 🎨" : "Cast", castH], ["items", "Items", itemsHtml], ["quests", qn ? `Quests · ${qn}` : "Quests", qh]].filter((x) => x[2]);
   if (!panes.some((x) => x[0] === panelTab)) panelTab = panes[0][0];
   const chgbar = `<div class="chgbar${changes.length ? "" : " none"}" title="${esc(list.join("\n") || "Nothing changed in the last reply")}">${changes.length ? `● ${changes.length} change${changes.length > 1 ? "s" : ""} this turn` : "No changes this turn"}</div>`;
   const tabs = `<div class="ptabs">${panes.length > 1 ? panes.map((x) => `<button class="ptab${x[0] === panelTab ? " on" : ""}" data-tab="${x[0]}">${esc(x[1])}</button>`).join("") : `<span class="ptitle">${esc(panes[0][1])}</span>`}<button class="pmin" title="${panelMin ? "Show the panel" : "Minimize the panel"}">${panelMin ? "▸" : "▾"}</button></div>`;
@@ -107,9 +128,10 @@ function panelSidebarHtml() {
 function bindPanel(el) {   // tab clicks, minimize, quest rows (called after the sidebar is drawn)
   const keep = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* not saved */ } };
   el.querySelectorAll(".ptab").forEach((b) => b.onclick = () => { panelTab = b.dataset.tab; panelMin = false; keep("panelTab", panelTab); keep("panelMin", "0"); renderSidebar(); });
+  const ye = el.querySelector(".youedit"); if (ye) ye.onclick = () => showPlayer();
   const m = el.querySelector(".pmin"); if (m) m.onclick = () => { panelMin = !panelMin; keep("panelMin", panelMin ? "1" : "0"); renderSidebar(); };
   el.querySelectorAll(".spend").forEach((b) => b.onclick = () => spendPoint(b.dataset.id, +b.dataset.n));
-  const cp = el.querySelector(".clockpill"); if (cp) cp.onclick = async () => { const t = prompt("Set the in-world time (for example 14:30 or 2:30 pm):"); if (!t) return; try { const r = await api(`/stories/${story.id}/clock/set`, { method: "POST", body: { time: t } }); story = r.story; renderSidebar(); } catch (e) { alert(e.message); } };
+  const cp = el.querySelector(".clockpill"); if (cp) cp.onclick = async () => { const t = prompt("Set the in-world time and/or day (for example 14:30, Tuesday, or Tuesday 2:30 pm):"); if (!t) return; try { const r = await api(`/stories/${story.id}/clock/set`, { method: "POST", body: { time: t } }); story = r.story; renderSidebar(); } catch (e) { alert(e.message); } };
   const po = el.querySelector(".ptsopen"); if (po) po.onclick = () => showPoints();
   el.querySelectorAll("details.quest").forEach((d) => d.addEventListener("toggle", () => { if (d.open) openQuests.add(d.dataset.q); else openQuests.delete(d.dataset.q); }));
 }

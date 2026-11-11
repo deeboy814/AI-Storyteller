@@ -99,6 +99,7 @@ async def ollama_models(p: dict) -> dict:
         return {"ok": False, "models": []}
 
 
+FILES: dict = {"clips": [], "vaes": []}     # text encoders and VAEs ComfyUI listed last time (so a built-in workflow can use the file names you actually have)
 UNETS: set[str] = set()     # diffusion models ComfyUI listed last time (FLUX.2 and the like): drawn with the FLUX workflow, not the checkpoint one
 
 
@@ -108,20 +109,95 @@ async def comfy_checkpoints(p: dict) -> dict:
         j = await _get(p["base_url"].rstrip("/") + "/object_info/CheckpointLoaderSimple", timeout=3)
         ids = j["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
     except Exception:
-        return {"ok": False, "ids": [], "unets": []}
+        return {"ok": False, "ids": [], "unets": [], "loras": []}
     try:
         u = await _get(p["base_url"].rstrip("/") + "/object_info/UNETLoader", timeout=3)
-        unets = [x for x in u["UNETLoader"]["input"]["required"]["unet_name"][0] if is_flux(x)]
+        unets = [x for x in u["UNETLoader"]["input"]["required"]["unet_name"][0] if diffusion_kind(x)]
     except Exception:
         unets = []
+    try:
+        l = await _get(p["base_url"].rstrip("/") + "/object_info/LoraLoader", timeout=3)
+        loras = [x for x in l["LoraLoader"]["input"]["required"]["lora_name"][0] if not re.search(r"ip-?adapter", x, re.IGNORECASE)]   # IPAdapter FaceID files are loaded by their own node, not as style LoRAs
+    except Exception:
+        loras = []
+    for node, field, key in (("CLIPLoader", "clip_name", "clips"), ("VAELoader", "vae_name", "vaes")):
+        try:
+            o = await _get(p["base_url"].rstrip("/") + f"/object_info/{node}", timeout=3)
+            FILES[key] = list(o[node]["input"]["required"][field][0])
+        except Exception:
+            pass
     UNETS.clear()
     UNETS.update(unets)
-    return {"ok": True, "ids": ids, "unets": unets}
+    return {"ok": True, "ids": ids, "unets": unets, "loras": loras}
+
+
+_KIND_CACHE: dict = {}
+
+
+def _header_kind(name: str) -> str:
+    """Reads the layer names in a diffusion model file (only its small header) to tell what it is, whatever it is called: "chroma" (has a distilled guidance layer,
+    like Chroma1-HD and its finetunes), "flux2" (FLUX.2 modulation layers), or "" (unknown or not found). ComfyUI's folder is found from the usual places."""
+    import json, struct
+    from pathlib import Path
+    roots = [Path.home() / "ComfyUI"]
+    try:
+        from . import store
+        cmd = (store.load_config().get("rt_comfy_cmd") or "").strip()
+        if cmd:
+            roots.insert(0, Path(cmd.split()[0]).expanduser().parent)
+    except Exception:
+        pass
+    for r in roots:
+        for sub in ("diffusion_models", "unet"):
+            f = r / "models" / sub / name
+            if not f.is_file():
+                continue
+            key = (str(f), f.stat().st_mtime)
+            if key in _KIND_CACHE:
+                return _KIND_CACHE[key]
+            kind = ""
+            try:
+                with open(f, "rb") as fh:
+                    n = struct.unpack("<Q", fh.read(8))[0]
+                    keys = json.loads(fh.read(n)).keys() if n < 50_000_000 else []
+                ks = " ".join(keys)
+                kind = ("chroma" if "distilled_guidance_layer" in ks else "flux2" if "double_stream_modulation_img" in ks
+                        else "qwen" if ("txt_norm" in ks and "transformer_blocks.0.img_mod" in ks and not re.search(r"edit", name, re.IGNORECASE)) else "")
+            except Exception:
+                kind = ""
+            _KIND_CACHE[key] = kind
+            return kind
+    return ""
+
+
+def diffusion_kind(name: str) -> str:
+    """"flux2", "chroma" or "" for a diffusion model the app can draw with: found from the file's own layers first, the file name second."""
+    k = _header_kind(str(name))
+    if k:
+        return k
+    n = str(name)
+    if re.search(r"flux[._ -]?2", n, re.IGNORECASE):
+        return "flux2"
+    if re.search(r"chroma|uncanny", n, re.IGNORECASE):
+        return "chroma"
+    if re.search(r"qwen[._ -]?image", n, re.IGNORECASE) and not re.search(r"edit", n, re.IGNORECASE):
+        return "qwen"       # (Qwen-Image-Edit needs a picture to edit, so it is not a text-to-picture model)
+    return ""
 
 
 def is_flux(name: str) -> bool:
     """A FLUX.2 diffusion model the app's FLUX workflow can draw with."""
-    return bool(re.search(r"flux[._ -]?2", str(name), re.IGNORECASE))
+    return diffusion_kind(name) == "flux2"
+
+
+def is_qwen(name: str) -> bool:
+    """A Qwen-Image diffusion model (strong prompt following and scenery; Qwen2.5-VL text encoder)."""
+    return diffusion_kind(name) == "qwen"
+
+
+def is_chroma(name: str) -> bool:
+    """A Chroma-type diffusion model (uncensored, FLUX-based, with its own workflow: T5 text encoder, real negative prompt)."""
+    return diffusion_kind(name) == "chroma"
 
 
 def _version(model_id: str) -> tuple:
@@ -164,7 +240,8 @@ async def _image_provider(p: dict, hw: dict) -> dict:
             e["error"] = "ComfyUI isn't running (start it with ~/ComfyUI/start.sh)."
         elif hw["vram_gb"] < hardware.SDXL_VRAM_GB:
             e["error"] = f"Local picture making needs about {hardware.SDXL_VRAM_GB} GB of video memory."
-        e["models"] = [{"id": i, "tier": "local"} for i in r["ids"]] + [{"id": i, "tier": "local", "kind": "flux"} for i in r["unets"]]
+        e["loras"] = r.get("loras", [])
+        e["models"] = [{"id": i, "tier": "local"} for i in r["ids"]] + [{"id": i, "tier": "local", "kind": "flux" if is_flux(i) else diffusion_kind(i)} for i in r["unets"]]
     elif e["has_key"]:
         r = await live_ids(p)
         ids = [i for i in r["ids"] if IS_IMAGE.search(i)] if r["ok"] else []

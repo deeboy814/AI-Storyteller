@@ -181,6 +181,8 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
         d = {"id": fid, "label": label, "kind": kind, "custom": True}
         if f.get("note"):
             d["note"] = str(f["note"]).strip()[:200]
+        if f.get("start") not in (None, "") and kind in ("slider", "number", "status", "text"):
+            d["start"] = str(f["start"]).strip()[:40]        # the value it has before anything is written (an author's starting number or label)
         if kind == "slider":
             lo, hi = _num(f.get("min")), _num(f.get("max"))
             lo, hi = (0 if lo is None else lo), (100 if hi is None else hi)
@@ -647,6 +649,24 @@ def update_from_reply(story: dict, reply: str, turn: int) -> bool:
     return True
 
 
+def seed_starts(story: dict) -> None:
+    """Give the story's own trackers their starting values (a custom field's "start") where nothing has been written yet. Only your own and scene scopes; a person's value starts empty."""
+    tr = story.setdefault("tracker", blank())
+    for f in custom_fields(story):
+        sec, k = f["id"].split(".", 1)
+        if f.get("start") in (None, "") or sec not in ("me", "scene"):
+            continue
+        cur = (tr.setdefault(sec, {})).get(k)
+        if cur in (None, ""):
+            v = f["start"]
+            if f["kind"] in ("slider", "number"):
+                try:
+                    v = float(v) if "." in str(v) else int(float(v))
+                except ValueError:
+                    continue
+            tr[sec][k] = v
+
+
 def rebuild(story: dict) -> None:
     """Start over and replay every narrator panel in order (so the last turn's changes are measured against the one before)."""
     old = story.get("tracker") or blank()
@@ -665,6 +685,7 @@ def rebuild(story: dict) -> None:
         elif k in (old.get(sec) or {}):
             story["tracker"][sec][k] = old[sec][k]
     story["tracker"]["turn"] = old.get("turn", story["tracker"]["turn"])
+    seed_starts(story)
     for k in ("qprune", "qdone", "journal"):
         if k in old:
             story["tracker"][k] = old[k]
