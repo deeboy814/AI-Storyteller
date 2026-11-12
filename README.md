@@ -62,6 +62,7 @@ Want to see a finished story package? Import `examples/Example Story Package - T
     - ChatGPT (OpenAI): platform.openai.com → API keys
     - Gemini (Google): aistudio.google.com → Get API key
     - Grok (xAI): console.x.ai → API keys
+    - **Tested and working:** Claude, Gemini and Grok have each been tried in the app for story writing, and Gemini and Grok for pictures too (version 1.6.1). Gemini needs a Google account with billing switched on for its picture models and its Pro models; on Google's free tier those answer with a quota error, and Google no longer offers its older 2.5 models to new keys, so pick a newer one from the model list. ChatGPT (OpenAI) is supported the same way but has not been tried as recently.
   - or a **local AI** through *Ollama* (free, private, runs on your graphics card). Quality depends on your graphics card: 12 GB of video memory runs a mid-sized model well; 8 GB or less is limited.
 - **Optional, for pictures:** either an online picture service (Gemini, OpenAI or Grok, billed per picture) or *ComfyUI* on your own graphics card (free; needs about 6 GB of video memory or more).
 
