@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.6.1
+**New**
+
+- **Check for updates (off by default).** Settings → Libraries & backup → Updates has a "Check for updates when the app starts" box and a "Check for updates now" button. The app asks GitHub's public release page whether a newer version exists and, if so, shows a small card with a link. Nothing about you or your stories is sent, and nothing is downloaded or installed for you.
+- **Generic characters.** Cast → Cast tools → Generic characters… adds throwaway characters for unnamed people (a waiter, a guard, a passer-by): pick from a list of 15 roles, ask the app to suggest roles that suit the story's world, or type your own, and optionally draw a normal picture for each. The narrator uses them by role whenever someone unnamed appears, never invents a name for them, and switches to the real character once the story names one. They show as one "Generic Characters" card.
+- **More adult picture types (adult stories).** New built-in types for sexual positions (riding cowgirl, riding reverse cowgirl, doggy-style, blowjob, missionary, anal) and for how a scene ends (creampie, anal creampie, face cum, mouth cum, swallow, ass cum, pussy cum). Each has its own wording and framing, in both prompt styles, and shows only the one character with the partner out of frame. The narrator is told to use them only while the moment is actually happening, to change the tag only when the position changes, and to finish with afterglow.
+- **A story can reword a picture type for itself.** A story's art settings can replace the wording and framing of any picture type (for example a different look for "dead" or "combat") while the mood tag stays the same, so the narrator's tags and the app's checks keep working.
+
+**Improved**
+
+- **Picture makers that cannot take reference pictures** now draw character faces as one close head-and-shoulders portrait. No more full-body figures, sheets of several views, or the character's usual expression overriding the mood. More expression names (grin, smirk, glare, pensive...) count as faces.
+- **Adult pictures** drop everyday clothes and props from the character's look, so the picture follows the scene.
+- **Busy online models are retried.** When a service answers "server busy" (503 or 529), the app waits a moment and asks again, up to 3 times, before showing an error.
+
+**Fixed**
+
+- **Numbers with a thousands comma are read correctly in side-panel trackers** (7,980 was stored as 7.98; 12,400 is now 12400).
+
 ## 1.6.0
 **New**
 

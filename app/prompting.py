@@ -105,13 +105,29 @@ def portrait_lines(story: dict) -> list[str]:
     groups: dict[tuple, list[str]] = {}
     avail = []
     for c in story.get("cast") or []:
-        if not c.get("moods"):
+        if not c.get("moods") or c.get("generic"):
             continue
         if c.get("player"):
             avail.append(f"{c['name']} (the player character: use this tag only if the story prompt above says to show the player's portrait): {', '.join(sorted(c['moods']))}")
         else:
             groups.setdefault(tuple(sorted(c["moods"])), []).append(c["name"])
     return [f"{', '.join(names)}: {', '.join(moods)}" for moods, names in sorted(groups.items(), key=lambda kv: kv[1][0])] + avail
+
+
+def generic_lines(story: dict) -> list[str]:
+    """The throwaway characters (Cast → Generic characters) that have pictures: role and look, with their moods."""
+    out = []
+    for c in story.get("cast") or []:
+        if c.get("generic") and c.get("moods"):
+            look = re.sub(r"\s+", " ", c.get("appearance") or "").strip()[:70]
+            out.append(f"{c['name']}" + (f" ({look})" if look else "") + ": " + ", ".join(sorted(c["moods"])))
+    return out
+
+
+GENERIC_RULE = ("GENERIC CHARACTERS: when a person with no name speaks or appears (a waiter, a guard, a clerk, someone in the crowd), do not invent a name for them. If one of the "
+                "'Generic characters' in the PICTURES AVAILABLE note fits the role, show them with that tag ([[Waitress/normal]]) and refer to them in the text by their role (the waitress, the guard), "
+                "never by a made-up name. Only when the story gives that person a real name, or they become important, use that name instead (the player will be offered to give them a picture of their own). "
+                "Pick the generic character whose role and look fit the person; if none fits, just write them without a tag.")
 
 
 def pictures_available(story: dict) -> str:
@@ -122,6 +138,9 @@ def pictures_available(story: dict) -> str:
     lines = portrait_lines(story)
     if lines and art.get("portraits", True):
         out.append("Portraits (characters and the moods available):\n" + "\n".join(lines))
+    gen = generic_lines(story)
+    if gen and art.get("portraits", True):
+        out.append("Generic characters (unnamed, throwaway people; the role is the tag name):\n" + "\n".join(gen))
     rows = _place_rows(story)
     if rows:
         out.append("Places (fixed pictures):\n" + "\n".join(rows))
@@ -156,6 +175,8 @@ def images_block(story: dict) -> str:
             + "Skip the tag for anyone not listed. If the story prompt above asks for portraits more often (for example for silent reactions "
               "or first appearances), follow it: the tag format is the same."
         )
+    if generic_lines(story) and art.get("portraits", True):
+        parts.append(GENERIC_RULE)
     if art.get("newchar", False):
         parts.append(NEWCHAR_RULE)
     pl = places_block(story)
@@ -378,19 +399,31 @@ def _action_names(story: dict, short: bool = False) -> str:
     return ", ".join(base)
 
 
+def _position_rule(story: dict) -> str:
+    """Adult stories only: how the narrator uses the sexual-position moods (they are one-character pictures; the partner is never drawn)."""
+    if not story.get("nsfw"):
+        return ""
+    return (" SEXUAL POSITIONS: only while a sex scene is actually under way in the story (never before the characters have started, and never for a kiss or a caress), the portrait tag of the character "
+            "in it names the position or act they are in right now: riding cowgirl, riding reverse cowgirl, doggy-style, blowjob, missionary or anal. Change the tag when the position changes in the text, "
+            "not on every line; use aroused or seductive before it begins and climaxing at the peak. Once the partner has finished, use the tag that says where and how: creampie or anal creampie (inside), "
+            "face cum, mouth cum or swallow (the mouth), ass cum or pussy cum (on the body), only for the one line where it happens, then afterglow when it is over. Each of these pictures shows only that one character (the partner is "
+            "out of frame), so give the tag to the character the line is about, and use the exact names above (a different position, such as 'standing' or 'spooning', is a new mood name in the same style, "
+            "for example [[Name/spooning]]).")
+
+
 def action_rule(story: dict) -> str:
     """The standing rule (stable text, so it does not disturb prompt caching)."""
     adult = " and, because adult content is allowed in this story, intimate scenes" if story.get("nsfw") else ""
     return ("ACTION SCENES: during fights, chases, danger and other physical action" + adult + ", prefer the ACTION moods over calm expression moods in the portrait tags of the "
             "characters involved, choosing the one that matches what that character is physically doing in that line. The standard action moods are: " + _action_names(story) + ". "
             "Use one the character already has (see the PICTURES AVAILABLE note); if they have none that fits, use the standard name from this list (the player will be offered to draw it). "
-            "Keep using action moods through the whole action sequence, and return to expression moods (smile, sad, angry...) when it is over.")
+            "Keep using action moods through the whole action sequence, and return to expression moods (smile, sad, angry...) when it is over." + _position_rule(story))
 
 
 _ACTION_RE = re.compile(r"\b(fight\w*|attack\w*|struck|strikes?|striking|slash\w*|stab\w*|punch\w*|kick\w*|dodg\w*|parr(?:y|ied|ies)|block\w*|charg\w*|chas(?:e|ed|es|ing)|flee\w*|fled|"
                         r"battle\w*|combat|duel\w*|ambush\w*|explo\w+|gunfire|shoot\w*|shot|arrows?|spells?|blood\w*|wound\w*|sword|blade|knife|weapons?|ambush|brawl\w*|clash\w*|lunge\w*|swing\w*|"
                         r"tackle\w*|grappl\w*|collaps\w*|screams?|roar\w*)\b", re.IGNORECASE)
-_ADULT_SCENE_RE = re.compile(r"\b(kiss\w*|undress\w*|naked|nude|moan\w*|gasp\w*|caress\w*|arous\w*|lust\w*|intimate|intimacy|sex\w*|bed|lingerie|shower\w*|bath\w*|stripp?\w*|climax\w*|thrust\w*|embrac\w*)\b", re.IGNORECASE)
+_ADULT_SCENE_RE = re.compile(r"\b(kiss\w*|undress\w*|naked|nude|moan\w*|gasp\w*|caress\w*|arous\w*|lust\w*|intimate|intimacy|sex\w*|bed|lingerie|shower\w*|bath\w*|stripp?\w*|climax\w*|thrust\w*|embrac\w*|straddl\w*|riding|doggy\w*|missionary|blowjob|fellatio|oral|anal|creampie|cum\w*|swallow\w*|orgasm\w*)\b", re.IGNORECASE)
 
 
 def _in_action_scene(story: dict) -> bool:

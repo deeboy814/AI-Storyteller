@@ -1821,6 +1821,48 @@ def set_group_cast(sid: str, on: bool):
     return s
 
 
+class GenericIn(BaseModel):
+    items: list[dict] = []        # [{"name": "Waitress", "appearance": "..."}]: from the presets or typed by the player
+    suggest: int = 0              # ask the helper AI for this many throwaway characters that suit the story's world (0 = none)
+
+
+@app.get("/api/generic-presets")
+def generic_presets():
+    return [{"name": n, "appearance": a} for n, a in characters.GENERIC_PRESETS]
+
+
+@app.post("/api/stories/{sid}/generic-characters")
+async def add_generic_characters(sid: str, body: GenericIn):
+    """Add throwaway characters for unnamed people (a waiter, a guard...). They are saved as ordinary cast members marked generic and shown as one card;
+    the narrator is told to use them, by role, whenever an unnamed person speaks or appears."""
+    s, cfg = _story(sid), store.load_config()
+    items = [{"name": str(i.get("name", "")).strip(), "appearance": str(i.get("appearance", "")).strip()} for i in body.items if str(i.get("name", "")).strip()]
+    if body.suggest > 0:
+        prov, model = _role(cfg, s, "recaps", "describe look")
+        system = ("You propose throwaway background characters for a story: the unnamed people who show up briefly (a waiter, a guard, a clerk, a passer-by). Reply with ONLY JSON: "
+                  '{"characters": [{"name": "<a short ROLE, 1-3 words, capitalised, never a personal name>", "appearance": "<one line of comma-separated visual details: age and gender, hair, build, clothing that suits the story world>"}]}. '
+                  f"Give exactly {min(body.suggest, 12)} different roles that fit THIS world and setting, adults only, safe for work, no famous characters, nobody who is already in the cast.")
+        have = ", ".join(c["name"] for c in s["cast"][:40])
+        ask = f"STORY: {s['title']}\nSETTING: {(s.get('art') or {}).get('setting', '')}\n\n{(s.get('base_prompt') or '')[:2500]}\n\nALREADY IN THE CAST: {have}"
+        out = await providers.complete(prov, model, system, [{"role": "user", "content": ask}], temperature=0.7, max_tokens=1200, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+        j = _json_in(out)
+        for c in (j.get("characters") if isinstance(j, dict) else None) or []:
+            if isinstance(c, dict) and str(c.get("name", "")).strip():
+                items.append({"name": str(c["name"]).strip(), "appearance": str(c.get("appearance", "")).strip()})
+        if body.suggest and not items:
+            raise HTTPException(502, "The helper AI returned no characters. Try again, or pick some from the list.")
+    added = []
+    for it in items:
+        name = characters.clean_name(it["name"]) or it["name"][:30]
+        if not name or any(c["name"].lower() == name.lower() for c in s["cast"]):
+            continue
+        ch = _ensure_char(s, name, it["appearance"])
+        ch["generic"], ch["group"] = True, characters.GENERIC_GROUP
+        added.append(ch["slug"])
+    store.save_story(s)
+    return {"story": s, "added": added}
+
+
 class GroupIn(BaseModel):
     slugs: list[str]
     group: str = ""     # "" = take them out of any group
@@ -1986,6 +2028,28 @@ def _body_look(look: str) -> str:
     return ". ".join(out).strip() + ("." if out else "")
 
 
+_LOWER_BODY = re.compile(r"\b(jeans|trousers|pants|shorts|slacks|skirts?|leggings|tights|socks?|shoes?|boots?|sandals|sneakers|heels|loafers|legs?|knees?|waist|belt|full[- ]body|tall|height|\d ?(?:ft|feet|foot|cm|m)\b|grin\w*|smil\w*|laugh\w*|squint\w*|frown\w*|expression|smirk\w*)", re.IGNORECASE)
+
+
+def _upper_look(look: str) -> str:
+    """For close head-and-shoulders portraits: a look without the clauses about legs, trousers and shoes (a long list of outfit pieces pulls the model into a standing full-body picture)."""
+    out = []
+    for sent in re.split(r"(?<=[.!?])\s+", (look or "").strip()):
+        keep = [c.strip(" .") for c in re.split(r"[,;]\s*", sent) if c.strip(" .") and not _LOWER_BODY.search(c)]
+        if keep:
+            out.append(", ".join(keep))
+    return ". ".join(out).strip() + ("." if out else "")
+
+
+CLOSE_FRAME = "Close head-and-shoulders portrait of ONE person only, cropped at the chest, the face large in the frame, facing the viewer, a single picture (not a collage, a sheet or several views)"
+
+
+def _close_portrait(prompt: str) -> str:
+    """Chroma / Qwen-Image portraits: one close head-and-shoulders picture. Without this they drift into a standing full-body figure or a contact sheet of several views of the same face."""
+    prompt = prompt.replace("Upper body portrait (framed from the chest up), facing the viewer,", CLOSE_FRAME + ",")
+    prompt = prompt.replace("Frame from the waist up so the hands and posture are visible.", "Frame tightly on the face and shoulders; one person, one picture.")
+    prompt = prompt.replace(images.ADULT_LINE, "").replace(images.SAFE_LINE, "").strip()
+    return "A single photograph of one person: one head, one face, one frame. " + prompt
 PLAIN_BG_NEGATIVE = "street, city, buildings, shop signs, neon lights, vending machines, outdoors, crowd, side view, profile view, turned away, looking away, waxy skin, plastic skin"
 
 
@@ -2013,7 +2077,12 @@ async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None
     if plain_bg:
         art = {**art, "setting": ""}
     look = _full_appearance(s, ch)
+    if plain_bg and not _is_action(mood):
+        look = _upper_look(look) or look
     adult_sdxl = bool(prov.get("nsfw_maker")) and prov.get("type") == "comfyui" and not _is_flux_model(prov.get("model", ""))
+    sex_pic = bool(s.get("nsfw")) and _mood_base(mood) in characters.ADULT_ONLY      # undressing, nude, positions...: what they wear comes from the picture, not their everyday outfit
+    if sex_pic and not adult_sdxl:
+        look = _body_look(look) or look
     if adult_sdxl:
         prov = {**prov, "_tight_face": True}     # only the face of the reference is used (its outfit and background must not carry over)
         look = _body_look(look) or look          # no everyday outfit or props: what they wear in this picture comes from the picture's own description
@@ -2022,11 +2091,13 @@ async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None
     prompt = images.portrait_prompt(art, ch["name"], look, mood_text, bool(refs), ext_only, nsfw=bool(s.get("nsfw")),
                                     species_ref=(ch.get("species") or "") if species_only else "", framing=_framing(mood, s=s))
     negative = s["art"].get("negative", "")
+    if plain_bg and not _is_action(mood):
+        prompt = _close_portrait(prompt)
     if plain_bg:
         prompt = prompt.replace("simple soft background", "plain soft studio backdrop, soft even light").replace("Simple soft background.", "Plain soft studio backdrop, soft even light.")
         negative = (negative + ", " if negative else "") + PLAIN_BG_NEGATIVE
     if _wants_tags(prov):
-        prompt, negative = await _portrait_tag_prompt(s, cfg, art, {**ch, "appearance": look}, mood)
+        prompt, negative = await _portrait_tag_prompt(s, cfg, art, {**ch, "appearance": look}, mood, sex_pic=sex_pic)
     if prov.get("nsfw_maker"):
         if adult_sdxl and not _wants_tags(prov):
             _, negative = _add_nsfw_words("", negative, prov, "")           # the explicit words go into the short prompt below; this only clears words that forbid nudity from the negative
@@ -3043,7 +3114,7 @@ MOOD_LOOKS = {   # what to draw for common mood names (numbers like "angry 2" ar
     "smile": "warm genuine smile reaching the eyes, relaxed open shoulders, head slightly tilted",
     "shy": "shy and embarrassed, blushing cheeks, eyes looking away, head ducked, shoulders drawn in, fingers fidgeting at chest",
     "surprise": "surprised, wide eyes, raised eyebrows, open mouth, leaning back slightly, hands raised",
-    "sulky": "sulking, pouting lips, puffed cheeks, eyes cut sideways, arms crossed tightly, head turned away",
+    "sulky": "sulking, pouting lips, puffed cheeks, eyes cut sideways toward the side, brows low, facing the viewer",
     "fear": "terrified, wide frightened eyes, pale face, trembling lips, shoulders hunched, hands clutched to chest, shrinking back",
     "sad": "sad, teary eyes, trembling lower lip, eyebrows angled up in the middle, downcast gaze, slumped shoulders, head bowed",
     "angry": "furious, deep furrowed brows, glaring eyes, clenched teeth, tense shoulders, fists clenched, leaning forward",
@@ -3093,19 +3164,48 @@ MOOD_LOOKS_ADULT = {   # stories with adult content on: the same picture types, 
     "nude": "nude, unclothed upper body, relaxed confident pose, soft light",
     "climaxing": "in the throes of pleasure: eyes shut or rolled back, mouth open in a gasp, flushed skin, back arched, tangled hair",
     "afterglow": "in the afterglow: lying back, flushed and tousled, a sheet pulled loosely over the body, drowsy smile, damp hair",
+    # sexual positions: ONLY this character is in the picture; the partner is never shown (out of frame, or only a hand or the edge of a body at the border)
+    "riding cowgirl": "in the riding cowgirl position, straddling a partner who is out of frame, knees wide and hips low, seen from the front, body upright with the back arched, hands braced on the partner below the frame or in their own hair, head tilted back, flushed face, parted lips, half-closed eyes, bare skin glistening with sweat",
+    "riding reverse cowgirl": "in the reverse cowgirl position, straddling a partner who is out of frame, seen from behind and slightly from the side, back arched, hips low, one hand braced on the partner's legs below the frame, face turned over the shoulder toward the viewer, flushed, lips parted, glistening with sweat",
+    "doggy-style": "in the doggy-style position, on hands and knees on a bed, hips raised and back arched, seen from the side and slightly behind, gripping the sheets, face turned over the shoulder toward the viewer, flushed, mouth open, glistening with sweat, a partner behind them who is out of frame",
+    "blowjob": "giving oral sex, kneeling, face tilted up and looking up at the viewer with flushed cheeks and half-closed eyes, mouth around the partner's cock at the bottom edge of the picture, the partner themself out of frame, saliva, one hand braced on the partner's thigh",
+    "missionary": "in the missionary position, lying on their back on a bed, legs raised and parted, seen from above, back arched, head pressed into the pillow, gripping the sheets, flushed face, open mouth, eyes shut or half-closed, glistening with sweat, a partner above them who is out of frame",
+    "anal": "in an anal sex scene, on hands and knees on a bed with the hips raised and the back arched, seen from the side and slightly behind, face turned over the shoulder toward the viewer, flushed, mouth open, gripping the sheets, glistening with sweat, a partner behind them who is out of frame",
+    # how a scene ends: ONLY this character is in the picture, the partner is never shown (out of frame)
+    "creampie": "after a creampie, lying on their back on a bed with the legs parted, seen from above and in front, semen leaking from the pussy, flushed and panting, half-closed eyes, glistening with sweat, the partner out of frame",
+    "anal creampie": "after an anal creampie, on hands and knees with the hips raised, seen from behind and slightly from the side, semen leaking from the ass, face turned over the shoulder toward the viewer, flushed and panting, glistening with sweat, the partner out of frame",
+    "face cum": "with semen on the face, kneeling, face tilted up toward the viewer, semen on the cheeks, lips and eyelashes, flushed, half-closed eyes, a tired satisfied smile, the partner out of frame",
+    "ass cum": "with semen on the ass, on hands and knees with the hips raised, seen from behind and slightly from the side, semen over the buttocks and lower back, face turned over the shoulder toward the viewer, flushed, glistening with sweat, the partner out of frame",
+    "pussy cum": "with semen on the pussy and inner thighs, lying back with the legs parted, seen from above and in front, flushed and panting, half-closed eyes, glistening with sweat, the partner out of frame",
+    "swallow": "swallowing, kneeling, head tipped slightly back, throat working, an empty open mouth shown to the viewer with the tongue out, a trace of semen on the lips, flushed, half-closed eyes, the partner out of frame",
+    "mouth cum": "with semen in the open mouth, kneeling, face tilted up toward the viewer, tongue out, semen on the tongue and lips, flushed, half-closed eyes, the partner out of frame",
     "dead": "dead: a lifeless body lying in a pool of blood, a visible fatal wound, blood on the face and clothes, eyes half-open and glassy, slack jaw, pale grey skin, limbs sprawled awkwardly",
     "combat": "in the middle of a brutal fight: striking or lunging with a weapon or fists, body twisted in motion, teeth gritted, eyes locked on an enemy, cuts and blood spatter, sweat and dirt, torn clothes, motion on the strike",
 }
 MOOD_FRAMING = {   # picture types that need a different frame than a chest-up portrait
     "combat": "Dynamic three-quarter action shot, slightly low camera angle, motion in the scene, battlefield or ruins softly in the background. The face, shoulders, arms and weapon are the focus and fill the upper half of the picture.",
     "dead": "Upper body seen from above, lying on their back on the ground, the face clearly visible and turned toward the viewer.",
+    "riding cowgirl": "Three-quarter shot from the front and slightly below, showing the face, chest and hips of the one person in the picture; the partner is not shown. Bedroom, soft light.",
+    "riding reverse cowgirl": "Three-quarter shot from behind and to the side, the back, hips and the face turned over the shoulder visible; the partner is not shown. Bedroom, soft light.",
+    "doggy-style": "Three-quarter shot from the side and slightly behind, on hands and knees, the arched back, hips and the face turned toward the viewer visible; the partner is not shown. Bedroom, soft light.",
+    "blowjob": "Close shot from above and in front, the face, shoulders and the top of the body visible, looking up at the viewer; the partner is cropped out of the picture. Bedroom, soft light.",
+    "missionary": "Shot from above, lying on a bed, the face, chest and raised legs visible; the partner is not shown. Bedroom, soft light.",
+    "anal": "Three-quarter shot from the side and slightly behind, on hands and knees, the arched back, hips and the face turned toward the viewer visible; the partner is not shown. Bedroom, soft light.",
+    "creampie": "Shot from above and in front, lying on a bed, the face, chest and parted legs visible; the partner is not shown. Bedroom, soft light.",
+    "anal creampie": "Three-quarter shot from behind and slightly to the side, on hands and knees, the hips and the face turned over the shoulder visible; the partner is not shown. Bedroom, soft light.",
+    "face cum": "Close shot from slightly above, the face and shoulders filling the picture, looking up at the viewer; the partner is cropped out of the picture. Bedroom, soft light.",
+    "ass cum": "Three-quarter shot from behind and slightly to the side, on hands and knees, the lower back, hips and the face turned over the shoulder visible; the partner is not shown. Bedroom, soft light.",
+    "pussy cum": "Shot from above and in front, lying back on a bed, the face, chest, hips and thighs visible; the partner is not shown. Bedroom, soft light.",
+    "swallow": "Close shot from slightly above, the face and shoulders filling the picture, looking up at the viewer; the partner is cropped out of the picture. Bedroom, soft light.",
+    "mouth cum": "Close shot from slightly above, the face and shoulders filling the picture, looking up at the viewer; the partner is cropped out of the picture. Bedroom, soft light.",
 }
 # Picture types that are a face and a feeling. Anything else (combat, dead, stripping, showering, running, sleeping...) is an ACTION picture: drawn as a
 # three-quarter shot that shows the action, with the face and upper body as the focus (and shown cropped to the upper body in the story).
 EXPRESSION_MOODS = {"default", "normal", "smile", "happy", "laugh", "laughing", "shy", "surprise", "surprised", "sulky", "fear", "scared", "sad", "angry", "scorn",
                     "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "worried", "confused", "bored", "disgusted",
                     "embarrassed", "blush", "blushing", "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty",
-                    "calm", "serious", "thinking", "pout", "annoyed", "suspicious", "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie"}
+                    "calm", "serious", "thinking", "pout", "annoyed", "suspicious", "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie",
+                    "grin", "grinning", "smirk", "glare", "pensive", "sheepish", "amused", "wary", "resigned", "stunned", "awkward", "smug", "cheerful", "playful", "mischievous", "teasing", "dazed"}
 ACTION_FRAMING = ("Three-quarter shot that shows the whole action and the body, with the face, shoulders and hands as the focus in the upper half of the picture.")
 ACTION_FRAMING_TAGS = "cowboy shot, face focus, dynamic pose"
 
@@ -3128,7 +3228,20 @@ def _framing(mood: str, tags: bool = False, s: dict | None = None) -> str:
     return MOOD_FRAMING.get(base) or (ACTION_FRAMING if _is_action(mood) else "")
 
 
-MOOD_FRAMING_TAGS = {"combat": "fighting, action shot, dynamic pose, dynamic angle, motion blur, cowboy shot, face focus", "dead": "upper body, lying, on back, from above, on ground, face visible"}
+MOOD_FRAMING_TAGS = {"combat": "fighting, action shot, dynamic pose, dynamic angle, motion blur, cowboy shot, face focus", "dead": "upper body, lying, on back, from above, on ground, face visible",
+                     "riding cowgirl": "cowboy shot, from front, from below, solo focus, bedroom",
+                     "riding reverse cowgirl": "cowboy shot, from behind, from side, looking back, solo focus, bedroom",
+                     "doggy-style": "cowboy shot, from side, from behind, looking back, solo focus, bedroom",
+                     "blowjob": "close-up, from above, pov, looking up, solo focus, bedroom",
+                     "missionary": "cowboy shot, from above, lying, on bed, solo focus, bedroom",
+                     "anal": "cowboy shot, from side, from behind, looking back, solo focus, bedroom",
+                     "creampie": "cowboy shot, from above, lying, on bed, solo focus, bedroom",
+                     "anal creampie": "cowboy shot, from behind, looking back, solo focus, bedroom",
+                     "face cum": "close-up, from above, pov, looking up, solo focus, bedroom",
+                     "ass cum": "cowboy shot, from behind, looking back, solo focus, bedroom",
+                     "pussy cum": "cowboy shot, from above, lying, on bed, solo focus, bedroom",
+                     "swallow": "close-up, from above, pov, looking up, solo focus, bedroom",
+                     "mouth cum": "close-up, from above, pov, looking up, solo focus, bedroom"}
 
 
 def _mood_base(mood: str) -> str:
@@ -3331,6 +3444,19 @@ MOOD_TAGS_ADULT = {"aroused": "blush, flushed face, parted lips, heavy-lidded ey
                    "nude": "nude, bare shoulders, looking at viewer, soft lighting",
                    "climaxing": "ahegao, closed eyes, open mouth, blush, sweat, arched back, flushed",
                    "afterglow": "lying, bed, blush, sweat, messy hair, sheet, smile, half-closed eyes",
+                   "riding cowgirl": "cowgirl position, girl on top, straddling, spread legs, arched back, sweat, blush, open mouth, half-closed eyes, looking at viewer, bare skin",
+                   "riding reverse cowgirl": "reverse cowgirl position, girl on top, straddling, from behind, looking back, arched back, sweat, blush, bare back",
+                   "doggy-style": "doggystyle, all fours, hips up, arched back, looking back, gripping sheets, sweat, blush, open mouth, bare back",
+                   "blowjob": "fellatio, oral, kneeling, looking up, cheek bulge, saliva, blush, half-closed eyes, hand on thigh",
+                   "missionary": "missionary, lying, on back, on bed, legs up, spread legs, arched back, gripping sheets, sweat, blush, open mouth, half-closed eyes",
+                   "anal": "anal, doggystyle, all fours, hips up, arched back, looking back, gripping sheets, sweat, blush, open mouth, bare back",
+                   "creampie": "creampie, cum in pussy, cum drip, cum on thighs, lying, on back, spread legs, on bed, sweat, blush, panting, half-closed eyes",
+                   "anal creampie": "anal creampie, cum in ass, cum drip, all fours, hips up, looking back, sweat, blush, panting",
+                   "face cum": "facial, cum on face, cum on mouth, cum on eyelashes, kneeling, looking up, blush, half-closed eyes, tired smile",
+                   "ass cum": "cum on ass, cum on back, all fours, hips up, from behind, looking back, sweat, blush",
+                   "pussy cum": "cum on pussy, cum on thighs, cum drip, lying, spread legs, on bed, sweat, blush, panting, half-closed eyes",
+                   "swallow": "swallowing, open mouth, tongue out, after fellatio, kneeling, looking up, saliva, blush, half-closed eyes",
+                   "mouth cum": "cum in mouth, open mouth, tongue out, cum on tongue, kneeling, looking up, blush, half-closed eyes",
                    "dead": "dead, corpse, blood, blood pool, blood on face, wound, injury, lifeless eyes, empty eyes, pale skin, limp, sprawled",
                    "combat": "fighting, attacking, lunging, weapon swing, clenched teeth, glaring, blood, blood splatter, cuts, injury, battle damage, torn clothes, dirt, sweat, motion lines"}
 _SUBJECT_TAG = re.compile(r"^(\d+(girl|boy|girls|boys|other|others)|solo|no humans)$")
@@ -3368,7 +3494,7 @@ async def _character_tags(s: dict, cfg: dict, art: dict, ch: dict) -> str:
     return tags
 
 
-async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: str, notes: str = "") -> tuple[str, str]:
+async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: str, notes: str = "", sex_pic: bool = False) -> tuple[str, str]:
     """(positive, negative) for a tag-style portrait without a per-picture text-model call: the character's saved tags + the tags for the mood. Moods that
     are not built in, or that you reworded in Settings, and drawings with extra notes still go through the text model."""
     base = re.sub(r"\s*\d+$", "", mood.strip().lower())
@@ -3381,13 +3507,15 @@ async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: st
             return pn
         tags = [x for x in re.split(r"\s*,\s*", pn[0]) if x and not re.search(r"^(upper body|portrait|close-up|looking at viewer|cowboy shot|face focus)$", x, re.IGNORECASE)]
         return ", ".join(tags + [frame]), pn[1]
-    if notes or (mood != "default" and (base in mine or base not in MOOD_TAGS or _story_mood(s, mood, "mood_looks"))):
+    if notes or (mood != "default" and (base in mine or (base not in MOOD_TAGS and not (adult and base in MOOD_TAGS_ADULT)) or _story_mood(s, mood, "mood_looks"))):
         look = f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult, s)}") + (f", {notes}" if notes else "")
         return framed(await _tag_prompt(s, cfg, art, look, [ch]))
     tags = await _character_tags(s, cfg, art, ch)
     if not tags:
         return framed(await _tag_prompt(s, cfg, art, f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult, s)}"), [ch]))
     parts = [t.strip() for t in tags.split(",") if t.strip()]
+    if sex_pic:          # the character's everyday clothing tags would dress a picture that is meant to be undressed
+        parts = [t for t in parts if not _CLOTHES.search(t) and not re.search(r"\b(bag|purse|necklace|bracelet|backpack|earrings?|watch)\b", t, re.I)]
     head = [parts.pop(0)] if parts and _SUBJECT_TAG.match(parts[0]) else []
     parts = [t for t in parts if not _SUBJECT_TAG.match(t)]
     mood_tags = (adult and MOOD_TAGS_ADULT.get(base)) or MOOD_TAGS["normal" if mood == "default" else base]
@@ -4490,6 +4618,28 @@ APP_VERSION = (APP_DIR.parent / "VERSION").read_text(encoding="utf-8").strip() i
 
 def _ver(v: str) -> tuple:
     return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
+
+
+UPDATE_REPO = "deeboy814/AI-Storyteller"
+
+
+@app.get("/api/update-check")
+async def update_check():
+    """Ask GitHub for the newest release. Only the player's own action asks for this (the Updates setting at start-up, or the Check now button);
+    nothing about the player or their stories is sent, only an ordinary public request for the latest release."""
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            r = await c.get(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest", headers={"accept": "application/vnd.github+json", "user-agent": "AI-Storyteller-update-check"})
+    except Exception:
+        raise HTTPException(502, "Could not reach GitHub. Check your internet connection and try again.")
+    if r.status_code == 404:
+        return {"current": APP_VERSION, "latest": APP_VERSION, "newer": False, "url": f"https://github.com/{UPDATE_REPO}/releases", "notes": ""}
+    if r.status_code != 200:
+        raise HTTPException(502, f"GitHub answered {r.status_code}. Try again later.")
+    d = r.json()
+    latest = str(d.get("tag_name") or "").lstrip("vV")
+    return {"current": APP_VERSION, "latest": latest, "newer": _ver(latest) > _ver(APP_VERSION), "url": d.get("html_url") or f"https://github.com/{UPDATE_REPO}/releases",
+            "notes": str(d.get("body") or "")[:1500]}
 
 
 def _open_pack(data: bytes) -> tuple[zipfile.ZipFile, dict, list[str]]:

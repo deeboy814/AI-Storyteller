@@ -20,8 +20,12 @@ DRAWABLE = {"normal", "smile", "shy", "surprise", "sulky", "fear", "sad", "angry
 ACTION_MOODS = ["combat 1", "combat 2", "strike 1", "strike 2", "guard", "dodge", "charge", "leap", "aim", "cast", "draw weapon", "wounded", "knocked down",
                 "defeated", "exhausted", "flee", "sneak", "battle cry", "victory", "dead"]
 # Only for stories with adult content on: single-character pictures for intimate scenes (drawn by the adult picture maker when that is set up).
-ADULT_ACTION_MOODS = ["aroused", "seductive", "undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow"]
-ADULT_ONLY = {"undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow"}   # moods that are always explicit pictures in an adult story
+ADULT_ACTION_MOODS = ["aroused", "seductive", "undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow",
+                       "riding cowgirl", "riding reverse cowgirl", "doggy-style", "blowjob", "missionary",
+                       "creampie", "face cum", "ass cum", "anal creampie", "anal", "pussy cum", "swallow", "mouth cum"]
+ADULT_POSITIONS = ["riding cowgirl", "riding reverse cowgirl", "doggy-style", "blowjob", "missionary"]   # sexual positions: the character alone in frame, the partner out of frame
+ADULT_FINISHES = ["creampie", "face cum", "ass cum", "anal creampie", "pussy cum", "swallow", "mouth cum"]   # how a sex scene ends: the character alone, the result shown, the partner out of frame
+ADULT_ONLY = {"undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow", "anal", *ADULT_POSITIONS, *ADULT_FINISHES}   # moods that are always explicit pictures in an adult story
 
 DEFAULT_SETS = {
     "basic": ["normal 2", "smile 1", "smile 2", "surprise", "fear", "sad", "angry 1", "scorn 1", "shy"],
@@ -187,3 +191,24 @@ def find_duplicates(story: dict) -> list[dict]:
                 seen.add(key)
                 out.append({"fold": fold["slug"], "into": into["slug"], "names": [fold["name"], into["name"]], "reason": reason})
     return out[:10]
+
+
+# Throwaway characters for the unnamed people of a story (the waiter, a guard, someone in the crowd): kept in the cast with generic=True, shown as one "Generic characters" card.
+GENERIC_GROUP = "Generic Characters"
+GENERIC_PRESETS = [
+    ("Waitress", "adult woman, late twenties, neat apron over a plain uniform, hair tied back, friendly professional look"),
+    ("Waiter", "adult man, late twenties, white shirt and black waistcoat, neat short hair, polite professional look"),
+    ("Shopkeeper", "adult man, fifties, simple apron over everyday clothes, tired kind eyes, short greying hair"),
+    ("Bartender", "adult man, thirties, rolled-up sleeves and a dark apron, short beard, relaxed look"),
+    ("Guard", "adult man, thirties, plain practical uniform and gear, serious face, short hair"),
+    ("Police Officer", "adult woman, thirties, dark uniform and cap, hair in a bun, alert, no-nonsense look"),
+    ("Office Lady", "adult woman, late twenties, neat blouse and skirt, shoulder-length hair, lanyard around the neck"),
+    ("Salaryman", "adult man, forties, plain dark suit and tie, tired eyes, short hair"),
+    ("Female Student", "young adult woman, about twenty, casual campus clothes, backpack, shoulder-length hair"),
+    ("Male Student", "young adult man, about twenty, casual campus clothes, backpack, short messy hair"),
+    ("Old Man", "elderly man, seventies, grey hair, wrinkled kind face, simple cardigan"),
+    ("Old Woman", "elderly woman, seventies, grey hair in a bun, wrinkled kind face, simple shawl"),
+    ("Doctor", "adult woman, forties, white coat over plain clothes, hair tied back, calm look"),
+    ("Passerby Woman", "adult woman, thirties, ordinary everyday clothes, shoulder-length hair, neutral expression"),
+    ("Passerby Man", "adult man, thirties, ordinary everyday clothes, short hair, neutral expression"),
+]

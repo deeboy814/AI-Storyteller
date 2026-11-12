@@ -319,6 +319,39 @@ function showCastGroup(name) {
   $("gBack").onclick = () => showCast("Characters");
   $("gUn").onclick = async () => { story = await api(`/stories/${story.id}/cast-group`, { method: "PUT", body: { slugs: ms.map((c) => c.slug), group: "" } }); showCast("Characters"); };
 }
+async function showGenericEditor() {
+  const presets = await api("/generic-presets"), have = (story.cast || []).filter((c) => c.generic);
+  const taken = new Set((story.cast || []).map((c) => c.name.toLowerCase()));
+  modal(`<h2>Generic characters</h2>
+    <p class="hint">Throwaway characters for people with no name: the waiter, a guard, someone in the crowd. When the narrator brings in an unnamed person it uses one of these (by role, never a made-up name) and shows their picture. They appear as one "Generic Characters" card in the Cast.</p>
+    ${have.length ? `<p class="hint">Already in this story: ${esc(have.map((c) => c.name).join(", "))}.</p>` : ""}
+    <label>Pick from the list</label>
+    <div class="chkgrid" id="gnList">${presets.map((p) => `<label class="chk" title="${esc(p.appearance)}"><input type="checkbox" value="${esc(p.name)}" ${taken.has(p.name.toLowerCase()) ? "disabled" : ""}> ${esc(p.name)}</label>`).join("")}</div>
+    <div class="field"><label>Or let the app suggest roles that suit this story's world</label><div style="display:flex;gap:8px;align-items:center"><input id="gnSuggest" type="number" min="0" max="12" value="0" style="width:70px"><span class="hint">how many (0 = none)</span></div></div>
+    <div class="field"><label>Add your own</label><div style="display:flex;gap:8px"><input id="gnName" placeholder="Role, e.g. Ticket Inspector" style="flex:1"></div><textarea id="gnLook" rows="2" placeholder="What they look like (optional)"></textarea></div>
+    <label class="chk"><input type="checkbox" id="gnDraw" checked> Draw a normal picture for each (about half a minute each on a local picture maker; online makers bill per picture)</label>
+    <div class="hint" id="gnMsg"></div>
+    <div class="actions"><button id="gnCancel">Close</button><button class="primary" id="gnAdd">Add</button></div>`);
+  $("gnCancel").onclick = () => showCast("Characters");
+  $("gnAdd").onclick = async (e) => {
+    const items = [...document.querySelectorAll("#gnList input:checked")].map((i) => presets.find((p) => p.name === i.value));
+    if ($("gnName").value.trim()) items.push({ name: $("gnName").value.trim(), appearance: $("gnLook").value.trim() });
+    const suggest = Math.max(0, Math.min(12, +$("gnSuggest").value || 0));
+    if (!items.length && !suggest) { $("gnMsg").textContent = "Pick at least one, type a role, or ask for suggestions."; return; }
+    e.target.disabled = true; $("gnMsg").textContent = suggest ? "Asking the helper AI…" : "Adding…";
+    try {
+      const r = await api(`/stories/${story.id}/generic-characters`, { method: "POST", body: { items, suggest } });
+      story = r.story;
+      if ($("gnDraw").checked) {
+        for (let n = 0; n < r.added.length; n++) {
+          const sl = r.added[n]; $("gnMsg").textContent = `Drawing ${n + 1} of ${r.added.length}…`;
+          try { story = await api(`/stories/${story.id}/cast/${sl}/generate`, { method: "POST", body: { mood: "normal 1" } }); } catch (err) { $("gnMsg").textContent = "A picture failed: " + err.message; }
+        }
+      }
+    } catch (err) { $("gnMsg").textContent = err.message; e.target.disabled = false; return; }
+    showCast("Characters");
+  };
+}
 function showGroupEditor() {
   const cast = story.cast || [], existing = [...new Set(cast.map((c) => c.group).filter(Boolean))];
   modal(`<h2>Group characters</h2><p class="hint">Grouped characters show as one card in the Cast. Each keeps their own pictures and bio.</p>
@@ -364,6 +397,7 @@ function showCast(tab = "Characters") {
           <button id="cImport">Import portraits…</button><span class="hint">Load a folder of pictures: one folder per character, one file per mood.</span>
           <button id="cFindArt">Find characters without art…</button><span class="hint">Lists named characters in the story that have no pictures and offers to draw them.</span>
           <button id="cSuggest">Suggest from the prompt</button><span class="hint">Reads the story prompt and proposes cast members with descriptions.</span>
+          <button id="cGeneric">Generic characters…</button><span class="hint">Throwaway characters (a waiter, a guard, a passer-by) the narrator uses whenever someone with no name appears.</span>
           <button id="cGroup">Group characters…</button><span class="hint">Shows extras (guards, zombies…) as one card.<label class="chk" style="margin:4px 0 0"><input type="checkbox" id="cGroupOn" ${story.group_cast !== false ? "checked" : ""}> Show groups as one card</label></span>
           <button id="cVoices">Voices…</button><span class="hint">Choose read-aloud voices for the narrator and each character.</span>
         </div></details></div>
@@ -393,6 +427,7 @@ function showCast(tab = "Characters") {
   document.querySelectorAll(".charcard[data-slug]").forEach((b) => b.onclick = () => showCharacter(b.dataset.slug));
   document.querySelectorAll(".charcard[data-group]").forEach((b) => b.onclick = () => showCastGroup(b.dataset.group));
   $("cGroup").onclick = () => showGroupEditor();
+  $("cGeneric").onclick = () => showGenericEditor();
   $("cVoices").onclick = () => showVoices();
   $("cGroupOn").onchange = async (e) => { story = await api(`/stories/${story.id}/group-cast?on=${e.target.checked}`, { method: "PUT" }); showCast("Characters"); };
   $("cAdd").onclick = () => showCharacter(null);
