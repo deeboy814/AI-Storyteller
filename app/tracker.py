@@ -74,10 +74,14 @@ def _num(v):
     if isinstance(v, (int, float)):
         n = float(v)
     else:
-        m = re.search(r"-?\d+(?:[.,]\d+)?", str(v))
-        if not m:
-            return None
-        n = float(m.group(0).replace(",", "."))
+        m = re.search(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!\d)", str(v))     # 12,400 is twelve thousand four hundred (thousands comma), not 12.4
+        if m:
+            n = float(m.group(0).replace(",", ""))
+        else:
+            m = re.search(r"-?\d+(?:[.,]\d+)?", str(v))
+            if not m:
+                return None
+            n = float(m.group(0).replace(",", "."))
     return int(n) if n == int(n) else round(n, 2)
 
 

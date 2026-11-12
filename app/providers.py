@@ -240,7 +240,8 @@ async def _openai(p, model, system, messages, temperature, max_tokens, num_ctx, 
     reasoning = model.lower().startswith(_REASONING)
     if reasoning:
         q.add("completion_tokens")
-    for _ in range(5):
+    busy = 0   # "server busy" answers (503/529) seen so far: wait a moment and ask again, up to 3 times (nothing has been shown yet)
+    for _ in range(8):
         body = {"model": model, "messages": [{"role": "system", "content": system_text(system)}] + _plain(messages), "stream": True}
         if "no_usage" not in q:
             body["stream_options"] = {"include_usage": True}
@@ -266,6 +267,11 @@ async def _openai(p, model, system, messages, temperature, max_tokens, num_ctx, 
                     if "reasoning" in low and "no_effort" not in q:
                         q.add("no_effort"); continue
                     raise ProviderError(f"400 from {r.url.host}: {text[:500]}")
+                if r.status_code in (503, 529) and busy < 3:
+                    busy += 1
+                    await r.aread()
+                    await asyncio.sleep(2 * busy)
+                    continue
                 await _check(r)
                 cut = False
                 async for line in r.aiter_lines():
