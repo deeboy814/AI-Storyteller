@@ -634,6 +634,9 @@ async function showSettings(tab = "AI") {
       <h3>Something went wrong?</h3>
       <div class="hint">Make a bug report file (how far your game got, the problems the app can find, recent errors) with personal data removed, to attach to a problem report.</div>
       <div class="actions" style="justify-content:flex-start"><button id="sBugReport">🐞 Report a bug…</button></div>
+      <h3>Updates</h3>
+      <label class="chk top"><input type="checkbox" id="sUpd" ${config.update_check ? "checked" : ""}><span><b>Check for updates when the app starts</b><span class="hint">Off by default. When on, the app asks GitHub once at start-up whether a newer version has been released. Nothing about you or your stories is sent, and nothing is downloaded or installed automatically.</span></span></label>
+      <div class="actions" style="justify-content:flex-start"><button id="sUpdNow">Check for updates now</button><span class="hint" id="sUpdMsg"></span></div>
       <h3>Reuse across stories</h3>
       <div class="hint">Both are off by default and work independently.</div>
       <label class="chk top"><input type="checkbox" id="sAvLib" ${config.avatar_library ? "checked" : ""}><span><b>Avatar library</b><span class="hint">Create several player avatars (a sheet and a picture each) and reuse them in any story. Each story uses exactly one, as its own copy. Adds a 🧑 Avatars button on the Home screen and a library row in Player → Avatar.</span></span></label>
@@ -701,6 +704,7 @@ async function showSettings(tab = "AI") {
   };
   $("sLan").onchange = lanFill; lanFill();
   $("sBugReport").onclick = () => showBugReport();
+  $("sUpdNow").onclick = () => checkUpdates(true);
   onModalClose = () => { applyTheme(config); onModalClose = null; };   // Cancel / click-away undoes the colour preview
   $("sBudAct").value = config.budget_action || "warn"; $("sCharMemSize").value = config.char_memory_size || "medium";
   api("/budget").then((b) => { $("sBudNow").textContent = `Spent so far: $${b.daily.spent.toFixed(2)} today` + (b.monthly.limit > 0 ? ` · $${b.monthly.spent.toFixed(2)} this month` : "") + " (estimated)."; }).catch(() => {});
@@ -764,7 +768,7 @@ async function showSettings(tab = "AI") {
     if (styleChanged || styleDir) config.default_art_direction = styleDir;   // new stories start with it
     config.local_mode = $("sLocal").checked; config.rt_text = $("sRtText").checked; config.rt_comfy = $("sRtComfy").checked; config.rt_comfy_idle_min = +$("sRtIdle").value || 15; config.rt_comfy_mode = $("sRtMode").value; config.rt_comfy_cmd = $("sRtCmd").value.trim(); config.rt_swap = $("sRtSwap").checked;
     config.avatar_library = $("sAvLib").checked; config.reuse_art = $("sReuse").checked;
-    config.lan_access = $("sLan").checked;
+    config.lan_access = $("sLan").checked; config.update_check = $("sUpd").checked;
     config.keep_warm = $("sWarm").checked; config.keep_warm_hours = +$("sWarmH").value || 2;
     config.summarize_when = +$("sWhen").value || 24; config.keep_recent = +$("sRecent").value || 10;
     await picker.ready;
@@ -909,6 +913,22 @@ $("modelSelect").onchange = async (e) => {
   runtimeSelect();
 };
 
+async function checkUpdates(manual) {
+  const msg = manual ? $("sUpdMsg") : null;
+  if (msg) msg.textContent = "Checking…";
+  try {
+    const r = await api("/update-check");
+    if (r.newer) {
+      if (msg) msg.textContent = `Version ${r.latest} is available (you have ${r.current}).`;
+      const old = document.getElementById("updBanner"); if (old) old.remove();
+      const b = document.createElement("div"); b.id = "updBanner";
+      b.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:9999;max-width:340px;background:var(--panel,#222);color:var(--text,#eee);border:1px solid var(--accent,#7aa2ff);border-radius:10px;padding:12px 14px;box-shadow:0 4px 18px rgba(0,0,0,.5);font-size:14px";
+      b.innerHTML = `<b>A new version is available</b><div class="hint" style="margin:4px 0 8px">Version ${esc(r.latest)} is out (you have ${esc(r.current)}).</div><div style="display:flex;gap:8px"><a href="${esc(r.url)}" target="_blank" rel="noopener"><button>See what's new</button></a><button id="updX">Later</button></div>`;
+      document.body.appendChild(b); b.querySelector("#updX").onclick = () => b.remove();
+    } else if (msg) msg.textContent = `You are up to date (version ${r.current}).`;
+  } catch (e) { if (msg) msg.textContent = "Could not check: " + (e.message || e); }
+}
+
 (async function init() {
   try {
     await loadModels();
@@ -918,5 +938,6 @@ $("modelSelect").onchange = async (e) => {
     if (id) await openStory(id); else renderAll(false);
     await showHome();   // start on the Home screen; the last story is already loaded behind it
   } finally { document.body.classList.remove("booting"); }   // the story screen stays hidden until Home is up, so it never flashes first
+  if (config && config.update_check) setTimeout(() => checkUpdates(false), 1500);   // only when the player turned it on
   setTimeout(() => { if (typeof maybeFirstRun === "function") maybeFirstRun(); }, 300);
 })();
