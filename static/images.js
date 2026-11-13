@@ -401,7 +401,7 @@ function showCast(tab = "Characters") {
   modal(`<h2>Cast &amp; gallery</h2>
     <div class="tabs"><button class="tab ctab" data-tab="Characters">Characters (${(story.cast || []).length})</button><button class="tab ctab" data-tab="Relationships">Relationships</button><button class="tab ctab" data-tab="Gallery">Gallery (${items.length})</button><button class="tab ctab" data-tab="Intro">Intro panels (${(story.intro_images || []).length})</button></div>
     <div id="cTabCharacters"><p class="hint">Click a character to see their bio, key events and all their pictures. The card shows their normal picture.</p>
-      <div class="cardgrid">${castCards(card)}<button class="charcard addcard" id="cAdd"><div class="noart">＋ Add character</div></button></div>
+      <div class="cardgrid">${castCards(card)}<button class="charcard addcard" id="cAdd"><div class="noart">＋ Add character</div></button><button class="charcard addcard" id="cLib"><div class="noart">👥 From the library</div></button></div>
       <details class="fold"><summary>Cast tools</summary>
         <div class="tooltable">
           <button id="cImport">Import portraits…</button><span class="hint">Load a folder of pictures: one folder per character, one file per mood.</span>
@@ -443,6 +443,7 @@ function showCast(tab = "Characters") {
   $("cVoices").onclick = () => showVoices();
   $("cGroupOn").onchange = async (e) => { story = await api(`/stories/${story.id}/group-cast?on=${e.target.checked}`, { method: "PUT" }); showCast("Characters"); };
   $("cAdd").onclick = () => showCharacter(null);
+  $("cLib").onclick = () => showCastLibrary();
   $("cImport").onclick = () => showImportPortraits();
   $("cFindArt").onclick = () => showArtDialog({});
   $("cSuggest").onclick = async (e) => {
@@ -477,6 +478,25 @@ function showCast(tab = "Characters") {
   });
 }
 
+// The Images tab groups a character's pictures by image category (Expressions, Actions, Positions...), and each group can be minimized (remembered across characters).
+const moodCatCache = {};          // picture name (without its number) -> category id, filled from /api/moods
+function moodCategoryId(m) {
+  const b = String(m).toLowerCase().replace(/\s*\d+$/, "").trim(), d = ((typeof config !== "undefined" && config && config.mood_defs) || {})[b];
+  return moodCatCache[b] || (d && d.category) || (EXPRESSION_MOODS.has(b) ? "expressions" : "actions");
+}
+function minimizedCats() { try { return new Set(JSON.parse(localStorage.getItem("imMinCats") || "[]")); } catch (e) { return new Set(); } }
+function saveMinimizedCats(set) { try { localStorage.setItem("imMinCats", JSON.stringify([...set])); } catch (e) { /* it is a convenience */ } }
+function groupByCategory(items) {       // items: [mood name, figure html]
+  if (!items.length) return "";
+  const cats = ((typeof config !== "undefined" && config && config.image_categories) || []), groups = new Map(), min = minimizedCats();
+  for (const c of cats) groups.set(c.id, []);
+  for (const [m, h] of items) { const id = m === "__earlier" ? m : moodCategoryId(m); if (!groups.has(id)) groups.set(id, []); groups.get(id).push(h); }
+  const later = groups.get("__earlier"); groups.delete("__earlier"); if (later) groups.set("__earlier", later);       // the replaced pictures are a group of their own, last
+  return [...groups].filter(([, hs]) => hs.length).map(([id, hs]) => {
+    const c = cats.find((x) => x.id === id);
+    return `<div class="imcat${min.has(id) ? " min" : ""}" data-cat="${esc(id)}"><button type="button" class="imcatHead" aria-expanded="${!min.has(id)}"><span class="imcatArrow">▾</span> ${esc(c ? c.name : id === "__earlier" ? "Earlier versions (replaced pictures)" : id)} <span class="hint">(${hs.length})</span></button><div class="imcatGrid">${hs.join("")}</div></div>`;
+  }).join("");
+}
 function showCharacter(slug, tab = "Bio") {
   if (!story) return;
   const ch = slug ? (story.cast || []).find((c) => c.slug === slug) : null;
@@ -487,11 +507,11 @@ function showCharacter(slug, tab = "Bio") {
 
   // ----- Images tab pieces
   const moodChips = () => {
-    const cur = Object.entries(c.moods || {}).map(([m, u]) =>
-      `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 260)}" alt=""><figcaption>${esc(m)} <button class="x mregen" data-mood="${esc(m)}" title="Draw another version. The current one is kept as an earlier version.">↻</button><button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show and edit the exact prompt this picture was drawn from, and draw again from your change">📝</button><button class="x mren" data-mood="${esc(m)}" title="Rename this picture (the narrator picks pictures by name)">✎</button><button class="x mdel" data-mood="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`).join("");
-    const old = Object.entries(c.alts || {}).flatMap(([m, us]) => us.map((u) =>
-      `<figure class="mood alt"><img loading="lazy" src="${thumbUrl(u, 200)}" alt=""><figcaption>${esc(m)} (earlier) <button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show the prompt this earlier picture was drawn from">📝</button><button class="x altuse" data-mood="${esc(m)}" data-url="${esc(u)}" title="Make this the active picture">use</button><button class="x altdel" data-url="${esc(u)}" title="Delete">×</button></figcaption></figure>`)).join("");
-    return (cur + old) || '<span class="hint">No pictures yet. Use “Draw options…” to pick a face, or upload your own.</span>';
+    const cur = Object.entries(c.moods || {}).map(([m, u]) => [m,
+      `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 260)}" alt=""><figcaption>${esc(m)} <button class="x mregen" data-mood="${esc(m)}" title="Draw another version. The current one is kept as an earlier version.">↻</button><button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show and edit the exact prompt this picture was drawn from, and draw again from your change">📝</button><button class="x mren" data-mood="${esc(m)}" title="Rename this picture (the narrator picks pictures by name)">✎</button><button class="x mdel" data-mood="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`]);
+    const old = Object.entries(c.alts || {}).flatMap(([m, us]) => us.map((u) => ["__earlier",
+      `<figure class="mood alt"><img loading="lazy" src="${thumbUrl(u, 200)}" alt=""><figcaption>${esc(m)} (earlier) <button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show the prompt this earlier picture was drawn from">📝</button><button class="x altuse" data-mood="${esc(m)}" data-url="${esc(u)}" title="Make this the active picture">use</button><button class="x altdel" data-url="${esc(u)}" title="Delete">×</button></figcaption></figure>`]));
+    return groupByCategory([...cur, ...old]) || '<span class="hint">No pictures yet. Use “Draw options…” to pick a face, or upload your own.</span>';
   };
   const eventRow = (e) => `<div class="evrow" data-id="${esc(e.id)}"><span class="evwhen">${esc(e.when || "·")}</span><span class="evtext">${esc(e.text)}</span>${e.digest ? '<span class="evauto" title="Several older events condensed by the helper AI">history</span>' : e.auto ? '<span class="evauto" title="Logged automatically">auto</span>' : ""}<button class="x evedit" title="Edit">✎</button><button class="x evdel" title="Delete">×</button></div>`;
 
@@ -508,6 +528,10 @@ function showCharacter(slug, tab = "Bio") {
           ? `<div class="spref"><img src="${thumbUrl(sp.reference_url, 200)}" alt=""><div class="hint"><b>${esc(sp.name)} reference picture.</b> New characters of this species are drawn from it, so they share its look but have their own face. Change it under 🖼 Art → Characters → Species.</div></div>`
           : `<div class="hint">The first picture drawn for a new species becomes its reference: later characters of that species keep its look (skin, crests, build) but are drawn as their own person. Species traits are written under 🖼 Art → Characters → Species.</div>`; })()}
         <label>How they look <small class="hint">(what the artist is told: age, hair, eyes, build, clothing, distinctive features)</small></label><textarea class="short" id="chApp" rows="3">${esc(c.appearance)}</textarea>
+        <label>Face in words <small class="hint">(optional. Picture makers that cannot take reference pictures, like UnCanny, only know a face from words: this is put first in every picture prompt, so the face stays the same. Hair colour belongs here too)</small></label><textarea class="short" id="chFace" rows="3" placeholder="e.g. oval face, soft jawline, dark brown almond eyes, straight thin brows, small nose, full lips, fair skin, shoulder-length dark brown bob with straight bangs">${esc(c.face || "")}</textarea>
+        ${isNew ? "" : '<div class="actions" style="justify-content:flex-start;margin:2px 0 6px"><button id="chFaceWrite" type="button" title="A helper model that can see pictures describes their face from their normal picture. Nothing is saved until you press Save.">👁 Describe the face from their picture</button><span class="hint" id="chFaceNote"></span></div>'}
+        <label>Face LoRA <small class="hint">(optional. A LoRA trained on this character's face, from ComfyUI's loras folder. It is added whenever ComfyUI draws them: pictures, scenes and the Now card. It only works with the kind of model it was trained for)</small></label>
+        <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin:2px 0 6px"><select id="chFaceLora" style="max-width:320px"><option value="">(none)</option></select><input id="chFaceLoraSt" type="number" step="0.05" min="-2" max="2" value="${esc(String(c.face_lora_strength ?? 1))}" style="width:80px" title="Strength: 0.7 to 1.0 is usual"><input id="chFaceTrig" value="${esc(c.face_trigger || "")}" placeholder="trigger word (if it has one)" style="max-width:220px"></div>
         <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button id="chAppSuggest" ${isNew ? "disabled" : ""}>Suggest from the story</button></div></div></div>
       <label>Names and forms of address <small class="hint">(optional: which names or titles each person uses for this character, and who is allowed to. Sent to the narrator every turn, so it can keep names consistent. For example: a given name only close friends use, a nickname, a title or rank others use, or a name that should stay secret.)</small></label><textarea class="short" id="chAddress" rows="3" maxlength="600">${esc(c.address || "")}</textarea>
       <label>Personality <small class="hint">(traits, how they speak, what they want)</small></label><input id="chPers" value="${esc(c.personality || "")}">
@@ -517,7 +541,7 @@ function showCharacter(slug, tab = "Bio") {
       <div id="chPromptLines"></div><div class="aStatus hint" id="chStatus"></div>
       ${isNew || (story.cast || []).length < 2 ? "" : `<div class="aiBox"><b>Same person as another character?</b> <small class="muted">If the story ended up with this character twice (for example under a nickname and under their full name), fold this entry into the right one: its name becomes an “also called” name there, and its pictures, key events and side-panel row move over.</small>
         <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><select id="chMergeSel">${(story.cast || []).filter((x) => x.slug !== slug).map((x) => `<option value="${esc(x.slug)}">${esc(x.name)}</option>`).join("")}</select><button id="chMerge">Merge ${esc(c.name)} into them</button></div></div>`}
-      <div class="actions">${isNew ? "" : '<button class="danger" id="chRemove">Remove character</button><span style="flex:1"></span>'}<button class="primary" id="chSave">${isNew ? "Create character" : "Save"}</button></div></div>
+      <div class="actions">${isNew ? "" : '<button id="chToLib" title="Keep a copy of this character (description and normal picture) in the Character library, so any story can use them">👥 Save to library</button><button class="danger" id="chRemove">Remove character</button><span style="flex:1"></span>'}<button class="primary" id="chSave">${isNew ? "Create character" : "Save"}</button></div></div>
 
     <div id="chEvents" class="hidden">
       <p class="hint">Important moments for ${esc(c.name || "this character")}. New ones are added automatically after each reply (change this in Settings); you can edit, delete or add your own.</p>
@@ -531,7 +555,8 @@ function showCharacter(slug, tab = "Bio") {
         <select id="imSet"><option value="basic">Basic set</option><option value="extended">Extended set</option>${categorySetOptions("All: ")}<option value="match">Images my other characters have</option></select><button id="imSetGo">Draw the set</button>${Object.keys(c.moods || {}).length ? '<button id="imDelAll" class="danger" title="Delete every picture of this character in this story, including earlier versions">Delete all their pictures</button>' : ""}</div>
       <div class="castact" style="margin:6px 0"><label for="imMood" class="hint" style="margin:0 4px 0 0">Picture name:</label><input id="imMood" value="normal 1" size="12" title="What this picture is called (its mood): used when drawing and when you upload your own"><button id="imDraw">Draw this one with AI</button><input type="file" id="imFile" accept="image/png,image/jpeg,image/webp,image/gif"></div>
       <div class="aStatus hint" id="imStatus"></div>
-      <div class="moods" id="imGrid">${moodChips()}</div>
+      <div class="actions imcatBar" style="justify-content:flex-start;margin:0 0 4px"><button type="button" id="imMinAll" class="x">Minimize all</button><button type="button" id="imMaxAll" class="x">Expand all</button></div>
+      <div id="imGrid">${moodChips()}</div>
       ${isNew ? "" : `<details class="sub" id="imTagsBox"><summary>Picture tags (for tag-style picture models)</summary>
         <div class="hint">With a tag-style model such as Animagine, these tags describe this character's looks (hair, eyes, build, clothing) in every picture, so they stay the same. The helper model writes them once from the description; edit them here, or press Rebuild to have them written again. Leave your own tags empty to use the helper's.</div>
         <textarea class="short" id="imTags" rows="3" placeholder="Written automatically the first time a picture is drawn with a tag-style model."></textarea>
@@ -582,10 +607,12 @@ function showCharacter(slug, tab = "Bio") {
     box.innerHTML = `<p class="hint" style="margin-bottom:2px">What your story prompt says about them:</p>` + r.lines.map((l, i) => `<div class="pline"><span>${esc(oneLine(l, 260))}</span><button class="usebio" data-i="${i}">Use as bio</button></div>`).join("");
     box.querySelectorAll(".usebio").forEach((b) => b.onclick = () => { $("chBioText").value = r.lines[+b.dataset.i]; });
   }).catch(() => {});
+  if ($("chFaceLora")) { const cur = c.face_lora || "", fillLoras = (list) => { const sel = $("chFaceLora"); if (!sel) return; const names = [...new Set([...(list || []), ...(cur ? [cur] : [])])]; sel.innerHTML = '<option value="">(none)</option>' + names.map((n) => `<option value="${esc(n)}">${esc(n)}${list && list.includes(n) ? "" : " (not found in ComfyUI)"}</option>`).join(""); sel.value = cur; };
+    fillLoras(null); api("/model-options").then((o) => { const p = (o.images || []).find((x) => (x.loras || []).length); fillLoras(p ? p.loras : []); }).catch(() => {}); }
   if ($("chMaker")) { makerSelect($("chMaker"), [["", "Same as the story"]], c.maker || ""); makerChoices().then((ch) => { if ($("chMaker")) makerSelect($("chMaker"), ch, c.maker || ""); }); }
   $("chSave").onclick = async () => {
     const name = $("chName").value.trim(); if (!name) { status("chStatus", "Give the character a name."); return; }
-    const edit = { name, appearance: $("chApp").value, bio: $("chBioText").value, personality: $("chPers").value, author: $("chAuthor").checked, aka: $("chAka").value, address: $("chAddress").value, species: $("chSpecies").value, maker: $("chMaker").value, slug: isNew ? null : slug };
+    const edit = { name, appearance: $("chApp").value, face: $("chFace").value, face_lora: $("chFaceLora").value, face_lora_strength: parseFloat($("chFaceLoraSt").value) || 1, face_trigger: $("chFaceTrig").value, bio: $("chBioText").value, personality: $("chPers").value, author: $("chAuthor").checked, aka: $("chAka").value, address: $("chAddress").value, species: $("chSpecies").value, maker: $("chMaker").value, slug: isNew ? null : slug };
     try {
       story = await api(`/stories/${story.id}/cast`, { method: "PUT", body: { cast: isNew ? [...castPayload(null), edit] : castPayload(edit) } });
       const made = isNew ? story.cast.find((x) => x.name === name) : null;
@@ -600,12 +627,25 @@ function showCharacter(slug, tab = "Bio") {
       try { story = await api(`/stories/${story.id}/cast/${slug}/merge`, { method: "POST", body: { into } }); renderAll(); showCharacter(into, "Bio"); }
       catch (err) { status("chStatus", err.message); }
     };
+    $("chToLib").onclick = async (e) => {
+      e.target.disabled = true;
+      try { await api(`/stories/${story.id}/cast/${encodeURIComponent(slug)}/to-library`, { method: "POST" }); status("chStatus", "Saved to the Character library (Home → Characters)."); }
+      catch (err) { status("chStatus", err.message); }
+      e.target.disabled = false;
+    };
     $("chRemove").onclick = async () => {
       if (!confirm(`Remove ${c.name} and all their pictures from this story?`)) return;
       story = await api(`/stories/${story.id}/cast`, { method: "PUT", body: { cast: castPayload(null).filter((x) => x.slug !== slug) } }); renderAll(); showCast();
     };
+    if ($("chFaceWrite")) $("chFaceWrite").onclick = async (e) => {
+      e.target.disabled = true; $("chFaceNote").textContent = "Looking…";
+      try { const r = await api(`/stories/${story.id}/cast/${encodeURIComponent(slug)}/describe-face`, { method: "POST" }); $("chFace").value = r.face; $("chFaceNote").textContent = "Described. Edit it if you like, then Save."; }
+      catch (err) { $("chFaceNote").textContent = err.message; }
+      e.target.disabled = false;
+    };
     $("chAppSuggest").onclick = async (e) => {
       e.target.disabled = true; status("chStatus", "Reading what the story says about them…");
+
       try { const r = await api(`/stories/${story.id}/cast/describe`, { method: "POST", body: { name: c.name } }); $("chApp").value = r.appearance; status("chStatus", "Edit it if it isn't what you picture, then Save."); }
       catch (err) { status("chStatus", err.message); }
       e.target.disabled = false;
@@ -676,6 +716,17 @@ function showCharacter(slug, tab = "Bio") {
       if (!confirm(`Delete all ${n} pictures of ${c.name} in this story, including earlier versions? This cannot be undone.`)) return;
       story = await api(`/stories/${story.id}/cast/${slug}/pictures`, { method: "DELETE" }); renderAll();
     });
+    const redrawGrid = () => { $("imGrid").innerHTML = moodChips(); };
+    $("imGrid").addEventListener("click", (e) => {
+      const h = e.target.closest(".imcatHead"); if (!h) return;
+      const box = h.parentElement, set = minimizedCats(), id = box.dataset.cat;
+      box.classList.toggle("min"); h.setAttribute("aria-expanded", !box.classList.contains("min"));
+      if (box.classList.contains("min")) set.add(id); else set.delete(id);
+      saveMinimizedCats(set);
+    });
+    $("imMinAll").onclick = () => { saveMinimizedCats(new Set([...document.querySelectorAll("#imGrid .imcat")].map((x) => x.dataset.cat))); redrawGrid(); };
+    $("imMaxAll").onclick = () => { saveMinimizedCats(new Set()); redrawGrid(); };
+    api("/moods").then((r) => { for (const m of r.moods || []) moodCatCache[m.name] = m.category; if ($("imGrid")) redrawGrid(); }).catch(() => {});
     $("imGrid").addEventListener("click", async (e) => {
       const b = e.target.closest("button"); if (!b) return;
       if (b.classList.contains("mregen")) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: b.dataset.mood } }); if (b.dataset.mood === "normal 1") await offerRedrawAll(story.cast.find((x) => x.slug === slug), (m) => status("imStatus", m)); });
