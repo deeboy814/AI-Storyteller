@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.6.3
+**New**
+
+- **Character library (Home → 👥 Characters).** Make characters once and use them in any story. Describe them, draw 4 options in any story's art style (or with the default picture maker), pick one, or upload a picture. In a story's Cast screen, "👥 From the library" adds a copy with their look, face, notes and picture (the picture becomes their normal 1, so it is the face reference there). A character's page has "👥 Save to library" to keep an existing character for other stories.
+- **Face in words (character page → Bio).** A box for the face in plain words, and "👁 Describe the face from their picture": a helper model that can see pictures (Claude, Gemini, ChatGPT, Grok) writes it from their normal picture. When filled in, it is put first in that character's picture prompts so makers that cannot take reference pictures (UnCanny, Chroma, Qwen) keep the same face. Empty means prompts are unchanged.
+- **Face LoRA per character (character page → Bio).** Pick a LoRA trained on that character's face from ComfyUI's loras folder, with a strength and an optional trigger word. It is added whenever ComfyUI draws that character: portraits, the pick-from-4 options, scenes and the Now card.
+- **The Images tab groups a character's pictures by category** (Expressions, Actions, Positions...), each group can be minimized (Minimize all / Expand all, remembered), and replaced pictures are a group of their own, "Earlier versions".
+- **Story packages carry more.** The item list (🎒), "also called" names and generic-character marks now travel in a package.
+
+**Improved**
+
+- **The Lantern Market example uses every feature of the app.** Alternate openings, story beats (by move, night, a tracker and the road taken), lore, a world clock, dice, command buttons, points to spend, a replies-per-night counter, a Route choice and per-character Trust, items, generic characters, a character with no picture, intro panels and a fourth ending. Its prompt's GUIDE lines say where each feature is and how to try it.
+- **Species & makers: picking a reference.** The 4 redrawn candidates now work like the other pick-from-4 lists: click one to see it full size, then "Use this one" under each. (Before, the tap did nothing.)
+- **Character Images tab: an even grid** (4 per row, 3 on a tablet, 2 on a phone), every picture the same size.
+
 ## 1.6.2
 **New**
 

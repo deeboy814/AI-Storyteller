@@ -35,8 +35,18 @@ def system_text(system) -> str:
     return "\n\n".join(b["text"] for b in system if b.get("text"))
 
 
-def _plain(messages) -> list[dict]:
-    return [{"role": m["role"], "content": m["content"]} for m in messages]
+def _plain(messages, style: str = "ollama") -> list[dict]:
+    """Messages as plain role/content pairs. A message may carry "pics": [(mime, base64)] (a picture for a model that can see): sent as that API expects."""
+    out = []
+    for m in messages:
+        pics = m.get("pics") or []
+        if pics and style == "openai":
+            out.append({"role": m["role"], "content": [{"type": "text", "text": m["content"]}] + [{"type": "image_url", "image_url": {"url": f"data:{mt};base64,{b}"}} for mt, b in pics]})
+        elif pics:
+            out.append({"role": m["role"], "content": m["content"], "images": [b for _, b in pics]})
+        else:
+            out.append({"role": m["role"], "content": m["content"]})
+    return out
 
 
 async def _check(resp: httpx.Response) -> None:
@@ -139,6 +149,8 @@ async def _anthropic(p, model, system, messages, temperature, max_tokens, num_ct
     msgs = []
     for m in messages:
         content = [{"type": "text", "text": m["content"], "cache_control": cc}] if (cc and m.get("cache")) else m["content"]
+        if m.get("pics"):
+            content = [{"type": "image", "source": {"type": "base64", "media_type": mt, "data": b}} for mt, b in m["pics"]] + ([{"type": "text", "text": content}] if isinstance(content, str) else content)
         msgs.append({"role": m["role"], "content": content})
     # Claude's hidden thinking counts toward max_tokens, so a long think can use up the whole reply budget. The headroom
     # is only a ceiling (you pay for tokens actually used), added so thinking cannot cut the visible reply short.
@@ -242,7 +254,7 @@ async def _openai(p, model, system, messages, temperature, max_tokens, num_ctx, 
         q.add("completion_tokens")
     busy = 0   # "server busy" answers (503/529) seen so far: wait a moment and ask again, up to 3 times (nothing has been shown yet)
     for _ in range(8):
-        body = {"model": model, "messages": [{"role": "system", "content": system_text(system)}] + _plain(messages), "stream": True}
+        body = {"model": model, "messages": [{"role": "system", "content": system_text(system)}] + _plain(messages, "openai"), "stream": True}
         if "no_usage" not in q:
             body["stream_options"] = {"include_usage": True}
         if "no_temp" not in q and not reasoning:
