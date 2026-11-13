@@ -263,7 +263,7 @@ def tweak_workflow(wf: dict, tw: dict) -> dict:
     return wf
 
 
-def face_region(data: bytes, tight: bool = False) -> bytes:
+def face_region(data: bytes, tight: "bool | str" = False) -> bytes:
     """Crop a reference picture to where the face is: the app draws portraits upper-body, centred and facing the viewer, so the middle half
     of the width and the top 62% holds the head and shoulders. The face model only sees a small square of the whole picture, so a tight
     crop gives it much more of the face to match. Returns the picture unchanged if it can't be read."""
@@ -272,7 +272,10 @@ def face_region(data: bytes, tight: bool = False) -> bytes:
         im = Image.open(io.BytesIO(data)).convert("RGB")
         w, h = im.size
         out = io.BytesIO()
-        if tight:     # only the face, about square: for pictures where the clothes and the place must change (explicit pictures), so the outfit and background of the reference do not carry over
+        if tight == "head":     # the head with its hair and a little neck, but no clothes: a style and hair reference for pictures where the outfit must change (explicit pictures drawn by a FLUX-type maker)
+            box = (0.20, 0.0, 0.80, 0.40)
+            im.crop((int(w * box[0]), int(h * box[1]), int(w * box[2]), max(2, int(h * box[3])))).save(out, "PNG")
+        elif tight:     # only the face, about square: for pictures where the clothes and the place must change (explicit pictures), so the outfit and background of the reference do not carry over
             box = (0.37, 0.05, 0.63, 0.34) if w >= h else (0.30, 0.03, 0.70, 0.27)
             im.crop((int(w * box[0]), int(h * box[1]), int(w * box[2]), max(2, int(h * box[3])))).save(out, "PNG")
         else:
@@ -303,7 +306,7 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
         if n:
             refs = refs[: int(n)]
         if str(tw.get("ref_crop", "")).strip().lower() == "face":
-            refs = [(face_region(d, bool(p.get("_tight_face"))), "image/png") for d, m in refs]
+            refs = [(face_region(d, p.get("_tight_face") or False), "image/png") for d, m in refs]
     loras = parse_loras(tw.get("loras"))      # LoRAs chosen for this checkpoint (Settings -> Pictures -> Local)
     if loras:
         wf = add_loras(wf, loras)
@@ -446,7 +449,7 @@ MOOD_EMPHASIS = ("The mood must be unmistakable at a glance: show it strongly in
                  "Frame from the waist up so the hands and posture are visible.")
 
 
-def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has_ref: bool, ext_only: bool = False, nsfw: bool = False, species_ref: str = "", framing: str = "") -> str:
+def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has_ref: bool, ext_only: bool = False, nsfw: bool = False, species_ref: str = "", framing: str = "", own_clothes: bool = True) -> str:
     head = plain(art.get("direction") or "").strip()
     if species_ref:   # the only reference is the first picture of this species: a different individual of the same kind
         body = (f"The reference picture shows another member of the same species ({species_ref}). Draw a DIFFERENT individual of that species: {name}: {appearance}. "
@@ -456,6 +459,10 @@ def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has
         body = (f"Same character as the reference images ({name}: {appearance}). Keep their face, hair and identity. The references come from a different story with a different "
                 f"art style, outfit and setting, so do NOT copy their style, clothing, background or lighting; redraw the character in the style and setting described here. "
                 + (f"Expression: {mood}. " if mood else "Neutral expression. ") + "Upper body portrait (framed from the chest up), facing the viewer, simple soft background.")
+    elif mood and has_ref and not own_clothes:     # an adult picture: the references give the face, hair and skin; what she wears (or not) comes from this description, never from the references
+        body = (f"Same character as the reference images ({name}: {appearance}). Copy only the face, hair, skin tone and body build from the references. Do NOT copy their clothing: "
+                f"the references show everyday clothes, but in this picture the clothing is exactly what the description says, and if it says nude or naked she wears nothing at all. "
+                f"Do NOT copy their backgrounds, lighting or pose: the pose, body language and camera must change to show the new mood. New expression/mood: {mood}. Upper body portrait (framed from the chest up), facing the viewer, simple soft background. " + STYLE_MATCH)
     elif mood and has_ref:
         body = (f"Same character as the reference images ({name}: {appearance}). Copy the face, hair and clothing exactly from the "
                 f"references; do NOT copy their backgrounds, lighting or pose: the pose, body language and camera must change to show the new mood. New expression/mood: {mood}. Upper body portrait (framed from the chest up), facing the viewer, simple soft background. " + STYLE_MATCH)

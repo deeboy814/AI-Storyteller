@@ -48,7 +48,7 @@ function md(text) {
     return `<pre class="note">${esc(body.replace(/\n+$/, ""))}</pre>`;
   }).join("");
 }
-function stripState(t) { const cut = ["<state", "<scene", "<newchar"].map((k) => t.indexOf(k)).filter((i) => i >= 0); return cut.length ? t.slice(0, Math.min(...cut)) : t; }
+function stripState(t) { t = t.replace(/<items>[\s\S]*?(<\/items>|$)/gi, ""); const cut = ["<state", "<scene", "<newchar"].map((k) => t.indexOf(k)).filter((i) => i >= 0); return cut.length ? t.slice(0, Math.min(...cut)) : t; }
 
 // Token readout under the latest reply. Claude reports cached vs new prompt tokens. Ollama reports the prompt size and
 // how long it took to read: a fast read on a long prompt means its cached copy was reused.
@@ -446,6 +446,14 @@ function showImport(list, opts = {}) {
 
 // Player panel: Avatar (your character's sheet + picture) and User Notes (standing instructions).
 // Both are sent to the model every turn, along with the story prompt and memory.
+function styleChosen() { const o = {}; document.querySelectorAll("[data-style]").forEach((s) => { if (s.value) o[s.dataset.style] = s.value; }); return o; }
+async function fillStyleBoxes() {
+  const box = $("styleBoxes"); if (!box) return;
+  try {
+    const P = await api("/style-presets"), cur = (story && story.style) || {};
+    box.innerHTML = Object.entries(P).map(([k, g]) => `<label>${esc(g.label)}</label><select data-style="${k}">${g.options.map((o) => `<option value="${esc(o.id)}" title="${esc(o.hint)}" ${o.id === (cur[k] || "") ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select>`).join("");
+  } catch (e) { box.innerHTML = `<span class="hint">Could not load the styles: ${esc(e.message)}</span>`; }
+}
 function showPlayer() {
   if (!story) return;
   const av = story.avatar || {};
@@ -468,12 +476,16 @@ function showPlayer() {
       ${field("abilities", "Abilities / stats / starting inventory", 3)}
     </div>
     <div id="tabNotes" class="hidden">
+      <label>Narration style</label>
+      <div id="styleBoxes" class="chkgrid" style="grid-template-columns:1fr 2fr"><span class="hint">Loading…</span></div>
+      <p class="hint">One-click choices for this story. "As the story is written" leaves it to the story prompt. The story's own rules and formats always come first.</p>
       <label>Standing instructions for the narrator</label>
       <textarea id="uNotes" placeholder="e.g. Keep combat gritty and consequences permanent. Slow-burn romance. Never skip time without asking. Avoid repeating a character's catchphrase…">${esc(story.user_notes || "")}</textarea>
       <p class="hint">Sent every turn, right after the story's memory. Edit any time; changes apply from the next turn.</p>
     </div>
     <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="mSave">Save</button></div>`);
   if (config.avatar_library) avatarLibraryInit();
+  fillStyleBoxes();
   document.querySelectorAll(".tab").forEach((b) => b.onclick = () => {
     document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
     for (const n of ["Avatar", "Notes"]) $("tab" + n).classList.toggle("hidden", n !== b.dataset.tab);
@@ -525,7 +537,7 @@ function showPlayer() {
   $("mSave").onclick = async () => {
     const avatar = {};
     for (const k of ["name", "gender", "age", "appearance", "personality", "background", "abilities"]) avatar[k] = $("av_" + k).value;
-    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar, user_notes: $("uNotes").value } });
+    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar, user_notes: $("uNotes").value, style: document.querySelector("[data-style]") ? styleChosen() : null } });
     closeModal(); renderAll();
   };
 }
@@ -629,6 +641,7 @@ async function showSettings(tab = "AI") {
       <h3>Play from your phone or tablet</h3>
       <label class="chk top"><input type="checkbox" id="sLan" ${config.lan_access ? "checked" : ""}><span><b>Let devices on my home network open AI Storyteller</b><span class="hint">Your phone or tablet opens the app in its browser over your home Wi-Fi. Everything still runs on this computer: the phone only shows the pages and sends your moves here; it never connects to anything on the internet itself. Other devices must enter a PIN once (this computer never does), and anything that is not on your home network is refused. Takes effect after a restart.</span></span></label>
       <div id="lanBox" class="aiBox"><span class="hint">Loading…</span></div>
+      <label class="chk top"><input type="checkbox" id="sLanRestart" ${config.lan_restart ? "checked" : ""} ${isThisComputer() ? "" : "disabled"}><span><b>Let phones and tablets restart the app</b><span class="hint">Off by default. When on, a phone or tablet that is already connected (it has entered the PIN) gets a Restart button on its Home screen, for when the app is stuck and you are away from the computer. It can only restart the app, never close it, and it cannot change this setting: ${isThisComputer() ? "only this computer can." : "turn it on at the computer."} Phone and tablet access must be on and the app restarted once before phones can connect.</span></span></label>
     </div>
     <div class="stpane hidden" data-p="Backup">
       <h3>Something went wrong?</h3>
@@ -768,7 +781,7 @@ async function showSettings(tab = "AI") {
     if (styleChanged || styleDir) config.default_art_direction = styleDir;   // new stories start with it
     config.local_mode = $("sLocal").checked; config.rt_text = $("sRtText").checked; config.rt_comfy = $("sRtComfy").checked; config.rt_comfy_idle_min = +$("sRtIdle").value || 15; config.rt_comfy_mode = $("sRtMode").value; config.rt_comfy_cmd = $("sRtCmd").value.trim(); config.rt_swap = $("sRtSwap").checked;
     config.avatar_library = $("sAvLib").checked; config.reuse_art = $("sReuse").checked;
-    config.lan_access = $("sLan").checked; config.update_check = $("sUpd").checked;
+    config.lan_access = $("sLan").checked; if (isThisComputer()) config.lan_restart = $("sLanRestart").checked; config.update_check = $("sUpd").checked;
     config.keep_warm = $("sWarm").checked; config.keep_warm_hours = +$("sWarmH").value || 2;
     config.summarize_when = +$("sWhen").value || 24; config.keep_recent = +$("sRecent").value || 10;
     await picker.ready;
@@ -820,6 +833,7 @@ async function openStory(id) {
   localStorage.setItem("story", id);
   syncModelSelect(); hideHome(); renderAll(false); applyTheme(config); refreshCache(); refreshArtSuggestions(); runtimeSelect(); refreshBudget();
   api(`/stories/${id}/beats/ensure`, { method: "POST" }).catch(() => {});
+  if (typeof maybePreviously === "function") maybePreviously(id);   // back after a break: offer a recap
   startupAsks(id);         // a new game-like story (stats and levels): ask once how dice should work      // the first time: read the story prompt for scheduled events (background)
 }
 async function startupAsks(id) {   // what a story asks when it is opened, in this order: set-up first (who you are, art, adult content), then stat points, then dice
@@ -897,6 +911,8 @@ $("btnEdit").onclick = () => story ? editStory(story) : editStory(null);
 $("btnSettings").onclick = () => showSettings();
 $("btnPlayer").onclick = showPlayer;
 $("btnMemory").onclick = showMemory;
+$("btnJournal").onclick = () => showJournal();
+$("btnItems").onclick = () => showInventory();
 $("btnEndings").onclick = showEndings;
 $("btnCast").onclick = () => showCast();
 $("btnArt").onclick = () => showArtHub();

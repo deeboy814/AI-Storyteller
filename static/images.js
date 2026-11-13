@@ -49,7 +49,17 @@ const EXPRESSION_MOODS = new Set(["default", "normal", "smile", "happy", "laugh"
   "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "worried", "confused", "bored", "disgusted", "embarrassed", "blush", "blushing",
   "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty", "calm", "serious", "thinking", "pout", "annoyed", "suspicious",
   "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie"]);
-function isActionMood(m) { return !!m && !EXPRESSION_MOODS.has(String(m).toLowerCase().replace(/\s*\d+$/, "").trim()); }
+// Batch generation: every image category is a set to draw ("Draw all of Moods / Actions / Positions…"); adult categories only in adult stories.
+function categorySetOptions(withPrefix) {
+  return ((typeof config !== "undefined" && config && config.image_categories) || []).filter((c) => !c.nsfw || (story && story.nsfw)).map((c) => `<option value="cat:${esc(c.id)}">${withPrefix || ""}${esc(c.name)}${c.nsfw ? " (adult)" : ""}</option>`).join("");
+}
+function isActionMood(m) {
+  if (!m) return false;
+  const b = String(m).toLowerCase().replace(/\s*\d+$/, "").trim(), d = ((typeof config !== "undefined" && config && config.mood_defs) || {})[b];
+  const cid = (d && d.category) || (EXPRESSION_MOODS.has(b) ? "expressions" : "actions");           // the category it is in (Image categories)
+  const c = ((typeof config !== "undefined" && config && config.image_categories) || []).find((x) => x.id === cid);
+  return c ? c.shot === "body" : !EXPRESSION_MOODS.has(b);
+}
 function portraitInfo(spec) {
   const i = spec.lastIndexOf("/");
   const name = (i < 0 ? spec : spec.slice(0, i)).trim().toLowerCase();
@@ -371,7 +381,7 @@ function showGroupEditor() {
     showCast("Characters");
   };
 }
-function makerLabel(m) { return !m ? "" : m === "flux" ? "FLUX" : m.startsWith("ckpt:") ? m.slice(5).replace(/\.safetensors$/, "").replace(/[_-]/g, " ").slice(0, 18) : m; }
+function makerLabel(m) { return !m ? "" : m === "flux" ? "FLUX" : m.startsWith("model:") ? m.split(":").slice(2).join(":").replace(/\.safetensors$/, "").replace(/[_-]/g, " ").slice(0, 18) : m.startsWith("ckpt:") ? m.slice(5).replace(/\.safetensors$/, "").replace(/[_-]/g, " ").slice(0, 18) : m; }
 function charBadges(c) {   // small species / picture-maker tags on a cast card
   const sp = (c.species || "").trim(), own = makerLabel(c.maker || "");
   const spMaker = sp ? makerLabel(((story.species || {})[sp.toLowerCase()] || {}).maker || "") : "";
@@ -397,6 +407,7 @@ function showCast(tab = "Characters") {
           <button id="cImport">Import portraits…</button><span class="hint">Load a folder of pictures: one folder per character, one file per mood.</span>
           <button id="cFindArt">Find characters without art…</button><span class="hint">Lists named characters in the story that have no pictures and offers to draw them.</span>
           <button id="cSuggest">Suggest from the prompt</button><span class="hint">Reads the story prompt and proposes cast members with descriptions.</span>
+          <button id="cMoods">Image categories…</button><span class="hint">Rename the categories (Expressions, Actions, Positions, Finishes, Other adult), add your own, edit what each picture draws and see the exact prompt. The narrator learns the changes automatically.</span>
           <button id="cGeneric">Generic characters…</button><span class="hint">Throwaway characters (a waiter, a guard, a passer-by) the narrator uses whenever someone with no name appears.</span>
           <button id="cGroup">Group characters…</button><span class="hint">Shows extras (guards, zombies…) as one card.<label class="chk" style="margin:4px 0 0"><input type="checkbox" id="cGroupOn" ${story.group_cast !== false ? "checked" : ""}> Show groups as one card</label></span>
           <button id="cVoices">Voices…</button><span class="hint">Choose read-aloud voices for the narrator and each character.</span>
@@ -428,6 +439,7 @@ function showCast(tab = "Characters") {
   document.querySelectorAll(".charcard[data-group]").forEach((b) => b.onclick = () => showCastGroup(b.dataset.group));
   $("cGroup").onclick = () => showGroupEditor();
   $("cGeneric").onclick = () => showGenericEditor();
+  $("cMoods").onclick = () => showMoodTypes(null, () => showCast("Characters"));
   $("cVoices").onclick = () => showVoices();
   $("cGroupOn").onchange = async (e) => { story = await api(`/stories/${story.id}/group-cast?on=${e.target.checked}`, { method: "PUT" }); showCast("Characters"); };
   $("cAdd").onclick = () => showCharacter(null);
@@ -476,9 +488,9 @@ function showCharacter(slug, tab = "Bio") {
   // ----- Images tab pieces
   const moodChips = () => {
     const cur = Object.entries(c.moods || {}).map(([m, u]) =>
-      `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 260)}" alt=""><figcaption>${esc(m)} <button class="x mregen" data-mood="${esc(m)}" title="Draw another version. The current one is kept as an earlier version.">↻</button><button class="x mren" data-mood="${esc(m)}" title="Rename this picture (the narrator picks pictures by name)">✎</button><button class="x mdel" data-mood="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`).join("");
+      `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 260)}" alt=""><figcaption>${esc(m)} <button class="x mregen" data-mood="${esc(m)}" title="Draw another version. The current one is kept as an earlier version.">↻</button><button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show and edit the exact prompt this picture was drawn from, and draw again from your change">📝</button><button class="x mren" data-mood="${esc(m)}" title="Rename this picture (the narrator picks pictures by name)">✎</button><button class="x mdel" data-mood="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`).join("");
     const old = Object.entries(c.alts || {}).flatMap(([m, us]) => us.map((u) =>
-      `<figure class="mood alt"><img loading="lazy" src="${thumbUrl(u, 200)}" alt=""><figcaption>${esc(m)} (earlier) <button class="x altuse" data-mood="${esc(m)}" data-url="${esc(u)}" title="Make this the active picture">use</button><button class="x altdel" data-url="${esc(u)}" title="Delete">×</button></figcaption></figure>`)).join("");
+      `<figure class="mood alt"><img loading="lazy" src="${thumbUrl(u, 200)}" alt=""><figcaption>${esc(m)} (earlier) <button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show the prompt this earlier picture was drawn from">📝</button><button class="x altuse" data-mood="${esc(m)}" data-url="${esc(u)}" title="Make this the active picture">use</button><button class="x altdel" data-url="${esc(u)}" title="Delete">×</button></figcaption></figure>`)).join("");
     return (cur + old) || '<span class="hint">No pictures yet. Use “Draw options…” to pick a face, or upload your own.</span>';
   };
   const eventRow = (e) => `<div class="evrow" data-id="${esc(e.id)}"><span class="evwhen">${esc(e.when || "·")}</span><span class="evtext">${esc(e.text)}</span>${e.digest ? '<span class="evauto" title="Several older events condensed by the helper AI">history</span>' : e.auto ? '<span class="evauto" title="Logged automatically">auto</span>' : ""}<button class="x evedit" title="Edit">✎</button><button class="x evdel" title="Delete">×</button></div>`;
@@ -516,13 +528,15 @@ function showCharacter(slug, tab = "Bio") {
     <div id="chImages" class="hidden">
       <p class="hint">The card shows the <b>normal</b> picture. Other pictures are moods the narrator can pick above this character's lines. ↻ draws another version and keeps the old one as an earlier version; every picture helps keep their face consistent.</p>
       <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="imOpts">Draw options…</button>
-        <select id="imSet"><option value="basic">Basic set</option><option value="extended">Extended set</option><option value="action">Action set (fights, chases, danger)</option>${story.nsfw ? '<option value="action_adult">Adult action set (intimate scenes)</option>' : ""}<option value="match">Moods my other characters have</option></select><button id="imSetGo">Draw the set</button>${Object.keys(c.moods || {}).length ? '<button id="imDelAll" class="danger" title="Delete every picture of this character in this story, including earlier versions">Delete all their pictures</button>' : ""}</div>
+        <select id="imSet"><option value="basic">Basic set</option><option value="extended">Extended set</option>${categorySetOptions("All: ")}<option value="match">Images my other characters have</option></select><button id="imSetGo">Draw the set</button>${Object.keys(c.moods || {}).length ? '<button id="imDelAll" class="danger" title="Delete every picture of this character in this story, including earlier versions">Delete all their pictures</button>' : ""}</div>
       <div class="castact" style="margin:6px 0"><label for="imMood" class="hint" style="margin:0 4px 0 0">Picture name:</label><input id="imMood" value="normal 1" size="12" title="What this picture is called (its mood): used when drawing and when you upload your own"><button id="imDraw">Draw this one with AI</button><input type="file" id="imFile" accept="image/png,image/jpeg,image/webp,image/gif"></div>
       <div class="aStatus hint" id="imStatus"></div>
       <div class="moods" id="imGrid">${moodChips()}</div>
       ${isNew ? "" : `<details class="sub" id="imTagsBox"><summary>Picture tags (for tag-style picture models)</summary>
         <div class="hint">With a tag-style model such as Animagine, these tags describe this character's looks (hair, eyes, build, clothing) in every picture, so they stay the same. The helper model writes them once from the description; edit them here, or press Rebuild to have them written again. Leave your own tags empty to use the helper's.</div>
         <textarea class="short" id="imTags" rows="3" placeholder="Written automatically the first time a picture is drawn with a tag-style model."></textarea>
+        ${story.nsfw ? `<label style="margin-top:8px">Adult picture tags</label><div class="hint">A separate tag set used ONLY for this character's adult pictures (nude, the positions, the finishes...), so nudity never leaks into everyday pictures and everyday clothes never leak into adult ones. Write who they are (subject count, hair, eyes, skin, build) plus any adult words you want. Empty = the everyday tags above, without their clothing.</div>
+        <textarea class="short" id="imTagsAdult" rows="2" placeholder="e.g. 1girl, shoulder-length hair, black hair, brown eyes, dark skin, slim, nude"></textarea>` : ""}
         <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="imTagsSave">Save my tags</button><button id="imTagsRebuild">Rebuild from the description</button><span class="hint" id="imTagsNote"></span></div></details>`}
       ${config.reuse_art && !isNew ? `<h3>References from other stories</h3>
         <div class="hint">Borrow a character's pictures from another story as a face reference. Only their face and hair are kept; each story's own art style and setting apply, so the result looks like this story. Used when this character has no pictures of their own yet, and as extra references afterwards.</div>
@@ -532,9 +546,9 @@ function showCharacter(slug, tab = "Bio") {
     <div class="actions" style="margin-top:6px"><button id="mClose">Close</button></div>`);
 
   if ($("imTags")) {
-    const fill = (r) => { $("imTags").value = r.tags || ""; $("imTagsNote").textContent = r.custom ? "Your own tags are in use." : r.saved ? "Written by the helper model." : "Nothing yet: made the first time a picture is drawn with a tag-style model."; };
+    const fill = (r) => { $("imTags").value = r.tags || ""; if ($("imTagsAdult")) $("imTagsAdult").value = r.adult || ""; $("imTagsNote").textContent = r.custom ? "Your own tags are in use." : r.saved ? "Written by the helper model." : "Nothing yet: made the first time a picture is drawn with a tag-style model."; };
     api(`/stories/${story.id}/cast/${slug}/tags`).then(fill).catch(() => {});
-    $("imTagsSave").onclick = async () => { try { fill(await api(`/stories/${story.id}/cast/${slug}/tags`, { method: "PUT", body: { tags: $("imTags").value } })); $("imTagsNote").textContent = "✔ Saved. " + $("imTagsNote").textContent; } catch (err) { $("imTagsNote").textContent = err.message; } };
+    $("imTagsSave").onclick = async () => { try { fill(await api(`/stories/${story.id}/cast/${slug}/tags`, { method: "PUT", body: { tags: $("imTags").value, adult: $("imTagsAdult") ? $("imTagsAdult").value : null } })); $("imTagsNote").textContent = "✔ Saved. " + $("imTagsNote").textContent; } catch (err) { $("imTagsNote").textContent = err.message; } };
     $("imTagsRebuild").onclick = async (e) => {
       e.target.disabled = true; $("imTagsNote").textContent = "Writing the tags…";
       try { fill(await api(`/stories/${story.id}/cast/${slug}/tags/rebuild`, { method: "POST" })); } catch (err) { $("imTagsNote").textContent = err.message; }
@@ -665,6 +679,7 @@ function showCharacter(slug, tab = "Bio") {
     $("imGrid").addEventListener("click", async (e) => {
       const b = e.target.closest("button"); if (!b) return;
       if (b.classList.contains("mregen")) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: b.dataset.mood } }); if (b.dataset.mood === "normal 1") await offerRedrawAll(story.cast.find((x) => x.slug === slug), (m) => status("imStatus", m)); });
+      else if (b.classList.contains("mprompt")) showPicturePrompt(slug, b.dataset.mood, b.dataset.url, () => showCharacter(slug, "Images"));
       else if (b.classList.contains("mren")) { const to = prompt(`Name for this picture (now “${b.dataset.mood}”).\nThe narrator picks pictures by name, e.g. smile, angry 2, normal 1:`, b.dataset.mood); if (to && to.trim() && to.trim().toLowerCase() !== b.dataset.mood) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/rename`, { method: "POST", body: { to: to.trim() } }); }); }
       else if (b.classList.contains("mdel")) { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}`, { method: "DELETE" }); refresh("Images"); }
       else if (b.classList.contains("altuse")) { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/use?url=${encodeURIComponent(b.dataset.url)}`, { method: "POST" }); refresh("Images"); }
@@ -752,17 +767,26 @@ function loadTweaks(card, p, model) {
 }
 // Which picture maker a character or species can use: the story's own, FLUX.2 klein (takes reference pictures: best for non-human characters), or another ComfyUI checkpoint.
 async function makerChoices() {
-  const out = [["", "Same as the story"], ["flux", "FLUX.2 klein (reference pictures; best for non-human characters)"]];
+  const out = [["", "Same as the story", ""], ["flux", "FLUX.2 klein 4B (takes reference pictures: best for non-human characters)", ""]];
   try {
-    const o = await api("/model-options"), comfy = (o.images || []).find((p) => p.local && p.id === "comfyui") || (o.images || []).find((p) => p.local);
-    for (const m of (comfy && comfy.models) || []) if (m.kind !== "flux" && m.kind !== "chroma" && m.kind !== "qwen") out.push(["ckpt:" + m.id, "Checkpoint: " + m.id + " (text only)"]);
+    const o = await api("/model-options");
+    for (const p of o.images || []) {
+      const grp = p.name + (p.ready ? "" : p.local ? " (not running)" : " (needs an API key)");
+      for (const m of p.models || []) {
+        const kind = m.kind === "flux" ? " (FLUX: reference pictures)" : m.kind === "chroma" ? " (Chroma)" : m.kind === "qwen" ? " (Qwen-Image)" : p.local ? " (text only)" : "";
+        out.push(["model:" + p.id + ":" + m.id, m.id.replace(/\.safetensors$/, "") + kind, grp]);
+      }
+    }
   } catch (e) { /* the list is a convenience */ }
   return out;
 }
 function makerSelect(sel, choices, cur) {
   const have = new Set(choices.map((c) => c[0]));
-  if (cur && !have.has(cur)) choices = [...choices, [cur, cur]];
-  sel.innerHTML = choices.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
+  if (cur && !have.has(cur)) choices = [...choices, [cur, cur, "Other"]];
+  const groups = [], byG = {};
+  for (const c of choices) { const g = c[2] || ""; if (!(g in byG)) { byG[g] = []; groups.push(g); } byG[g].push(c); }
+  const opt = ([v, tx]) => `<option value="${esc(v)}">${esc(tx)}</option>`;
+  sel.innerHTML = groups.map((g) => g ? `<optgroup label="${esc(g)}">${byG[g].map(opt).join("")}</optgroup>` : byG[g].map(opt).join("")).join("");
   sel.value = cur || "";
 }
 
@@ -771,12 +795,14 @@ function imageSettingsHtml(cfg) {
   return `<h3>Picture settings</h3>
     <div class="hint">Which AI draws pictures is chosen under <b>AI &amp; story</b>. Online services need their own API key and bill separately from Claude; ComfyUI runs on your own computer for free.</div>
     <div class="grid2"><div class="field"><label>Reference pictures per scene</label><input id="imgRefs" type="number" min="0" max="8" value="${cfg.image_max_refs ?? 3}"><div class="hint">Saved portraits sent along so faces stay consistent.</div></div><div></div><div></div></div>
+    <h3>Image categories</h3>
+    <div class="actions" style="justify-content:flex-start"><button id="imMoodTypes" type="button">🗂 Image categories…</button><span class="hint">Rename the categories (Expressions, Actions, Positions, Finishes, Other adult), add your own, and edit what each picture draws. Every category is also a batch set. Shows the exact prompt for each.</span></div>
     <h3>Pictures drawn for a new character</h3>
     <div class="hint">After you pick a face for a new character, the app can draw more pictures of them from these lists, one picture type per line. Add your own anywhere: type a name (<code>blushing</code>) or a name with what to draw (<code>blushing: embarrassed, red cheeks, hand over mouth</code>). The narrator is told to use the pictures in these sets before asking for anything new; if it does ask for a new one and you draw it, it is added to the end of the Extended set automatically. Built-in types: normal, smile, shy, surprise, sulky, fear, sad, angry, scorn, despair, combat, cute, dead, zombie. Numbers (<code>smile 2</code>) make a second version.</div>
     <div class="grid2" style="grid-template-columns:1fr 1fr"><div class="field"><label>Basic set</label><textarea class="short" id="msBasic" rows="6">${esc(((cfg.mood_sets || {}).basic || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>
       <div class="field"><label>Extended set</label><textarea class="short" id="msExt" rows="6">${esc(((cfg.mood_sets || {}).extended || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>
-      <div class="field"><label>Action set <small class="hint">(fights, chases, danger; the narrator prefers these in action scenes)</small></label><textarea class="short" id="msAction" rows="6">${esc(((cfg.mood_sets || {}).action || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>
-      ${typeof story !== "undefined" && story && story.nsfw ? `<div class="field"><label>Adult action set <small class="hint">(intimate scenes; shown and drawn only in stories with adult content on)</small></label><textarea class="short" id="msAdult" rows="6">${esc(((cfg.mood_sets || {}).action_adult || []).map((m) => (cfg.mood_looks || {})[m.replace(/\s*\d+$/, "")] ? m + ": " + cfg.mood_looks[m.replace(/\s*\d+$/, "")] : m).join("\n"))}</textarea></div>` : ""}</div>
+    </div>
+    <div class="hint">Every image category (Expressions, Actions, Positions, Finishes…) is a batch set of its own, listed as “All: …” wherever you pick what to draw. Rename, add or change categories under <b>Image categories</b> above.</div>
     <h3>Picture services</h3>
     <div class="hint">Click a service to open its settings. The model you pick here is the same one chosen under <b>AI &amp; story</b> (changing either changes both). Model names change often: if one stops working, pick another from the list, then use Test.</div>
     <div id="iprovs">${[...provs.keys()].sort((x, y) => { const o = ["gemini", "xai", "openai", "comfyui"], f = (k) => { const n = o.indexOf(provs[k].id); return n < 0 ? 9 : n; }; return f(x) - f(y); }).map((i) => imgProvCard(provs[i], i)).join("")}</div>
@@ -836,6 +862,7 @@ function modelFamily(id) {
 }
 function bindImageSettings(cfg, picker) {
   const cardOf = (pid) => document.querySelector(`.iprov[data-pid="${pid}"]`);
+  if ($("imMoodTypes")) $("imMoodTypes").onclick = () => showMoodTypes(null);
   if ($("imgBgOn")) {   // separate backdrop maker (FLUX): the box only shows when the player wants it
     $("imgBgOn").onchange = () => $("imgBgBox").classList.toggle("hidden", !$("imgBgOn").checked);
     // The workflow box follows the model: picking a model fills in the built-in workflow that suits it (FLUX.2, Chroma, Qwen-Image, or an ordinary checkpoint).
@@ -990,7 +1017,7 @@ function collectImageSettings(cfg) {
     if (i >= 0 && x.slice(i + 1).trim()) looks[name.replace(/\s*\d+$/, "")] = x.slice(i + 1).trim();
     return name;
   }).filter(Boolean);
-  cfg.mood_sets = { basic: lines("msBasic"), extended: lines("msExt"), action: lines("msAction"), action_adult: $("msAdult") ? lines("msAdult") : ((cfg.mood_sets || {}).action_adult || []) };
+  cfg.mood_sets = { ...(cfg.mood_sets || {}), basic: lines("msBasic"), extended: lines("msExt") };
   cfg.mood_looks = looks;
   cfg.image_max_refs = +$("imgRefs").value || 0;
   if ($("imgBgOn")) cfg.image_bg = { on: $("imgBgOn").checked, model: $("imgBgModel").value, workflow: $("imgBgFlow").value.trim() };
@@ -1080,7 +1107,7 @@ async function showArtDialog(opts = {}) {
   const showCandidates = (el, name) => {
     const urls = cands[name] || [];
     el.querySelector(".aResult").innerHTML = urls.length ? `<div class="gallery">${urls.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="aUse primary" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div>
-      <label>After you pick one, also draw</label><select class="aSet"><option value="none">No more pictures (just this one)</option><option value="basic" ${(story.art || {}).extended_moods ? "" : "selected"}>The basic set</option><option value="extended" ${(story.art || {}).extended_moods ? "selected" : ""}>The extended set</option><option value="action">The action set (fights, chases, danger)</option>${story.nsfw ? '<option value="action_adult">The adult action set (intimate scenes)</option>' : ""}<option value="match">The moods my other characters have</option></select>
+      <label>After you pick one, also draw</label><select class="aSet"><option value="none">No more pictures (just this one)</option><option value="basic" ${(story.art || {}).extended_moods ? "" : "selected"}>The basic set</option><option value="extended" ${(story.art || {}).extended_moods ? "selected" : ""}>The extended set</option>${categorySetOptions("All: ")}<option value="match">The images my other characters have</option></select>
       <div class="actions" style="justify-content:flex-start"><button class="aMore">Draw 4 more options</button></div>` : "";
   };
 
