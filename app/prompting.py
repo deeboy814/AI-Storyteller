@@ -3,7 +3,8 @@ import copy
 import json
 import re
 
-from . import appstatus, characters, localfix, store, tracker
+from . import appstatus, characters, localfix, moods, store, tracker
+from . import inventory
 
 ENGINE_CORE = """\
 === ENGINE RULES (added by the app; always follow) ===
@@ -175,6 +176,8 @@ def images_block(story: dict) -> str:
             + "Skip the tag for anyone not listed. If the story prompt above asks for portraits more often (for example for silent reactions "
               "or first appearances), follow it: the tag format is the same."
         )
+    if art.get("portraits", True) and (cm := custom_moods_note(story)):
+        parts.append(cm)
     if generic_lines(story) and art.get("portraits", True):
         parts.append(GENERIC_RULE)
     if art.get("newchar", False):
@@ -389,26 +392,42 @@ def action_moods_on(story: dict) -> bool:
 
 
 def _action_names(story: dict, short: bool = False) -> str:
-    base = []
-    for m in characters.ACTION_MOODS:
-        b = re.sub(r"\s*\d+$", "", m)
-        if b not in base:
-            base.append(b)
-    if story.get("nsfw"):
-        base += [m for m in characters.ADULT_ACTION_MOODS if m not in base]
+    """The names of the Actions category and of every other image category except Expressions the narrator may use (adult ones only in an adult story)."""
+    cfg, adult = store.load_config(), bool(story.get("nsfw"))
+    base = moods.names_in(cfg, "actions", adult)
+    for c in moods.categories(cfg):
+        if c["id"] not in ("expressions", "actions") and (adult or not c["nsfw"]):
+            base += [m for m in moods.names_in(cfg, c["id"], adult) if m not in base]
     return ", ".join(base)
 
 
-def _position_rule(story: dict) -> str:
-    """Adult stories only: how the narrator uses the sexual-position moods (they are one-character pictures; the partner is never drawn)."""
-    if not story.get("nsfw"):
+def category_rules(story: dict) -> str:
+    """One short rule for each image category that has a note for the narrator (by default Positions and Finishes: when in a sex scene to use them). The category's name,
+    the names in it and the player's note are all read from Image categories, so a renamed or new category reaches the narrator automatically."""
+    cfg, adult = store.load_config(), bool(story.get("nsfw"))
+    out = []
+    for c in moods.categories(cfg):
+        note = c["note"].strip()
+        if not note or (c["nsfw"] and not adult):
+            continue
+        names = ", ".join(moods.names_in(cfg, c["id"], adult))
+        out.append(f" {c['name'].upper()}{' (adult)' if c['nsfw'] else ''}: {note}" + (f" The {c['name'].lower()} are: {names}." if names else ""))
+    return "".join(out)
+
+
+def custom_moods_note(story: dict) -> str:
+    """The player's own pictures and the notes they wrote for the narrator (Image categories): names, which category, and when to use each. Adult ones only in adult stories."""
+    cfg, adult = store.load_config(), bool(story.get("nsfw"))
+    rows = []
+    for name, cat, note in moods.notes(cfg, adult):
+        rows.append(f"- {name} ({cat.lower()}): {note}")
+    extra = [m for m in moods.custom_names(cfg) if not any(r.startswith(f"- {m} ") for r in rows) and (adult or not moods.is_nsfw(cfg, m))]
+    if extra:
+        rows.append("- also available: " + ", ".join(extra))
+    if not rows:
         return ""
-    return (" SEXUAL POSITIONS: only while a sex scene is actually under way in the story (never before the characters have started, and never for a kiss or a caress), the portrait tag of the character "
-            "in it names the position or act they are in right now: riding cowgirl, riding reverse cowgirl, doggy-style, blowjob, missionary or anal. Change the tag when the position changes in the text, "
-            "not on every line; use aroused or seductive before it begins and climaxing at the peak. Once the partner has finished, use the tag that says where and how: creampie or anal creampie (inside), "
-            "face cum, mouth cum or swallow (the mouth), ass cum or pussy cum (on the body), only for the one line where it happens, then afterglow when it is over. Each of these pictures shows only that one character (the partner is "
-            "out of frame), so give the tag to the character the line is about, and use the exact names above (a different position, such as 'standing' or 'spooning', is a new mood name in the same style, "
-            "for example [[Name/spooning]]).")
+    return ("CUSTOM PICTURES (made by the player; use them by exactly these names in portrait tags, when the note fits the moment, the same way as the standard moods; "
+            "a character who has none of them yet gets the picture drawn when the player asks):\n" + "\n".join(rows))
 
 
 def action_rule(story: dict) -> str:
@@ -417,7 +436,7 @@ def action_rule(story: dict) -> str:
     return ("ACTION SCENES: during fights, chases, danger and other physical action" + adult + ", prefer the ACTION moods over calm expression moods in the portrait tags of the "
             "characters involved, choosing the one that matches what that character is physically doing in that line. The standard action moods are: " + _action_names(story) + ". "
             "Use one the character already has (see the PICTURES AVAILABLE note); if they have none that fits, use the standard name from this list (the player will be offered to draw it). "
-            "Keep using action moods through the whole action sequence, and return to expression moods (smile, sad, angry...) when it is over." + _position_rule(story))
+            "Keep using action moods through the whole action sequence, and return to expression moods (smile, sad, angry...) when it is over." + category_rules(story))
 
 
 _ACTION_RE = re.compile(r"\b(fight\w*|attack\w*|struck|strikes?|striking|slash\w*|stab\w*|punch\w*|kick\w*|dodg\w*|parr(?:y|ied|ies)|block\w*|charg\w*|chas(?:e|ed|es|ing)|flee\w*|fled|"
@@ -464,10 +483,63 @@ def picture_reminder(story: dict) -> str:
     return ("[PICTURE REMINDER, for the narrator only] " + " ".join(lines)) if lines else ""
 
 
+# Narration style: one-click choices per story (Player → Notes). Each option adds a short standing instruction; "" (As the story is written) adds nothing.
+STYLE_PRESETS = {
+    "tone": {"label": "Tone", "options": [
+        ("", "As the story is written", ""),
+        ("grim", "Grim and gritty", "Keep the tone grim and grounded: danger is real, victories cost something, and consequences last."),
+        ("light", "Light-hearted", "Keep the tone light and warm: let humour and small pleasant moments in, and do not dwell on the bleak."),
+        ("comedic", "Comedic", "Play it for comedy: wit, absurd situations and comic timing, while the plot still moves forward."),
+        ("horror", "Horror and dread", "Build dread: unease, things half-seen, slow escalation, and fear that is felt in the body before it is explained."),
+        ("romantic", "Romantic slow burn", "Let romance build slowly: glances, small gestures, tension and restraint, with no rushing to the payoff."),
+        ("epic", "Epic and heroic", "Write on a grand scale: high stakes, bold deeds and a sense of legend."),
+        ("mystery", "Mystery and intrigue", "Favour intrigue: plant clues, keep secrets, let characters hide motives, and reveal things a piece at a time."),
+    ]},
+    "pacing": {"label": "Pacing", "options": [
+        ("", "As the story is written", ""),
+        ("slow", "Slow and detailed", "Pace slowly: stay in the moment, cover a short span of time per reply, and never skip ahead unless the player asks."),
+        ("balanced", "Balanced", "Keep a balanced pace: linger on important moments and move briskly through routine ones."),
+        ("fast", "Fast and punchy", "Pace quickly: short paragraphs, cut straight to what matters, and end each reply on something the player must react to."),
+    ]},
+    "length": {"label": "Reply length", "options": [
+        ("", "As the story is written", ""),
+        ("short", "Short (1 to 2 paragraphs)", "Keep each reply short: one or two paragraphs of story, besides any status block the story requires."),
+        ("medium", "Medium (3 to 4 paragraphs)", "Keep each reply to about three or four paragraphs of story, besides any status block the story requires."),
+        ("long", "Long (6 or more paragraphs)", "Write long, full replies: six or more paragraphs of story, besides any status block the story requires."),
+    ]},
+    "prose": {"label": "Writing style", "options": [
+        ("", "As the story is written", ""),
+        ("plain", "Plain and direct", "Write in plain, direct prose: concrete nouns and verbs, few adjectives, no purple passages."),
+        ("vivid", "Vivid and sensory", "Write vividly: ground each scene in specific sights, sounds, smells and textures."),
+        ("dialogue", "Dialogue-driven", "Let dialogue carry the scene: characters talk more and the narration between their lines stays brief."),
+        ("literary", "Literary", "Write with a literary voice: varied rhythm, interior life and carefully chosen imagery."),
+    ]},
+}
+
+
+def clean_style(v) -> dict:
+    """Keep only known style choices."""
+    out = {}
+    for k, grp in STYLE_PRESETS.items():
+        val = str((v or {}).get(k) or "")
+        if val and any(o[0] == val for o in grp["options"]):
+            out[k] = val
+    return out
+
+
+def style_block(story: dict) -> str:
+    lines = [o[2] for k, grp in STYLE_PRESETS.items() for o in grp["options"] if o[0] and o[0] == (story.get("style") or {}).get(k)]
+    if not lines:
+        return ""
+    return ("=== NARRATION STYLE (chosen by the player; follow it every turn, but the story's own rules and required formats come first) ===\n" + "\n".join("- " + x for x in lines))
+
+
 def build(story: dict, beats_note: str = "", local: bool = False) -> Built:
     use_state = story.get("use_state_block", True)
     core_rules = ENGINE_CORE.replace("Never decide the\nplayer character's actions or words beyond what the player stated.", ACTS_RULE) if story.get("narrator_acts") else ENGINE_CORE
     rules = core_rules + ("\n" + ENGINE_STATE if use_state else "")
+    if inventory.is_on(story):
+        rules += "\n\n" + inventory.RULE
     drawn = appstatus.last_block(story) if story.get("app_status") else None     # the app writes the status line, so the narrator leaves it out
     if drawn:
         rules += "\n\n" + appstatus.RULE
@@ -481,6 +553,8 @@ def build(story: dict, beats_note: str = "", local: bool = False) -> Built:
             "=== USER NOTES (standing instructions from the player; follow them every turn unless they "
             "would break the story's core rules) ===\n" + story["user_notes"]
         )
+    if style_block(story):
+        extras.append(style_block(story))
     if story.get("pinned_facts"):
         extras.append("=== PINNED FACTS (the player's corrections; they are true and override anything below) ===\n" + "\n".join("- " + f for f in story["pinned_facts"]))
     if story.get("summary"):
@@ -491,6 +565,9 @@ def build(story: dict, beats_note: str = "", local: bool = False) -> Built:
     panel = tracker.tail_text(story)   # what the side panel shows, so the narrator keeps it consistent
     if panel:
         tail = (tail + "\n\n" if tail else "") + panel
+    inv_note = inventory.tail_note(story)      # the player's items, kept by the app
+    if inv_note:
+        tail = (tail + "\n\n" if tail else "") + inv_note
     if beats_note:     # story beats that are due (the app's schedule); hidden from the player
         tail = (tail + "\n\n" if tail else "") + beats_note
     if drawn:      # the narrator no longer sees the status line in its earlier replies, so it is told the current values here
@@ -521,6 +598,8 @@ def build(story: dict, beats_note: str = "", local: bool = False) -> Built:
 
 def split_state(full: str) -> tuple[str, dict]:
     """Return (narration without the state block, parsed state dict)."""
+    item_ops = inventory.parse_ops(full)        # the hidden <items> line (stories with the app's inventory on)
+    full = inventory.strip(full)
     matches = list(STATE_RE.finditer(full))
     update: dict = {}
     if matches:
@@ -548,7 +627,10 @@ def split_state(full: str) -> tuple[str, dict]:
     # Smaller models sometimes put a label like "**State:**" in front of the block; drop it.
     text = FENCE_RE.sub("", text).strip()
     text = LABEL_RE.sub("", text).strip()
-    return text, update if isinstance(update, dict) else {}
+    update = update if isinstance(update, dict) else {}
+    if item_ops:
+        update["_items"] = item_ops
+    return text, update
 
 
 def apply_state(story: dict, upd: dict) -> None:
@@ -568,18 +650,23 @@ def apply_state(story: dict, upd: dict) -> None:
                 aff[str(name)] = max(0, min(100, int(val)))
     if isinstance(upd.get("inventory"), list):
         st["inventory"] = [str(x) for x in upd["inventory"]]
+    if inventory.is_on(story):
+        inventory.apply(story, upd.get("_items") or [], len(story.get("turns") or []))
     sug = upd.get("suggestions")
     story["suggestions"] = [str(s) for s in sug][:4] if isinstance(sug, list) else []
 
 
 def snapshot(story: dict) -> dict:
-    return copy.deepcopy({"state": story.get("state", {}), "suggestions": story.get("suggestions", []), "tracker": story.get("tracker") or tracker.blank()})
+    return copy.deepcopy({"state": story.get("state", {}), "suggestions": story.get("suggestions", []), "tracker": story.get("tracker") or tracker.blank(),
+                          "inventory": story.get("inventory") or inventory.blank()})
 
 
 def restore(story: dict, snap: dict) -> None:
     story["tracker"] = snap.get("tracker") or tracker.blank()
     story["state"] = snap.get("state", {})
     story["suggestions"] = snap.get("suggestions", [])
+    if "inventory" in snap:            # older turns were saved before the inventory existed: leave it as it is
+        story["inventory"] = copy.deepcopy(snap["inventory"])
 
 
 SUMMARY_SYSTEM = (

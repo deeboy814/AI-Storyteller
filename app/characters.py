@@ -23,9 +23,28 @@ ACTION_MOODS = ["combat 1", "combat 2", "strike 1", "strike 2", "guard", "dodge"
 ADULT_ACTION_MOODS = ["aroused", "seductive", "undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow",
                        "riding cowgirl", "riding reverse cowgirl", "doggy-style", "blowjob", "missionary",
                        "creampie", "face cum", "ass cum", "anal creampie", "anal", "pussy cum", "swallow", "mouth cum"]
-ADULT_POSITIONS = ["riding cowgirl", "riding reverse cowgirl", "doggy-style", "blowjob", "missionary"]   # sexual positions: the character alone in frame, the partner out of frame
+ADULT_POSITIONS = ["riding cowgirl", "riding reverse cowgirl", "doggy-style", "blowjob", "missionary", "anal"]   # sexual positions: the character alone in frame, the partner out of frame
 ADULT_FINISHES = ["creampie", "face cum", "ass cum", "anal creampie", "pussy cum", "swallow", "mouth cum"]   # how a sex scene ends: the character alone, the result shown, the partner out of frame
-ADULT_ONLY = {"undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow", "anal", *ADULT_POSITIONS, *ADULT_FINISHES}   # moods that are always explicit pictures in an adult story
+ADULT_ONLY = {"aroused", "seductive", "undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow", "anal", *ADULT_POSITIONS, *ADULT_FINISHES}   # moods that are always explicit pictures in an adult story
+
+# Image categories: the groups the player sees and edits, each one also a batch-generation set ("Draw all of …"). Defaults: Expressions (faces and feelings), Actions (a body in
+# motion), and three that are adult by default: Positions, Finishes and Other adult (undressing, nude, aroused...). The player can rename, change, add or delete them.
+POSITIONS_NOTE = ("use these only while a sex scene is actually under way in the story (never before the characters have started, and never for a kiss or a caress): the portrait tag of the "
+                  "character in it names the position or act they are in right now. Change the tag when the position changes in the text, not on every line; use aroused or seductive "
+                  "before it begins and climaxing at the peak. Each of these pictures shows only that one character (the partner is out of frame), so give the tag to the character the "
+                  "line is about. A position that is not listed is a new name in the same style, for example [[Name/spooning]].")
+FINISHES_NOTE = ("once the partner has finished, use the tag that says where and how, only for the one line where it happens, then afterglow when the scene is over. Each of these pictures "
+                 "shows only that one character (the partner is out of frame).")
+DEFAULT_CATEGORIES = [
+    {"id": "expressions", "name": "Expressions", "nsfw": False, "shot": "face", "note": ""},
+    {"id": "actions", "name": "Actions", "nsfw": False, "shot": "body", "note": ""},
+    {"id": "positions", "name": "Positions", "nsfw": True, "shot": "body", "note": POSITIONS_NOTE},
+    {"id": "finishes", "name": "Finishes", "nsfw": True, "shot": "body", "note": FINISHES_NOTE},
+    {"id": "adult", "name": "Other adult", "nsfw": True, "shot": "body", "note": ""},
+]
+# where the built-in picture types belong. Everything not named here that the app knows as a face-and-feeling is in Expressions; anything it has never heard of is an action.
+BUILTIN_ACTIONS_ADULT = ["aroused", "seductive", "undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow"]
+BUILTIN_CLOTHED = {"aroused", "seductive"}     # adult pictures that keep the character's usual outfit (the others show the body: no everyday clothes in the look)
 
 DEFAULT_SETS = {
     "basic": ["normal 2", "smile 1", "smile 2", "surprise", "fear", "sad", "angry 1", "scorn 1", "shy"],

@@ -39,6 +39,8 @@ window.__bugErr = [];
       <button class="icon hidden" id="btnEndings" title="Possible endings (spoilers)">🏁</button>
       <button class="icon" id="btnBeats" title="Story beats: the key events this story schedules, sent to the narrator at the right time (hidden spoilers)">📅</button>
       <button class="icon" id="btnMemory" title="Memory: summary, pinned facts, backups">🧠</button>
+      <button class="icon" id="btnItems" title="Inventory: let the app keep your items as cards (quantity, effect, equipped)">🎒</button>
+      <button class="icon" id="btnJournal" title="Journal: a recap, the story so far and a timeline of key events, quests and bookmarks">📖</button>
       <button class="icon" id="btnSearch" title="Search the story and bookmarks">🔍</button>
       <button class="icon" id="btnPlayer" title="Player: avatar & user notes">👤</button>
       <button class="icon" id="btnEdit" title="Edit the story: prompt, opening, endings, options">📝</button>
@@ -60,6 +62,7 @@ window.__bugErr = [];
     <div id="artBanner" class="artbanner hidden"></div>
     <div id="cacheNote" class="cachenote"></div>
     <div id="updateNote" class="budgetnote hidden"></div>
+    <div id="prevNote" class="budgetnote hidden"></div>
     <div id="budgetNote" class="budgetnote hidden"></div>
     <div id="genStatus" class="genstatus hidden"></div>
     <div id="cmdBar" class="cmdbar hidden"></div>
@@ -89,6 +92,9 @@ window.__bugErr = [];
 <script src="/static/creator.js"></script>
 <script src="/static/usage.js"></script>
 <script src="/static/memory.js"></script>
+<script src="/static/journal.js"></script>
+<script src="/static/inventory.js"></script>
+<script src="/static/moodtypes.js"></script>
 <script src="/static/beats.js"></script>
 <script src="/static/lore.js"></script>
 <script src="/static/bugreport.js"></script>

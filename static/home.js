@@ -43,7 +43,7 @@ async function showHome() {
       <p>${esc(blurb(s)) || '<i>No description yet. Use ⋯ to add one.</i>'}</p>
       <small>${s.turns} turn${s.turns === 1 ? "" : "s"}${s.player ? " · " + esc(s.player) : ""}${s.cast ? " · " + s.cast + " characters" : ""}</small></div></div>`;
   home.innerHTML = `<div class="hwrap">
-    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label>${config && config.avatar_library ? '<button id="hAv" title="Your saved player avatars">🧑 Avatars</button>' : ""}<button id="hStore" title="Disk use, clean-up, and stories you deleted (restore them)">🗂 Storage</button><button id="hUse" title="Usage and estimated cost">💲 Usage</button><button id="hBug" title="Make a bug report file (personal data removed) to attach to a problem report">🐞 Report a bug</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close or restart AI Storyteller">🚪 Quit</button></div>
+    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label>${config && config.avatar_library ? '<button id="hAv" title="Your saved player avatars">🧑 Avatars</button>' : ""}<button id="hStore" title="Disk use, clean-up, and stories you deleted (restore them)">🗂 Storage</button><button id="hUse" title="Usage and estimated cost">💲 Usage</button><button id="hBug" title="Make a bug report file (personal data removed) to attach to a problem report">🐞 Report a bug</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close or restart AI Storyteller">${isThisComputer() ? "🚪 Quit" : "🔄 Restart"}</button></div>
     <div class="hgrid">
       ${list.map(card).join("")}
       <button class="hcard hnew" id="hNew"><div class="hplus">＋</div><b>New story</b><small>Write or paste a prompt and start playing</small></button>
@@ -229,9 +229,19 @@ function uploadZip(url, file, onPct) {
   });
 }
 
+function isThisComputer() { return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(location.hostname); }
+
 // Close the app from its own screen (no terminal needed). Stories are saved as they go.
 function quitApp() {
   const writing = typeof busy !== "undefined" && busy;
+  if (!isThisComputer()) {     // a phone or tablet: it can only restart the app, and only when that was allowed at the computer
+    if (!(config && config.lan_restart)) { modal(`<h2>Close or restart the app</h2><div class="hint">This can only be done on the computer the app runs on. To let a phone or tablet restart it, turn on <b>Let phones and tablets restart the app</b> in Settings → Phone &amp; tablet on that computer.</div><div class="actions"><button id="mCancel">OK</button></div>`); $("mCancel").onclick = closeModal; return; }
+    modal(`<h2>Restart AI Storyteller?</h2><div class="hint">${writing ? "<b>A reply is still being written.</b> Restarting now stops it. " : ""}The app closes and starts again by itself, which takes about 10 seconds; this page then reloads. Your stories are saved as you play, so nothing is lost. If it does not come back, it has to be started again at the computer.</div>
+      <div class="actions"><button id="mCancel">Cancel</button><button class="primary" id="mRestart">Restart</button></div>`);
+    $("mCancel").onclick = closeModal;
+    $("mRestart").onclick = async () => { $("mRestart").disabled = true; if (!(await restartApp())) $("mRestart").disabled = false; };
+    return;
+  }
   modal(`<h2>Close AI Storyteller?</h2>
     <div class="hint">${writing ? "<b>A reply is still being written.</b> Closing now stops it. " : ""}Your stories are saved as you play, so nothing is lost. To open the app again, double-click <b>AI Storyteller</b> on your Desktop.</div>
     <div class="actions"><button id="mCancel">Cancel</button><button id="mRestart" title="Close and start again, then reload this page (use after an update or when something is stuck)">Restart</button><button class="primary" id="mQuit">Close the app</button></div>`);

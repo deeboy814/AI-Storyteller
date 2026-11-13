@@ -67,7 +67,7 @@ function panelSidebarHtml() {
   const meStatus = byId["me.status"] && tr.me && tr.me.status ? `<div>${chip(tr.me.status, find("me", null, "status"))}</div>` : "";
   const me = pointsBanner + meStatus + kv("me", (f) => !isItem(f));
   if (me) info += `<h4>Stats</h4>${me}`;
-  const itemsHtml = kv("me", isItem);
+  const itemsHtml = (typeof invCardsHtml === "function" ? invCardsHtml() : "") + kv("me", isItem);
   const cf = F.filter((f) => f.id.startsWith("chars."));
   const names = Object.keys(tr.chars || {}).filter((n) => cf.some((f) => tr.chars[n][f.id.split(".")[1]] != null));
   if (cf.length && names.length) {
@@ -102,13 +102,16 @@ function panelSidebarHtml() {
       const old = same(q), isNew = ch && !old, changed = ch && old && JSON.stringify(old) !== JSON.stringify(q), done = q.status === "completed", fail = q.status === "failed";
       const ob = q.objectives || [], dn = ob.filter((o) => o.done).length, open = openQuests.has(q.name) || done;
       const qk = (x) => String(x).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(), dlr = (tr._deadlines || []).find((d) => qk(d.name) === qk(q.name) || qk(q.name).includes(qk(d.name)) || qk(d.name).includes(qk(q.name)));
-      const dayF = F.find((x) => /^day$/i.test(x.label) && /^(scene|me)\./.test(x.id)), dayNow = dayF ? Number((tr[dayF.id.split(".")[0]] || {})[dayF.id.split(".")[1]]) : NaN;
-      const dlBadge = dlr && q.status === "active" ? ` <span class="dlbadge${dayNow > dlr.day ? " over" : ""}" title="Deadline: Day ${dlr.day}">⏰ ${dayNow > dlr.day ? "overdue" : "Day " + dlr.day}</span>` : "";
+      const dayF = F.find((x) => /^day$/i.test(x.label) && /^(scene|me)\./.test(x.id)), dayRaw = dayF ? String((tr[dayF.id.split(".")[0]] || {})[dayF.id.split(".")[1]] ?? "") : "", dayNow = /\d/.test(dayRaw) ? parseInt(dayRaw.replace(/^\D+/, ""), 10) : NaN;   // "Day 2" or 2
+      const left = dlr && !isNaN(dayNow) ? dlr.day - dayNow : NaN;
+      const dlText = !dlr ? "" : isNaN(left) ? "Day " + dlr.day : left < 0 ? `overdue by ${-left} day${left === -1 ? "" : "s"}` : left === 0 ? "due today" : `${left} day${left === 1 ? "" : "s"} left`;
+      const dlBadge = dlr && q.status === "active" ? ` <span class="dlbadge dledit${left < 0 ? " over" : left === 0 ? " today" : ""}" data-dl="${esc(q.name)}" data-day="${dlr.day}" title="Deadline: Day ${dlr.day}${isNaN(dayNow) ? "" : " (it is Day " + dayNow + ")"}. Click to change or remove it.">⏰ ${dlText}</span>` : "";
+      const dlAdd = !dlr && q.status === "active" ? `<div class="qstat"><a href="#" class="dledit" data-dl="${esc(q.name)}" data-day="">⏰ Set a deadline</a></div>` : "";
       const tip = isNew ? "New this turn" : changed ? `Before: ${old.status}${old.objectives && old.objectives.length ? ", " + old.objectives.filter((o) => o.done).length + "/" + old.objectives.length + " objectives" : ""}  →  After: ${q.status}${ob.length ? ", " + dn + "/" + ob.length + " objectives" : ""}` : "";
       return `<details class="quest ${q.status}${isNew || changed ? " chg" : ""}" data-q="${esc(q.name)}"${open ? " open" : ""}${tip ? ` title="${esc(tip)}"` : ""}><summary><span class="qn">${esc(q.name)}${dlBadge}</span>${isNew ? ` <span class="newtag">new</span>` : ""}
         <span class="stchip ${done ? "st-immune" : fail ? "st-dead" : "st-other"}">${done ? "✓ Completed" : fail ? "Failed" : ob.length ? `${dn}/${ob.length}` : "Active"}</span></summary>
         <div class="qbody">${ob.length ? `<ul class="qobj">${ob.map((o) => `<li class="${o.done ? "done" : ""}">${o.done ? "✓" : "○"} ${esc(o.text)}</li>`).join("")}</ul>` : ""}
-        ${q.reward ? `<div class="qrew"><small>${done ? "Reward granted" : "Reward"}</small> ${esc(q.reward)}</div>` : ""}<div class="qstat"><small>Status</small> ${esc(q.status)}</div></div></details>`;
+        ${q.reward ? `<div class="qrew"><small>${done ? "Reward granted" : "Reward"}</small> ${esc(q.reward)}</div>` : ""}<div class="qstat"><small>Status</small> ${esc(q.status)}</div>${dlAdd}</div></details>`;
     }).join("") : `<div class="side-empty">No quests right now.</div>`);
   }
   const jr = (tr.journal || []).slice().reverse();
@@ -116,7 +119,7 @@ function panelSidebarHtml() {
     qh = qh || `<div class="qhead"><b>Quests</b> <small>0 active</small></div><div class="side-empty">No quests right now.</div>`;
     qh += `<details class="qjournal"><summary>Journal · ${jr.length} finished</summary>${jr.map((q) => `<div class="qj ${q.status}"><span class="stchip ${q.status === "completed" ? "st-immune" : "st-dead"}">${q.status === "completed" ? "✓" : "✗"}</span> <b>${esc(q.name)}</b>${q.reward ? ` <small class="muted">${esc(q.reward)}</small>` : ""}${q.turn ? ` <small class="muted">· turn ${q.turn}</small>` : ""}</div>`).join("")}</details>`;
   }
-  if (!info && !chars && !qh) return "";
+  if (!info && !chars && !qh && !itemsHtml) return "";
   const list = changes.map((c) => { const f = byId[`${c.s}.${c.k}`]; return `${c.n ? c.n + " · " : ""}${c.k === "*" ? "new character" : (f ? f.label : c.k) + ": " + fmtVal(c.b) + " → " + fmtVal(c.a)}`; });
   const panes = [["status", "Status", info], ["rel", "Relations", rel], ["cast", artN ? "Cast 🎨" : "Cast", castH], ["items", "Items", itemsHtml], ["quests", qn ? `Quests · ${qn}` : "Quests", qh]].filter((x) => x[2]);
   if (!panes.some((x) => x[0] === panelTab)) panelTab = panes[0][0];
@@ -133,6 +136,15 @@ function bindPanel(el) {   // tab clicks, minimize, quest rows (called after the
   el.querySelectorAll(".spend").forEach((b) => b.onclick = () => spendPoint(b.dataset.id, +b.dataset.n));
   const cp = el.querySelector(".clockpill"); if (cp) cp.onclick = async () => { const t = prompt("Set the in-world time and/or day (for example 14:30, Tuesday, or Tuesday 2:30 pm):"); if (!t) return; try { const r = await api(`/stories/${story.id}/clock/set`, { method: "POST", body: { time: t } }); story = r.story; renderSidebar(); } catch (e) { alert(e.message); } };
   const po = el.querySelector(".ptsopen"); if (po) po.onclick = () => showPoints();
+  if (typeof invBind === "function") invBind(el);
+  el.querySelectorAll(".dledit").forEach((b) => b.onclick = async (ev) => {
+    ev.preventDefault(); ev.stopPropagation();
+    const v = prompt(`Deadline for "${b.dataset.dl}": type the Day number it is due (for example 9). Leave empty to remove the deadline.`, b.dataset.day || "");
+    if (v === null) return;
+    const day = v.trim() === "" ? null : parseInt(v.replace(/[^0-9]/g, ""), 10);
+    if (day !== null && !(day > 0)) return alert("Type a Day number, such as 9.");
+    try { const r = await api(`/stories/${story.id}/quest-deadline`, { method: "PUT", body: { name: b.dataset.dl, day } }); story.tracker = r.tracker; renderSidebar(); } catch (e) { alert(e.message); }
+  });
   el.querySelectorAll("details.quest").forEach((d) => d.addEventListener("toggle", () => { if (d.open) openQuests.add(d.dataset.q); else openQuests.delete(d.dataset.q); }));
 }
 

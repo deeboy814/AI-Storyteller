@@ -81,6 +81,8 @@ DEFAULT_CONFIG = {
     "char_memory": True,        # each character's key events are sent to the narrator only while they are in the scene; the shared summary stays short; long logs are condensed
     "events_model": "",         # "provider|model" for that bookkeeping call ("" = the story's own model; a cheaper or local one is fine)
     "default_art_direction": "",   # art style new stories start with (chosen under Settings → AI & story)
+    "image_categories": [],   # the groups of picture types (Moods, Actions, Positions, Finishes by default): see moods.py; empty = the defaults
+    "mood_defs": {},    # picture types you edited or made (see moods.py): {"blushing": {"look": "...", "framing": "...", "tags": "...", "kind": "expression", "nsfw": false, "note": "when the narrator uses it"}}
     "mood_looks": {},   # what to draw for moods you add yourself: {"blushing": "embarrassed, red cheeks, hand over mouth"}
     "mood_sets": DEFAULT_SETS,  # which extra pictures to draw for a new character: basic / extended (editable in Settings)
     "image_active": "gemini",   # which image provider makes pictures (Claude cannot)
@@ -149,6 +151,8 @@ def save_config(cfg: dict) -> None:
 def public_config(cfg: dict) -> dict:
     """Config safe to send to the browser: API keys are never sent back."""
     out = json.loads(json.dumps(cfg))
+    from . import moods
+    out["image_categories"] = moods.categories(cfg)      # the player's image categories (or the defaults), so the pages always have them
     for p in out["providers"] + out["image_providers"]:
         p["has_key"] = bool(p.get("api_key"))
         p["api_key"] = ""
@@ -203,6 +207,7 @@ def new_story(title: str, subtitle: str, base_prompt: str, player_name: str = ""
 
 STORY_DEFAULTS = {
     "prologue": "", "opening_options": [], "endings": [], "target_ending": -1,
+    "inventory": {"on": False, "items": []},
     "backdrop": {},
     "sidebar": tracker.default_sidebar(), "tracker": tracker.blank(),
     "avatar_id": "",
