@@ -629,6 +629,8 @@ def _deadline_note(story: dict) -> str:
             out.append(f"'{d['name']}' is OVERDUE (deadline Day {d['day']}; it is now Day {int(day)}): resolve it now as failed unless the story shows it was done, with its Failed notification")
         elif day == d["day"]:
             out.append(f"'{d['name']}' is due TODAY (deadline Day {d['day']})")
+        elif d["day"] - day == 1:
+            out.append(f"'{d['name']}' is due TOMORROW (deadline Day {d['day']})")
     return ("[QUEST DEADLINES, kept by the app: " + "; ".join(out) + ".]") if out else ""
 
 

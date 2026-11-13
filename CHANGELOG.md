@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.6.2
+**New**
+
+- **Neural read-aloud voices (optional download).** Read-aloud voices window → Neural voices: natural-sounding Piper voices that run on your own computer. Nothing is installed until you press Download (the voice engine, about 35 MB, plus about 63 MB per voice, kept in the data folder). Eight voices to pick from, or type any Piper voice name. Each character can have a neural or a browser voice; if a neural voice fails, the browser voice takes over.
+- **Image categories.** Every picture type belongs to a category you can rename, reorder, add and delete (Cast → Image categories…, and Settings → Picture makers). The defaults are Expressions, Actions, Positions, Finishes and Other adult. Each category has an adult flag, a shot (portrait or action) and an optional note that tells the narrator when to use it. Each picture type can be edited (what it draws, its framing, its tag words, which category and sets it is in), shows the exact prompt it sends, and can be changed for one story only. Your own types and categories are given to the narrator, adult ones only in adult stories.
+- **Every category is a batch set.** Wherever you choose what to draw for a character, the list is Basic set, Extended set, then "All: <category>" for each category.
+- **Every picture keeps its exact prompt (📝).** See, edit and redraw from the exact words a picture was made from; the old picture is kept as an earlier version.
+- **Redraw a species' reference picture, pick from 4.** On the Species & makers screen, 🎨 draws four new candidates of a typical member from the species description with the maker chosen on screen, and you tap the one you want. Nothing changes until you pick.
+- **Every picture maker is offered for species and characters.** The maker list shows every model of every picture service (Gemini, OpenAI, xAI, each ComfyUI model), grouped by service. The Species & makers screen also fits phone screens.
+- **Inventory kept by the app (🎒, off by default, per story).** Items are cards with a quantity, an effect and an equipped mark. The narrator reports what you gain, use or lose and the app does the counting; undo and redo restore it. The side panel gets an Items tab, and "Read my items from the story" fills the list from the story.
+- **Journal (📖).** A "Previously…" recap, the story so far, and a timeline of key events, finished quests and bookmarks. A "Welcome back" card offers a recap when you return after 6 hours or more.
+- **Quest deadlines as a countdown** ("2 days left", "due today", "overdue by 1 day"), editable by clicking the badge; the narrator is reminded the day before.
+- **Narration style presets.** Four one-click choices per story under Player → Notes: tone, pacing, reply length and writing style.
+- **Separate adult tags per character.** An "Adult picture tags" box on a character's Images tab, used only for their adult pictures with tag-style makers.
+- **Let phones and tablets restart the app (Settings → Phone & tablet, off by default).** Can only be switched on at the computer itself. A connected phone can then restart the app but never close it.
+
+**Improved**
+
+- **Adult pictures with one picture maker.** In an adult story without a separate adult maker, the main maker now draws explicit pictures with the adult wording. Reference-based makers copy only the face, hair and build from the references, not their clothes, and lying-down pictures are framed the right way up. Stories with adult content off are unchanged.
+- Nudity tags saved on a character are no longer added to ordinary pictures.
+
 ## 1.6.1
 **New**
 
@@ -62,7 +83,7 @@
 - **Tabbed side panel.** The right panel now has underline tabs (Status, Relations, Cast, Items, Quests; only the ones the story has data for), a "you" card with your picture and place, and cards with a picture for each character. Relationship bars have their label above.
 - **Stories panel (left).** A new left panel lists your stories with search, Recent / All, a New story button and shortcuts (Home, Avatars, Lore library, Art, Usage, Settings). Open it with the 📚 button; it remembers whether it was open and has an edge tab to bring it back. On a phone there is no side column: the ☰ menu has 📚 (a window with the same story list, search and New story) plus Avatars, Lore library and Usage buttons.
 
-- **Adult pictures follow the picture again.** Explicit mood portraits and scenes made by the adult picture maker (an SDXL model such as RealVis) came out as the character in their everyday outfit holding their props, whatever the mood. Three causes are fixed: the character's outfit and props are left out of the prompt (face, hair, build stay; what they wear comes from the picture's own description), the prompt is short and subject-first instead of a long list of instructions, and only the face of the reference picture is used (a tighter crop, so its clothes and street do not carry over). In a photorealistic story, the model's extra "painterly" style words and "photo" negative words no longer fight the story's own style. Redraw any adult pictures made before this.
+- **Adult pictures follow the picture again.** Explicit mood portraits and scenes made by the adult picture maker (an SDXL model) came out as the character in their everyday outfit holding their props, whatever the mood. Three causes are fixed: the character's outfit and props are left out of the prompt (face, hair, build stay; what they wear comes from the picture's own description), the prompt is short and subject-first instead of a long list of instructions, and only the face of the reference picture is used (a tighter crop, so its clothes and street do not carry over). In a photorealistic story, the model's extra "painterly" style words and "photo" negative words no longer fight the story's own style. Redraw any adult pictures made before this.
 
 - **Dice: the stat is picked from what you do, not what you say.** A move that was only talk could roll Strength (for example "force a small shrug"), and handing out stat points could roll a stat. The automatic dice now match physical stats (Strength, Reflexes, Stamina...) only against the character's actions outside quotation marks, "force" counts only for forcing a door, lock or way through, a move that ends in a question (even inside quotes) or that assigns stat points is not rolled, and a stat named only in passing no longer counts. Social stats (Charisma...) also read what is said aloud, with more social words (apologising, pleading, flirting, comforting, smoothing things over).
 

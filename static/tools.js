@@ -121,7 +121,7 @@ function renderQuick() {
 }
 
 
-// ---------- read aloud (the browser's own voices: free, local) ----------
+// ---------- read aloud (the browser's own voices, or optional neural voices made by the app: both free and local) ----------
 const tts = { on: !!window.speechSynthesis };
 function voiceSettings() { try { return JSON.parse(localStorage.getItem("voices:" + (story ? story.id : "")) || "{}"); } catch { return {}; } }
 function saveVoices(v) { try { localStorage.setItem("voices:" + story.id, JSON.stringify(v)); } catch {} }
@@ -147,13 +147,20 @@ function bestVoice(lang) {
   const all = speechSynthesis.getVoices();
   return all.slice().sort((x, y) => rankVoice(y, lang) - rankVoice(x, lang))[0] || null;
 }
+// A chosen voice is either a browser voice name or "piper:<voice>" (a neural voice made on this computer by the app; see Read-aloud voices).
 function pickVoice(name, lang = "en") {
-  const all = speechSynthesis.getVoices(), vs = voiceSettings(), want = vs[name] || vs.narrator;
-  return all.find((v) => v.name === want) || bestVoice(lang);
+  const all = speechSynthesis.getVoices(), vs = voiceSettings(), want = vs[name] || vs.narrator || "";
+  const pv = (tts.piper || []);
+  if (want.startsWith("piper:") && pv.includes(want.slice(6))) return { piper: want.slice(6) };
+  const found = all.find((v) => v.name === want);
+  if (found) return found;
+  if (pv.length) return { piper: pv[0] };          // neural voices are installed and nothing else was chosen: use one
+  return bestVoice(lang);
 }
+async function loadPiper() { try { const s = await api("/voice/status"); tts.piper = s.voices || []; return s; } catch { return null; } }
 // Plain speech text from a reply: no status blocks, pictures, links, hidden tags; then (per line) no markdown marks or emoji.
 function speechBlocks(text) {
-  return text.replace(/```[\s\S]*?```/g, "").replace(/<(state|scene|newchar)>[\s\S]*?(<\/\1>|$)/gi, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+  return text.replace(/```[\s\S]*?```/g, "").replace(/<(state|scene|newchar|items)>[\s\S]*?(<\/\1>|$)/gi, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "")
     .replace(/^\[\/\/\]:.*$/gm, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/https?:\/\/\S+/g, "");
 }
 function speechMarks(t) {
@@ -180,42 +187,94 @@ function segments(text) {
   }
   return out;
 }
-let ttsRun = 0;
-function speakText(text) {
-  if (!tts.on) return alert("This browser can't read aloud.");
-  speechSynthesis.cancel();
-  const run = ++ttsRun, rate = +localStorage.getItem("ttsRate") || 1, lang = ttsLang(text);
-  setTimeout(() => {   // speaking right after cancel() makes Chrome drop or garble the first words
-    if (run !== ttsRun) return;
-    for (const seg of segments(text)) {
-      const v = pickVoice(seg.who, lang);
-      for (const piece of chunks(seg.text)) {
-        const u = new SpeechSynthesisUtterance(piece); u.rate = rate; u.lang = v ? v.lang : lang;
-        if (v) u.voice = v;
-        speechSynthesis.speak(u);
-      }
-    }
-  }, 120);
+let ttsRun = 0, ttsAudio = null, ttsBusy = false;
+function ttsStop() { ttsRun++; ttsBusy = false; try { speechSynthesis.cancel(); } catch {} if (ttsAudio) { try { ttsAudio.pause(); } catch {} ttsAudio = null; } }
+function piperFetch(voice, text, rate) {
+  return fetch("/api/voice/speak", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ voice, text, speed: rate }) })
+    .then((r) => { if (!r.ok) throw new Error("The neural voice could not speak (" + r.status + ")."); return r.blob(); }).then((b) => URL.createObjectURL(b));
+}
+function playUrl(url, run) {
+  return new Promise((ok) => {
+    if (run !== ttsRun) return ok();
+    const a = ttsAudio = new Audio(url);
+    a.onended = a.onerror = () => { URL.revokeObjectURL(url); ok(); };
+    a.play().catch(() => ok());
+  });
+}
+function sayBrowser(piece, v, lang, rate, run) {
+  return new Promise((ok) => {
+    if (run !== ttsRun || !tts.on) return ok();
+    const u = new SpeechSynthesisUtterance(piece); u.rate = rate; u.lang = v ? v.lang : lang;
+    if (v) u.voice = v;
+    u.onend = u.onerror = () => ok();
+    speechSynthesis.speak(u);
+  });
+}
+// Reads the pieces one after another. Neural pieces are made a step ahead (the next one is fetched while the current one plays), so there is no gap between sentences.
+async function speakText(text) {
+  if (!tts.piper) await loadPiper();     // which neural voices are installed (asked once)
+  if (!tts.on && !(tts.piper || []).length) return alert("This browser can't read aloud.");
+  ttsStop();
+  const run = ++ttsRun, rate = +localStorage.getItem("ttsRate") || 1, lang = ttsLang(text), queue = [];
+  for (const seg of segments(text)) { const v = pickVoice(seg.who, lang); for (const piece of chunks(seg.text, v && v.piper ? 320 : 200)) queue.push({ piece, v }); }
+  ttsBusy = true;
+  await new Promise((ok) => setTimeout(ok, 120));   // speaking right after cancel() makes Chrome drop or garble the first words
+  const ready = (q) => q && q.v && q.v.piper && !q.url ? (q.url = piperFetch(q.v.piper, q.piece, rate).catch((e) => { q.err = e; return null; })) : null;
+  ready(queue[0]);
+  for (let i = 0; i < queue.length && run === ttsRun; i++) {
+    const q = queue[i]; ready(queue[i + 1]);
+    if (q.v && q.v.piper) {
+      const url = await q.url;
+      if (run !== ttsRun) { if (url) URL.revokeObjectURL(url); break; }
+      if (url) await playUrl(url, run); else if (tts.on) await sayBrowser(q.piece, bestVoice(lang), lang, rate, run);   // the neural voice failed: fall back to the browser's
+    } else await sayBrowser(q.piece, q.v, lang, rate, run);
+  }
+  if (run === ttsRun) ttsBusy = false;
 }
 function readLatest() {
   if (!story) return;
-  if (speechSynthesis.speaking) { speechSynthesis.cancel(); return; }
+  if (ttsBusy || speechSynthesis.speaking) { ttsStop(); return; }
   const t = [...story.turns].reverse().find((x) => x.role === "assistant"); if (t) speakText(t.text);
 }
-function showVoices() {
-  if (!tts.on) return alert("This browser can't read aloud.");
-  const lang0 = ttsLang(), vs = speechSynthesis.getVoices().slice().sort((x, y) => rankVoice(y, lang0) - rankVoice(x, lang0) || x.name.localeCompare(y.name)), cur = voiceSettings(), names = ["narrator", ...(story.cast || []).map((c) => c.name.split(" ")[0])];
-  const noLang = !vs.some((v) => (v.lang || "").toLowerCase().startsWith(lang0));
-  const opts = (sel) => `<option value="">(same as narrator)</option>` + vs.map((v) => `<option value="${esc(v.name)}" ${v.name === sel ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`).join("");
-  modal(`<h2>Read-aloud voices</h2><p class="hint">Uses the voices built into your browser and computer, so nothing is sent anywhere. Voices are saved on this device. Speaker lines (<code>**Name** | "…"</code>) use that character's voice; everything else uses the narrator.</p>
-    ${noLang ? `<p class="hint" style="color:var(--danger)">Your computer has no ${lang0.toUpperCase()} voice installed, so speech will sound garbled. On Linux install one with <code>sudo apt install speech-dispatcher espeak-ng</code>, then restart the browser.</p>` : ""}
+async function showVoices() {
+  const ps = await loadPiper();
+  if (!tts.on && !ps) return alert("This browser can't read aloud.");
+  const lang0 = ttsLang(), vs = (tts.on ? speechSynthesis.getVoices() : []).slice().sort((x, y) => rankVoice(y, lang0) - rankVoice(x, lang0) || x.name.localeCompare(y.name)), cur = voiceSettings(), names = ["narrator", ...(story.cast || []).filter((c) => !c.generic).map((c) => c.name.split(" ")[0])];
+  const pv = tts.piper || [], pname = (id) => ((ps && ps.catalog.find((c) => c.id === id)) || {}).name || id;
+  const noLang = !pv.length && !vs.some((v) => (v.lang || "").toLowerCase().startsWith(lang0));
+  const opts = (sel) => `<option value="">(same as narrator)</option>` + (pv.length ? `<optgroup label="Neural voices (on this computer)">${pv.map((id) => `<option value="piper:${esc(id)}" ${"piper:" + id === sel ? "selected" : ""}>${esc(pname(id))}</option>`).join("")}</optgroup>` : "")
+    + `<optgroup label="Browser voices">${vs.map((v) => `<option value="${esc(v.name)}" ${v.name === sel ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`).join("")}</optgroup>`;
+  const narrOpts = (sel) => opts(sel || (pv.length ? "piper:" + pv[0] : "")).replace('<option value="">(same as narrator)</option>', "");
+  modal(`<h2>Read-aloud voices</h2><p class="hint">Speech is made on this computer, so nothing is sent anywhere. Voices are saved on this device. Speaker lines (<code>**Name** | "…"</code>) use that character's voice; everything else uses the narrator.</p>
+    ${noLang ? `<p class="hint" style="color:var(--danger)">Your computer has no ${lang0.toUpperCase()} voice installed, so speech will sound garbled. Install a neural voice below, or on Linux install a system voice with <code>sudo apt install speech-dispatcher espeak-ng</code>, then restart the browser.</p>` : ""}
+    <details class="aiBox" ${pv.length ? "" : "open"}><summary><b>Neural voices</b> <span class="hint">${pv.length ? pv.length + " installed" : "optional download: natural-sounding speech"}</span></summary>
+      <p class="hint">Natural-sounding voices from the free Piper project. They run on this computer (no account, no cost). ${ps && ps.engine ? "The voice engine is installed." : "The first voice also installs the voice engine (about 35 MB from PyPI)."} Each voice is one download of about 63 MB from the Piper voices collection on Hugging Face, kept in the app's data/voices folder.</p>
+      ${ps ? `<div class="row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><select id="pvPick">${ps.catalog.filter((c) => !c.installed).map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.mb} MB)</option>`).join("")}<option value="__other">Another Piper voice…</option></select><button id="pvGet">Download</button><span class="hint" id="pvMsg">${esc(ps.busy || "")}</span></div>
+      ${pv.length ? `<div class="hint" style="margin-top:6px">Installed: ${pv.map((id) => `${esc(pname(id))} <a href="#" class="pvDel" data-id="${esc(id)}" title="Delete this voice file">remove</a>`).join(" · ")}</div>` : ""}` : `<p class="hint">Could not reach the app to check for neural voices.</p>`}
+    </details>
     <label>Speed</label><input id="vRate" type="number" step="0.1" min="0.5" max="2" value="${+localStorage.getItem("ttsRate") || 1}">
-    <div class="chkgrid" style="grid-template-columns:1fr 2fr">${names.map((n) => `<label>${esc(n)}</label><select data-v="${esc(n)}">${n === "narrator" ? opts(cur[n]).replace('<option value="">(same as narrator)</option>', "") : opts(cur[n])}</select>`).join("")}</div>
+    <div class="chkgrid" style="grid-template-columns:1fr 2fr">${names.map((n) => `<label>${esc(n)}</label><select data-v="${esc(n)}">${n === "narrator" ? narrOpts(cur[n]) : opts(cur[n])}</select>`).join("")}</div>
     <div class="actions"><button id="vAuto">Give each character a different voice</button><button id="vTest">Test narrator</button><span style="flex:1"></span><button id="mClose">Close</button><button class="primary" id="vSave">Save</button></div>`);
-  $("mClose").onclick = () => { speechSynthesis.cancel(); closeModal(); };
-  $("vTest").onclick = () => { const v = vs.find((x) => x.name === document.querySelector('[data-v="narrator"]').value) || bestVoice(lang0); speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance("The corridor was quiet, and then it was not."); if (v) { u.voice = v; u.lang = v.lang; } u.rate = +$("vRate").value || 1; speechSynthesis.speak(u); };
-  $("vAuto").onclick = () => { const pool = vs.filter((v) => (v.lang || "").toLowerCase().startsWith(lang0) && !/\+/.test(v.name)); const sels = [...document.querySelectorAll("[data-v]")].filter((s) => s.dataset.v !== "narrator"); sels.forEach((s, k) => { if (pool.length) s.value = pool[(k + 1) % pool.length].name; }); };
-  $("vSave").onclick = () => { const v = {}; document.querySelectorAll("[data-v]").forEach((s) => { if (s.value) v[s.dataset.v] = s.value; }); saveVoices(v); localStorage.setItem("ttsRate", $("vRate").value); speechSynthesis.cancel(); closeModal(); };
+  $("mClose").onclick = () => { ttsStop(); closeModal(); };
+  const keep = () => { const v = {}; document.querySelectorAll("[data-v]").forEach((s) => { if (s.value) v[s.dataset.v] = s.value; }); saveVoices(v); localStorage.setItem("ttsRate", $("vRate").value); };
+  $("vTest").onclick = async () => {
+    ttsStop(); const sel = document.querySelector('[data-v="narrator"]').value, rate = +$("vRate").value || 1, line = "The corridor was quiet, and then it was not.", run = ++ttsRun;
+    if (sel.startsWith("piper:")) { try { await playUrl(await piperFetch(sel.slice(6), line, rate), run); } catch (e) { alert(e.message); } }
+    else await sayBrowser(line, vs.find((x) => x.name === sel) || bestVoice(lang0), lang0, rate, run);
+  };
+  $("vAuto").onclick = () => { const pool = [...pv.map((id) => "piper:" + id), ...vs.filter((v) => (v.lang || "").toLowerCase().startsWith(lang0) && !/\+/.test(v.name)).map((v) => v.name)]; const sels = [...document.querySelectorAll("[data-v]")].filter((s) => s.dataset.v !== "narrator"); sels.forEach((s, k) => { if (pool.length) s.value = pool[(k + 1) % pool.length]; }); };
+  $("vSave").onclick = () => { keep(); ttsStop(); closeModal(); };
+  if ($("pvGet")) $("pvGet").onclick = async () => {
+    let id = $("pvPick").value;
+    if (id === "__other") { id = (prompt("Type the Piper voice name (for example en_US-lessac-medium or de_DE-thorsten-medium):") || "").trim(); if (!id) return; }
+    const b = $("pvGet"); b.disabled = true; $("pvMsg").textContent = "Downloading… this can take a minute or two.";
+    try { await api("/voice/install", { method: "POST", body: { voice: id } }); keep(); showVoices(); }
+    catch (e) { $("pvMsg").textContent = e.message; b.disabled = false; }
+  };
+  document.querySelectorAll(".pvDel").forEach((a) => a.onclick = async (ev) => {
+    ev.preventDefault(); if (!confirm("Delete this voice file from the computer? You can download it again later.")) return;
+    try { await api("/voice/" + encodeURIComponent(a.dataset.id), { method: "DELETE" }); keep(); showVoices(); } catch (e) { alert(e.message); }
+  });
 }
 if (tts.on) speechSynthesis.getVoices();
 

@@ -164,13 +164,14 @@ async function showSpecies(nav = {}) {
   const card = ([key, sp]) => {
     const m = members(sp.name), withPic = m.filter((c) => Object.keys(c.moods || {}).length);
     return `<div class="aiBox spcard" data-key="${esc(key)}"><b>${esc(sp.name)}</b> <small class="muted">${m.length} character${m.length === 1 ? "" : "s"}: ${esc(m.map((c) => c.name).join(", ") || "none yet")}</small>
-      <div class="bioTop">${sp.reference_url ? `<img class="bioimg" src="${thumbUrl(sp.reference_url, 360)}" alt="reference">` : '<div class="noart" style="width:110px;height:140px">No reference yet</div>'}
+      <div class="bioTop spTop">${sp.reference_url ? `<img class="bioimg" src="${thumbUrl(sp.reference_url, 360)}" alt="reference">` : '<div class="noart" style="width:110px;height:140px">No reference yet</div>'}
       <div style="flex:1"><label>What is true of the whole species <small class="hint">(skin or covering, eyes, crests, build, clothing: added to every member's picture prompt)</small></label><textarea class="short spDesc" rows="3">${esc(sp.description || "")}</textarea>
         <label>Story traits <small class="hint">(abilities, weaknesses, senses, customs: given to the narrator so it stays consistent)</small></label><textarea class="short spTraits" rows="3">${esc(sp.traits || "")}</textarea>
         <div class="actions" style="justify-content:flex-start;margin:2px 0 6px"><button class="spWrite" title="The helper model drafts both boxes from the story prompt and this species' members. Nothing is saved until you press Save.">✨ Write both from the story</button></div>
         <label>Picture maker for this species <small class="hint">(a character can still choose their own)</small></label><select class="spMaker"></select>
         <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><select class="spPick">${withPic.map((c) => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join("") || "<option value=''>(no pictures yet)</option>"}</select>
-          <button class="spUse" ${withPic.length ? "" : "disabled"}>Use their picture as the reference</button>${sp.reference_url ? '<button class="spClear">Clear the reference</button>' : ""}</div></div></div></div>`;
+          <button class="spUse" ${withPic.length ? "" : "disabled"}>Use their picture as the reference</button></div>
+          <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><button class="spRedraw" title="Draws 4 new reference pictures of a typical member from the description above, then you pick one, with the picture maker chosen above (even if not saved yet).">🎨 Redraw the reference (pick from 4)</button>${sp.reference_url ? '<button class="spClear">Clear the reference</button>' : ""}</div><div class="spCands"></div></div></div></div>`;
   };
   modal(`<h2>🧬 Species</h2><p class="hint">Every character has a species (empty means human). The <b>first picture drawn</b> for a species becomes its reference: the next character of that species is drawn from a tiny version of it, so they share its look but have their own face. After a character has pictures of their own, those are used instead.</p>
     <div id="spList">${list.map(card).join("") || '<p class="hint">No species yet. Give a character a species (character page → Species) or add one below.</p>'}</div>
@@ -182,6 +183,19 @@ async function showSpecies(nav = {}) {
     const key = el.dataset.key; makerSelect(el.querySelector(".spMaker"), choices, (story.species[key] || {}).maker || "");
     el.querySelector(".spUse").onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "POST", body: { slug: el.querySelector(".spPick").value } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } };
     el.querySelector(".spWrite").onclick = async (e) => { e.target.disabled = true; $("spNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/write`, { method: "POST" }); el.querySelector(".spDesc").value = r.description; el.querySelector(".spTraits").value = r.traits; $("spNote").textContent = "Drafted. Edit if you like, then Save."; } catch (err) { $("spNote").textContent = err.message; } e.target.disabled = false; };
+    el.querySelector(".spRedraw").onclick = async (e) => {
+      const b = e.target; b.disabled = true; $("spNote").textContent = "Drawing 4 pictures… this can take a few minutes.";
+      try {
+        const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/redraw`, { method: "POST", body: { maker: el.querySelector(".spMaker").value, description: el.querySelector(".spDesc").value, count: 4 } });
+        const box = el.querySelector(".spCands");
+        box.innerHTML = `<div class="hint">Tap the one you want as the reference.</div><div class="spCandGrid">${r.candidates.map((u) => `<img src="${thumbUrl(u, 360)}" data-url="${esc(u)}" alt="candidate">`).join("")}</div><button class="spKeep">Keep the current one</button>`;
+        $("spNote").textContent = "";
+        box.querySelectorAll("img").forEach((im) => im.onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: im.dataset.url } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } });
+        box.querySelector(".spKeep").onclick = async () => { await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: "" } }); box.innerHTML = ""; };
+        box.scrollIntoView({ block: "nearest" });
+      } catch (err) { $("spNote").textContent = err.message; }
+      b.disabled = false;
+    };
     const clr = el.querySelector(".spClear"); if (clr) clr.onclick = async () => { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "DELETE" }); showSpecies(nav); };
   });
   $("spAdd").onclick = async () => {
