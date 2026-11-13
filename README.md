@@ -51,7 +51,7 @@ Everything runs on your own computer. Your stories, pictures and settings are st
 
 It runs on Linux (tested on Ubuntu) and Windows 10/11 (the Windows scripts have not yet been tried on a real Windows machine; if something fails, see Troubleshooting and please report it). It needs **Python 3.10 or newer**. To remove the desktop icon later run `./uninstall.sh` (Windows: `uninstall.bat`); your stories are not touched.
 
-Want to see a finished story package? Import `examples/Example Story Package - The Lantern Market.zip` with **📦 Import a story**: a complete, playable example (prompt, opening, cast with pictures, a species, places, trackers, endings and a starter character) whose prompt carries `GUIDE:` notes explaining each part; `examples/lantern-market/HOW-TO-BUILD-A-STORY-PACKAGE.md` walks through building your own. Or paste `examples/the-lighthouse-keepers.md` (a small original story prompt) into **New story**; `examples/story-prompt-template.md` explains how to write your own.
+Want to see a finished story package? Import `examples/Example Story Package - The Lantern Market.zip` with **📦 Import a story**: a complete, playable example that uses every feature of the app (prompt, openings, cast with pictures and generic characters, a species, places, trackers, dice, beats, lore, a world clock, items, command buttons, endings and a starter character) whose prompt carries `GUIDE:` notes saying where each feature is and how to try it; `examples/lantern-market/HOW-TO-BUILD-A-STORY-PACKAGE.md` walks through building your own. Or paste `examples/the-lighthouse-keepers.md` (a small original story prompt) into **New story**; `examples/story-prompt-template.md` explains how to write your own.
 
 ## What you need
 

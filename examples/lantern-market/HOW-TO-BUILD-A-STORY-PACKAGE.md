@@ -2,7 +2,7 @@
 
 A **story package** is one `.zip` file that holds everything an author makes for a story: the prompt, the opening, the cast and their pictures, places, art settings, side-panel trackers, endings and a starter player character. Players import it from the Home screen with **📦 Import a story** and can start playing at once.
 
-The example package **The Lantern Market** (`Example Story Package - The Lantern Market.zip`) is a complete, playable story built to show every part. Import it, open **📝 Edit story** and read the lines that start with `GUIDE:` in the prompt; then come back here for the details.
+The example package **The Lantern Market** (`Example Story Package - The Lantern Market.zip`) is a complete, playable story built to show every part and to use every feature of the app: its prompt's `GUIDE:` lines say where each feature is and how to try it. Import it, open **📝 Edit story** and read the lines that start with `GUIDE:` in the prompt; then come back here for the details.
 
 The quickest way to make your own: import the example, change each part in the app, then export it with **💾 Export & backups → Story package**.
 
@@ -154,3 +154,26 @@ Turns, memory, notes, usage and API keys are never included.
 - [ ] Trackers matching the status line labels exactly.
 - [ ] A starter avatar, then export with the avatar box ticked.
 - [ ] Lore entries for places, factions and secrets that are too long for the prompt (each with trigger words).
+
+---
+
+## 12. More parts a package can carry
+
+Besides the parts above, a package can ship all of these (the Lantern Market uses each one):
+
+| Part | Where it lives in the app | What the example does |
+|---|---|---|
+| **Alternate openings** | ✎ Edit story → Story start → Alternate openings (up to 6) | Three ways to begin: the Lily Raft, the Drowned Archive, a late arrival. The player picks before the first move. |
+| **Story beats** | 📅 in the header | Seven beats: by move count (`turn`), by Night, by the Lanterns count, and two that fire only for the road taken (`Route`). |
+| **Lore** | 🧠 Memory → 📚 Lore | Nine entries sent only when a trigger word appears; one tone entry is always sent. |
+| **World clock** | ✎ Edit story → Options → World clock | On, starts at 20:00, 20 minutes per reply. |
+| **Dice** | 🎲 in the ⚡ Quick window | Automatic rolls on, medium difficulty, against four stat trackers. |
+| **Command buttons** | ✎ Edit story → Options → Command buttons | Five buttons: two that send, one that opens the input box, one that opens the stat-points window. |
+| **Trackers with a start value, a point pool and a counter** | Settings → AI & story → Side panel | Stats with starting values, a Points tracker that is spent on the stats, a "Night turn" counter, a Route choice and a per-character Trust slider. |
+| **Inventory** | 🎒 | On, with four starting items. |
+| **Generic characters** | 🎭 Cast → Cast tools → Generic characters… | Three throwaway characters shown as one card. |
+| **A character with no picture** | 🎭 Cast → click a character → Images | Pim, so you can try drawing a face (pick from 4). |
+| **Also-called names** | A character's page → Also called | "the Warden" for Ottilie. |
+| **Intro panels** | ✎ Edit story → Media, or 🖼 Art → Intro panels | Three panels shown above the story's start. |
+
+What a package never carries: turns, memory, notes, the side panel's current values, pictures you draw later, usage and API keys.

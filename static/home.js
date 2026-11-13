@@ -43,7 +43,7 @@ async function showHome() {
       <p>${esc(blurb(s)) || '<i>No description yet. Use ⋯ to add one.</i>'}</p>
       <small>${s.turns} turn${s.turns === 1 ? "" : "s"}${s.player ? " · " + esc(s.player) : ""}${s.cast ? " · " + s.cast + " characters" : ""}</small></div></div>`;
   home.innerHTML = `<div class="hwrap">
-    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label>${config && config.avatar_library ? '<button id="hAv" title="Your saved player avatars">🧑 Avatars</button>' : ""}<button id="hStore" title="Disk use, clean-up, and stories you deleted (restore them)">🗂 Storage</button><button id="hUse" title="Usage and estimated cost">💲 Usage</button><button id="hBug" title="Make a bug report file (personal data removed) to attach to a problem report">🐞 Report a bug</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close or restart AI Storyteller">${isThisComputer() ? "🚪 Quit" : "🔄 Restart"}</button></div>
+    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label><button id="hChars" title="Make characters with pictures once and use them in any story">👥 Characters</button>${config && config.avatar_library ? '<button id="hAv" title="Your saved player avatars">🧑 Avatars</button>' : ""}<button id="hStore" title="Disk use, clean-up, and stories you deleted (restore them)">🗂 Storage</button><button id="hUse" title="Usage and estimated cost">💲 Usage</button><button id="hBug" title="Make a bug report file (personal data removed) to attach to a problem report">🐞 Report a bug</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close or restart AI Storyteller">${isThisComputer() ? "🚪 Quit" : "🔄 Restart"}</button></div>
     <div class="hgrid">
       ${list.map(card).join("")}
       <button class="hcard hnew" id="hNew"><div class="hplus">＋</div><b>New story</b><small>Write or paste a prompt and start playing</small></button>
@@ -67,6 +67,7 @@ async function showHome() {
   $("hUse").onclick = () => asHomeDefaults(() => showUsage());
   $("hBug").onclick = () => showBugReport(() => showHome());
   $("hStore").onclick = () => showStorage();
+  $("hChars").onclick = () => asHomeDefaults(() => showCastLibrary({ pick: false }));
   if ($("hAv")) $("hAv").onclick = () => asHomeDefaults(() => showAvatarLibrary());
   $("hPack").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;

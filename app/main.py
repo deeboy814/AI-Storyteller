@@ -5,6 +5,7 @@ import contextvars
 import hashlib
 import os
 import io
+import base64
 import zipfile
 import json
 import zlib
@@ -25,7 +26,7 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import appstatus, backup, localfix, beats, bugreport, characters, clock, images, lore, moods, rules, importer, localrt, portrait_import, prompting, providers, store, tracker, usage
+from . import appstatus, backup, localfix, beats, bugreport, characters, clock, images, inventory, lore, moods, rules, importer, localrt, portrait_import, prompting, providers, store, tracker, usage
 
 ROOT = Path(__file__).resolve().parent.parent
 # ---------------- keep-warm: refresh Claude's prompt cache while you're away ----------------
@@ -1342,10 +1343,60 @@ class CastMember(BaseModel):
     address: str | None = None   # who may use which name for them (sent to the narrator every turn when filled in)
     species: str | None = None   # "" or "human" = human; anything else is a species with its own reference picture and maker (None = keep what is saved)
     maker: str | None = None     # this character's own picture maker: "" = the story's, "flux" = FLUX.2 klein (reference pictures), "ckpt:<name>" = a ComfyUI checkpoint
+    face: str | None = None      # the face in words (kept identical and put first in every picture prompt, so makers without reference pictures draw the same face)
+    face_lora: str | None = None          # this character's own face LoRA (a file in ComfyUI's loras folder), used whenever ComfyUI draws them
+    face_lora_strength: float | None = None
+    face_trigger: str | None = None       # the LoRA's trigger word(s), put first in the prompt
 
 
 class CastIn(BaseModel):
     cast: list[CastMember]
+
+
+FACE_SYSTEM = ("You describe the face of the person in the picture so that an image model that cannot see it can draw the same face again. "
+               "Write ONE paragraph of plain words, 40 to 70 words: face shape, jaw and chin, eye shape and colour, eyebrows, nose, lips, skin tone, hair colour, length and style (and fringe), and any lasting mark (mole, freckles, dimples). "
+               "Use specific words, not 'beautiful' or 'pretty'. Leave out expression, clothes, jewellery, background, lighting and the picture's style. Say nothing about age beyond 'adult'. Never comment on who the person is or on what you can or cannot tell from the picture: start straight with the description, and output the description only.")
+
+
+@app.post("/api/stories/{sid}/cast/{slug}/describe-face")
+async def describe_face(sid: str, slug: str):
+    """Write a description of this character's face from their own normal picture, using the story's helper model if it can see pictures. Nothing is saved: the page puts it in the Face box."""
+    s, cfg = _story(sid), store.load_config()
+    ch = _char(s, slug)
+    ms = ch.get("moods") or {}
+    url = next((ms[m] for m in ("normal 1", "default", "normal", "neutral", "smile") if ms.get(m)), "")
+    if not url:       # any ordinary face picture
+        url = next((u for m, u in ms.items() if not moods.is_nsfw(cfg, m) and not _is_action(m)), "")
+    f = _portrait_file(url)
+    if not f:
+        raise HTTPException(400, f"{ch['name']} has no ordinary picture to read the face from yet. Draw or upload one first.")
+    try:
+        from PIL import Image
+        im = Image.open(f).convert("RGB")
+        w, h = im.size
+        if h > w * 0.9:        # a portrait: the face is in the upper part
+            im = im.crop((int(w * 0.1), 0, int(w * 0.9), int(h * 0.55)))
+        im.thumbnail((896, 896))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=88)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        raise HTTPException(400, "That picture could not be read.")
+    prov, model = _role(cfg, s, "recaps", "face")
+    try:
+        out = await providers.complete(prov, model, FACE_SYSTEM, [{"role": "user", "content": f"Describe the face of {ch['name']}.", "pics": [("image/jpeg", b64)]}],
+                                       temperature=0.2, max_tokens=300, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+    except Exception as e:
+        raise HTTPException(502, f"{model} could not read the picture ({e}). Pick a helper model that can see pictures (Claude, Gemini, ChatGPT or Grok) under AI & story → Recaps & helpers.")
+    out = " ".join(out.split()).strip(' "')
+    sents = re.split(r"(?<=[.!?])\s+", out)
+    while len(sents) > 1 and re.search(r"\b(can't|cannot|can not|unable|identify|name of)\b", sents[0], re.I):      # a model's disclaimer about not knowing who it is
+        sents.pop(0)
+    out = re.sub(r"^[^:.]{0,90}\b(describe|description)\b[^:.]{0,60}:\s*", "", " ".join(sents), flags=re.I)      # "What I can do is describe the face: ..."
+    out = out[:1].upper() + out[1:]
+    if not out:
+        raise HTTPException(502, f"{model} sent nothing back. Pick a helper model that can see pictures under AI & story → Recaps & helpers.")
+    return {"face": out[:600]}
 
 
 class GenPortraitIn(BaseModel):
@@ -1451,6 +1502,11 @@ def _full_appearance(s: dict, ch: dict) -> str:
     """The character's looks plus what is true of their whole species (so every member of it is drawn with the same traits)."""
     sp = _species_entry(s, ch.get("species"))
     look = (ch.get("appearance") or "").strip()
+    face = (ch.get("face") or "").strip()
+    if (ch.get("face_lora") or "").strip() and (ch.get("face_trigger") or "").strip():      # the face LoRA's trigger word comes first
+        face = f"{ch['face_trigger'].strip()}, {face}" if face else ch["face_trigger"].strip()
+    if face:        # the face in words comes first and is worded the same in every picture
+        look = f"{face.rstrip('.')}. {look}".strip()
     return f"{look} Species traits ({sp.get('name', ch.get('species'))}): {sp['description'].strip()}" if sp and (sp.get("description") or "").strip() else look
 
 
@@ -1488,6 +1544,24 @@ def _flux_provider(cfg: dict, s: dict | None = None, model: str | None = None) -
             "model_tweaks": {model: {"loras": lt}} if (lt := ((comfy.get("model_tweaks") or {}).get(model) or {}).get("loras")) else {}, "ref_mode": "characters"}   # only the LoRAs chosen for this model carry over
 
 
+def _with_face_lora(prov: dict, ch: dict | None) -> dict:
+    """Add this character's own face LoRA (🖼 Images tab → Face LoRA) to the LoRAs ComfyUI draws with. Only ComfyUI uses LoRAs; safe to call twice."""
+    name = ((ch or {}).get("face_lora") or "").strip()
+    if not name or prov.get("type") != "comfyui":
+        return prov
+    m = prov.get("model", "")
+    tw = (prov.get("model_tweaks") or {}).get(m) or {}
+    have = tw.get("loras") or ""
+    if any(ln.split("@")[0].strip() == name for ln in have.splitlines()):
+        return prov
+    try:
+        st = float((ch or {}).get("face_lora_strength") or 1.0)
+    except (TypeError, ValueError):
+        st = 1.0
+    line = f"{name} @ {st:g}"
+    return {**prov, "model_tweaks": {**(prov.get("model_tweaks") or {}), m: {**tw, "loras": (have.strip() + "\n" if have.strip() else "") + line}}}
+
+
 def _maker_spec(s: dict, ch: dict) -> str:
     """This character's picture maker: their own choice, else their species', else the story's ("")."""
     sp = (s.get("species") or {}).get("human") if _is_human(ch.get("species")) else _species_entry(s, ch.get("species"))   # humans can have a default maker too (a "Human" entry)
@@ -1519,7 +1593,7 @@ def _maker_provider(cfg: dict, s: dict, ch: dict | None, override: str | None = 
     else:
         prov = base
     _model_ctx.set(prov.get("model", ""))
-    return prov
+    return _with_face_lora(prov, ch)
 
 
 def _tag_quality() -> tuple[str, str]:
@@ -1821,6 +1895,10 @@ def update_cast(sid: str, body: CastIn):
                     "group": prev.get("group", ""), "player": prev.get("player", False), "ext_refs": prev.get("ext_refs", []), "tags": prev.get("tags", ""), "tags_adult": prev.get("tags_adult", ""),
                     "species": prev.get("species", "") if m.species is None else m.species.strip()[:40],
                     "maker": prev.get("maker", "") if m.maker is None else m.maker.strip()[:120],
+                    "face": prev.get("face", "") if m.face is None else " ".join(m.face.split())[:600],
+                    "face_lora": prev.get("face_lora", "") if m.face_lora is None else m.face_lora.strip()[:200],
+                    "face_lora_strength": prev.get("face_lora_strength", 1.0) if m.face_lora_strength is None else max(-2.0, min(2.0, float(m.face_lora_strength))),
+                    "face_trigger": prev.get("face_trigger", "") if m.face_trigger is None else " ".join(m.face_trigger.split())[:120],
                     "aka": prev.get("aka", []) if m.aka is None else _split_aka(m.aka, name),
                     "address": prev.get("address", "") if m.address is None else m.address.strip()[:600],
                     "personality": prev.get("personality", "") if m.personality is None else m.personality.strip(),
@@ -2092,6 +2170,7 @@ async def _portrait_plan(s: dict, cfg: dict, ch: dict, mood: str, provider: str 
     explicit_pic = bool(s.get("nsfw")) and (_is_explicit(mood + " " + look_of_mood, cfg) or moods.is_nsfw(cfg, mood))
     if explicit_pic and not prov.get("nsfw_maker"):
         prov = _explicit_main(prov)      # no separate adult maker is in use: the main picture maker draws it, with the adult wording
+    prov = _with_face_lora(prov, ch)
     urls = _portrait_urls(ch, mood)
     species_only = False
     if not urls and prov.get("workflow_ref"):    # nothing of their own yet: the first picture of their species is a (tiny) reference for the look of the species
@@ -4010,6 +4089,9 @@ async def illustrate(sid: str, body: IllustrateIn):
             prov = ns           # an explicit moment in an adult story: drawn by the adult picture maker
     if s.get("nsfw") and _is_explicit(scene, cfg) and not prov.get("nsfw_maker"):
         prov = _explicit_main(prov)      # no separate adult maker is in use: the main picture maker draws it, with the adult wording
+    with_lora = [by_slug[c["slug"]] for c in chars if c.get("slug") in by_slug and (by_slug[c["slug"]].get("face_lora") or "").strip()]
+    if len(with_lora) == 1:       # one face LoRA per picture: two would blend the faces
+        prov = _with_face_lora(prov, with_lora[0])
     _model_ctx.set(prov.get("model", ""))
     max_refs = int(cfg.get("image_max_refs", 3))
     mode = prov.get("ref_mode") or ("one_character" if prov.get("type") == "comfyui" else "characters")
@@ -4918,6 +5000,9 @@ def export_pack(sid: str, pictures: str = "all", avatar: int = 0, webp: int = 0)
                      "items": [{k: it.get(k, "") for k in ("id", "title", "text", "field", "op", "value", "source", "off")} for it in b["items"]]}   # never which beats have gone out
     lb = lore.get(s)
     meta["lore"] = {"on": lb["on"], "items": [{k: it.get(k, "") for k in ("id", "title", "keys", "text", "always", "on", "priority")} for it in lb["items"]]}
+    inv = inventory.get(s)
+    if inv["on"] or inv["items"]:      # the app's own item list (🎒): on or off, and the items the story starts with
+        meta["inventory"] = {"on": bool(inv["on"]), "items": [{k: it.get(k, "") for k in ("name", "qty", "effect", "equipped")} for it in inv["items"]]}
     meta["format"] = "storyteller-pack-2"
     meta["app_version"] = APP_VERSION
     meta["cast"], files = [], []
@@ -4937,7 +5022,8 @@ def export_pack(sid: str, pictures: str = "all", avatar: int = 0, webp: int = 0)
                 moods[mood] = arc
                 files.append((arc, f))
         meta["cast"].append({"name": c["name"], "slug": c["slug"], "appearance": c.get("appearance", ""), "bio": c.get("bio", ""), "personality": c.get("personality", ""), "author": bool(c.get("author")),
-                             "address": c.get("address", ""), "tags": c.get("tags", ""), "species": c.get("species", ""), "maker": c.get("maker", ""), "group": c.get("group", ""), "moods": moods})
+                             "address": c.get("address", ""), "tags": c.get("tags", ""), "species": c.get("species", ""), "maker": c.get("maker", ""), "group": c.get("group", ""),
+                             "aka": list(c.get("aka") or []), "generic": bool(c.get("generic")), "moods": moods})
     meta["species"] = []
     for key, sp in (s.get("species") or {}).items():
         item = {"name": sp.get("name", key), "description": sp.get("description", ""), "maker": sp.get("maker", "")}
@@ -5070,7 +5156,8 @@ def _pack_char(c: dict, sid: str, save_file) -> dict:
             moods[mood] = f"/portraits/{sid}/chars/{slug}/{fname}"
     return {"name": c["name"], "slug": slug, "appearance": c.get("appearance", ""), "bio": c.get("bio", ""), "personality": c.get("personality", ""),
             "author": bool(c.get("author")), "address": str(c.get("address", ""))[:600], "tags": str(c.get("tags", ""))[:1500], "species": str(c.get("species", ""))[:40],
-            "maker": str(c.get("maker", ""))[:120], "group": c.get("group", ""), "events": [], "moods": moods, "alts": {}}
+            "maker": str(c.get("maker", ""))[:120], "group": c.get("group", ""), "events": [], "moods": moods, "alts": {},
+            "aka": _split_aka(", ".join(c["aka"]) if isinstance(c.get("aka"), list) else str(c.get("aka") or ""), c["name"]), "generic": bool(c.get("generic"))}
 
 
 def _pack_species(meta: dict, s: dict, save_file, only_missing: bool = False) -> None:
@@ -5143,6 +5230,8 @@ async def import_pack(request: Request):
     if isinstance(meta.get("dice"), dict):        # and its dice setting (auto | manual | off)
         d = meta["dice"]
         s["dice"] = {k: v for k, v in (("mode", d.get("mode") if d.get("mode") in ("auto", "manual", "off") else None), ("difficulty", d.get("difficulty") if d.get("difficulty") in rules.DIFFICULTY else None)) if v}
+    if isinstance(meta.get("inventory"), dict):      # the author's starting items (🎒), on or off
+        s["inventory"] = {"on": bool(meta["inventory"].get("on")), "items": inventory.clean_items(meta["inventory"].get("items"))}
     if isinstance(meta.get("lore"), dict):        # the author's lore entries
         s["lore"] = {"on": bool(meta["lore"].get("on", True)), "items": lore.clean_list(meta["lore"].get("items"))}
     if isinstance(meta.get("beats"), dict):       # the author's story beats (a package never says which have gone out)
@@ -5473,6 +5562,211 @@ def remove_ext_ref(sid: str, slug: str, url: str):
         f.unlink(missing_ok=True)
     store.save_story(s)
     return s
+
+
+# ---------------- Cast library: characters made once (with a picture) and added to any story ----------------
+CAST_LIB = store.DATA / "cast_library.json"
+LIB_FIELDS = ("name", "appearance", "face", "personality", "bio", "species", "maker", "face_lora", "face_trigger")
+
+
+def _lib() -> list[dict]:
+    try:
+        return json.loads(CAST_LIB.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def _lib_entry(lid: str) -> dict:
+    e = next((x for x in _lib() if x["id"] == lid), None)
+    if not e:
+        raise HTTPException(404, "That character is not in the library")
+    return e
+
+
+def _lib_folder(lid: str) -> Path:
+    return store.PORTRAITS / "_library" / lid
+
+
+class LibCharIn(BaseModel):
+    name: str = ""
+    appearance: str = ""
+    face: str = ""
+    personality: str = ""
+    bio: str = ""
+    species: str = ""
+    maker: str = ""
+    face_lora: str = ""
+    face_trigger: str = ""
+
+
+def _lib_apply(e: dict, b: LibCharIn) -> None:
+    e["name"] = " ".join(b.name.split())[:60] or e.get("name") or "New character"
+    e["appearance"] = b.appearance.strip()
+    e["face"] = " ".join(b.face.split())[:600]
+    e["personality"] = b.personality.strip()
+    e["bio"] = b.bio.strip()
+    e["species"] = b.species.strip()[:40]
+    e["maker"] = b.maker.strip()[:120]
+    e["face_lora"] = b.face_lora.strip()[:200]
+    e["face_trigger"] = " ".join(b.face_trigger.split())[:120]
+
+
+@app.get("/api/cast-library")
+def list_cast_library():
+    return _lib()
+
+
+@app.post("/api/cast-library")
+def create_cast_library(body: LibCharIn):
+    e = {"id": uuid.uuid4().hex[:10], "image": "", "created": time.time()}
+    _lib_apply(e, body)
+    store._write(CAST_LIB, _lib() + [e])
+    return e
+
+
+@app.put("/api/cast-library/{lid}")
+def update_cast_library(lid: str, body: LibCharIn):
+    items = _lib()
+    e = next((x for x in items if x["id"] == lid), None)
+    if not e:
+        raise HTTPException(404, "That character is not in the library")
+    _lib_apply(e, body)
+    store._write(CAST_LIB, items)
+    return e
+
+
+@app.delete("/api/cast-library/{lid}")
+def delete_cast_library(lid: str):
+    store._write(CAST_LIB, [x for x in _lib() if x["id"] != lid])
+    shutil.rmtree(_lib_folder(lid), ignore_errors=True)
+    return {"ok": True}
+
+
+def _set_lib_image(lid: str, data: bytes, ext: str) -> dict:
+    items = _lib()
+    e = next((x for x in items if x["id"] == lid), None)
+    if not e:
+        raise HTTPException(404, "That character is not in the library")
+    folder = _lib_folder(lid)
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in folder.glob("picture.*"):
+        old.unlink()
+    (folder / f"picture.{ext}").write_bytes(data)
+    e["image"] = f"/portraits/_library/{lid}/picture.{ext}?v={int(time.time())}"
+    store._write(CAST_LIB, items)
+    return e
+
+
+@app.post("/api/cast-library/{lid}/image")
+async def upload_cast_library_image(lid: str, request: Request):
+    ext = IMAGE_TYPES.get(request.headers.get("content-type", "").split(";")[0].strip())
+    data = await request.body()
+    if not ext or not data or len(data) > MAX_IMAGE:
+        raise HTTPException(415, "Use a PNG, JPEG, WebP or GIF image under 8 MB")
+    return _set_lib_image(lid, data, ext)
+
+
+class LibDrawIn(LibCharIn):
+    story_id: str | None = None      # draw in the style and with the picture maker of this story (empty = the app's default maker, plain style)
+    count: int = 4
+
+
+@app.post("/api/cast-library/{lid}/candidates")
+async def cast_library_candidates(lid: str, body: LibDrawIn):
+    """Draw a few pictures of this character (from their description, no references) to pick from. Nothing changes until one is chosen (/use)."""
+    _lib_entry(lid)
+    if not body.appearance.strip():
+        raise HTTPException(400, "Describe how this character looks first.")
+    cfg = store.load_config()
+    s = _story(body.story_id) if body.story_id else {"id": "_library", "title": "", "base_prompt": "", "models": {}, "cast": [], "species": {}, "art": {**store.STORY_DEFAULTS["art"]}}
+    s = {**s, "cast": []}
+    fake = {"name": " ".join(body.name.split()) or "Character", "slug": "library-" + lid, "appearance": body.appearance.strip(), "face": " ".join(body.face.split())[:600],
+            "species": body.species.strip(), "maker": body.maker.strip(), "face_lora": body.face_lora.strip(), "face_trigger": body.face_trigger.strip(), "moods": {}}
+    plan = await _portrait_plan(s, cfg, fake, "normal 1")
+    folder = _lib_folder(lid) / "_candidates"
+    shutil.rmtree(folder, ignore_errors=True)
+    n = max(1, min(int(body.count), 6))
+
+    async def one():
+        try:
+            return await images.generate(plan["prov"], plan["prompt"], plan["negative"], plan["shape"], [], seed=random.randint(1, 2**31 - 1))
+        except images.ImageError as e:
+            return e
+    if plan["prov"].get("type") == "comfyui":       # one graphics card: one at a time
+        res = [await one() for _ in range(n)]
+    else:
+        res = await asyncio.gather(*[one() for _ in range(n)])
+    folder.mkdir(parents=True, exist_ok=True)
+    urls, err = [], None
+    for i, r in enumerate(res):
+        if isinstance(r, Exception):
+            err = err or r
+            continue
+        data, ext = r
+        dest = folder / f"cand-{int(time.time() * 1000)}-{i}.{ext}"
+        dest.write_bytes(data)
+        urls.append(f"/portraits/_library/{lid}/_candidates/{dest.name}")
+    if not urls:
+        raise HTTPException(502, str(err) if err else "Nothing was drawn.")
+    return {"candidates": urls}
+
+
+class LibUseCandIn(BaseModel):
+    url: str = ""
+
+
+@app.post("/api/cast-library/{lid}/use")
+def use_cast_library_candidate(lid: str, body: LibUseCandIn):
+    _lib_entry(lid)
+    url = body.url.split("?")[0]
+    if not url.startswith(f"/portraits/_library/{lid}/_candidates/"):
+        raise HTTPException(404, "That is not one of this character's options")
+    cand = _portrait_file(url)
+    if not cand:
+        raise HTTPException(404, "That option is gone. Draw new ones.")
+    e = _set_lib_image(lid, cand.read_bytes(), cand.suffix.lstrip("."))
+    shutil.rmtree(_lib_folder(lid) / "_candidates", ignore_errors=True)
+    return e
+
+
+class FromLibIn(BaseModel):
+    id: str
+
+
+@app.post("/api/stories/{sid}/cast/from-library")
+def add_library_character(sid: str, body: FromLibIn):
+    """Add a library character to this story: their look, face, notes and picture (their "normal 1", so it is the face reference for every other picture of them)."""
+    s = _story(sid)
+    e = _lib_entry(body.id)
+    name, n = e["name"], 2
+    while any(c["name"].lower() == name.lower() for c in s["cast"]):
+        name, n = f"{e['name']} {n}", n + 1
+    ch = _ensure_char(s, name, e.get("appearance", ""))
+    for k in ("face", "personality", "bio", "species", "maker", "face_lora", "face_trigger"):
+        if e.get(k):
+            ch[k] = e[k]
+    ch.setdefault("tags", ""); ch.setdefault("tags_adult", ""); ch.setdefault("ext_refs", [])
+    f = _portrait_file(e.get("image", "").split("?")[0]) if e.get("image") else None
+    if f:
+        _store_mood(s, ch, "normal 1", f.read_bytes(), f.suffix.lstrip("."))
+    store.save_story(s)
+    return _story(sid)
+
+
+@app.post("/api/stories/{sid}/cast/{slug}/to-library")
+def save_character_to_library(sid: str, slug: str):
+    """Keep a copy of this character (their description and their normal picture) in the library, so any story can use them."""
+    s = _story(sid)
+    ch = _char(s, slug)
+    e = {"id": uuid.uuid4().hex[:10], "image": "", "created": time.time()}
+    _lib_apply(e, LibCharIn(**{k: str(ch.get(k) or "") for k in LIB_FIELDS}))
+    store._write(CAST_LIB, _lib() + [e])
+    ms = ch.get("moods") or {}
+    url = next((ms[m] for m in ("normal 1", "default", "normal") if ms.get(m)), "") or next(iter(ms.values()), "")
+    f = _portrait_file(url) if url else None
+    if f:
+        e = _set_lib_image(e["id"], f.read_bytes(), f.suffix.lstrip("."))
+    return e
 
 
 # ---------------- prompt tester & model comparison ----------------
@@ -6777,6 +7071,7 @@ async def _draw_now(sid: str, key: str) -> None:
                 prov = ns
             elif s.get("nsfw") and _is_explicit(scene + " " + now.get("wearing", ""), cfg):
                 prov = _explicit_main(prov)      # no separate adult maker: the main one draws it, with the adult wording
+            prov = _with_face_lora(prov, ch)
             _model_ctx.set(prov.get("model", ""))
             refs = _load_refs(_portrait_urls(ch, mood or None), int(cfg.get("image_max_refs", 3)), prov)
             art = _nsfw_art(await _art_with_setting(s, cfg), prov)
@@ -6798,7 +7093,7 @@ async def _draw_now(sid: str, key: str) -> None:
                          images.content_line(bool(s.get("nsfw")))]
                 prompt, negative = "\n\n".join(x for x in lines if x), (s.get("art") or {}).get("negative", "")
             if prov.get("nsfw_maker") or prov.get("_explicit_main"):
-                prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov))
+                prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov), s.get("art"))
             data, ext = await images.generate(prov, prompt, negative, "portrait", refs)
             folder = store.PORTRAITS / sid / "now"
             folder.mkdir(parents=True, exist_ok=True)

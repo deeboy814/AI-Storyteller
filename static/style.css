@@ -205,7 +205,7 @@ button.charcard { padding: 0; text-align: left; border-radius: 12px; overflow: h
 .hgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
 .hcard { background: var(--panel2); border-radius: 14px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; border: 1px solid transparent; text-align: left; padding: 0; }
 .hcard:hover { border-color: var(--accent, #8b7cf6); }
-.hcover { position: relative; aspect-ratio: 600 / 914;   /* the proportions of a portrait cover (Lumencia Academy's), so it is shown whole */
+.hcover { position: relative; aspect-ratio: 600 / 914;   /* the proportions of a typical portrait cover, so it is shown whole */
    display: flex; align-items: center; justify-content: center; font-size: 56px; font-weight: 700; color: rgba(255,255,255,.55); overflow: hidden; }
 .hcover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .hcover.small { max-width: 200px; font-size: 32px; border-radius: 10px; margin-bottom: 8px; }
@@ -698,3 +698,24 @@ button.icon.mobonly { display: none; }
   #spNote { flex: 1 1 100%; order: 5; }
 }
 .spCandGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0; } .spCandGrid img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; object-position: center top; border-radius: 8px; border: 2px solid var(--line); cursor: pointer; } .spCandGrid img:hover { border-color: var(--accent, #8b7cf6); }
+.spCand { display: flex; flex-direction: column; gap: 4px; } .spCand button { width: 100%; }
+/* A character's Images tab: every row holds the same number of pictures, all the same size (4 across, 3 on a tablet, 2 on a phone) */
+#imGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+#imGrid figure.mood img, #imGrid figure.mood.alt img { width: 100%; height: auto; aspect-ratio: 3 / 2; }
+#imGrid figure.mood.alt img { opacity: .8; }
+#imGrid > .hint { grid-column: 1 / -1; }
+@media (max-width: 900px) { #imGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 520px) { #imGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Images tab: pictures grouped by image category, each group can be minimized */
+#imGrid { display: block; }
+.imcat { margin: 0 0 10px; }
+.imcatHead { background: none; border: 0; border-bottom: 1px solid var(--line, #333); border-radius: 0; width: 100%; text-align: left; padding: 6px 2px; font-weight: 600; cursor: pointer; }
+.imcatArrow { display: inline-block; transition: transform .15s; }
+.imcat.min .imcatArrow { transform: rotate(-90deg); }
+.imcat.min .imcatGrid { display: none; }
+.imcatGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding-top: 8px; }
+.imcatGrid figure.mood img, .imcatGrid figure.mood.alt img { width: 100%; height: auto; aspect-ratio: 3 / 2; }
+.imcatGrid figure.mood.alt img { opacity: .8; }
+@media (max-width: 900px) { .imcatGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .imcatGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

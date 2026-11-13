@@ -188,9 +188,9 @@ async function showSpecies(nav = {}) {
       try {
         const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/redraw`, { method: "POST", body: { maker: el.querySelector(".spMaker").value, description: el.querySelector(".spDesc").value, count: 4 } });
         const box = el.querySelector(".spCands");
-        box.innerHTML = `<div class="hint">Tap the one you want as the reference.</div><div class="spCandGrid">${r.candidates.map((u) => `<img src="${thumbUrl(u, 360)}" data-url="${esc(u)}" alt="candidate">`).join("")}</div><button class="spKeep">Keep the current one</button>`;
+        box.innerHTML = `<div class="hint">Click a picture to see it full size, then choose the one you want.</div><div class="gallery">${r.candidates.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="primary spUseThis" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div><button class="spKeep">Keep the current one</button>`;
         $("spNote").textContent = "";
-        box.querySelectorAll("img").forEach((im) => im.onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: im.dataset.url } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } });
+        box.querySelectorAll(".spUseThis").forEach((im) => im.onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: im.dataset.url } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } });
         box.querySelector(".spKeep").onclick = async () => { await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: "" } }); box.innerHTML = ""; };
         box.scrollIntoView({ block: "nearest" });
       } catch (err) { $("spNote").textContent = err.message; }

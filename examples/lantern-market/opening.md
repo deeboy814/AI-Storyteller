@@ -14,3 +14,5 @@ A hand lands on your shoulder.
 
 [[Ottilie Brask/stern]]
 "That's the fourth this week," says the Warden, not taking her eyes off the dark lantern. Her brass spectacles catch the light of the ones still burning. "And you, Finder, have just found your first job."
+
+`[MARKET] Night: 1   Coins: 12   Lanterns: 3/10   Reputation: Newcomer   Level: 1   XP: 0/50`
