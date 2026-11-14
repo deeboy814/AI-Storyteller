@@ -824,7 +824,7 @@ async function makerChoices() {
     for (const p of o.images || []) {
       const grp = p.name + (p.ready ? "" : p.local ? " (not running)" : " (needs an API key)");
       for (const m of p.models || []) {
-        const kind = m.kind === "flux" ? " (FLUX: reference pictures)" : m.kind === "chroma" ? " (Chroma)" : m.kind === "qwen" ? " (Qwen-Image)" : p.local ? " (text only)" : "";
+        const kind = m.kind === "flux" ? " (FLUX: reference pictures)" : m.kind === "chroma" ? " (Chroma)" : m.kind === "qwen" ? " (Qwen-Image)" : m.kind === "anima" ? " (Anima)" : p.local ? " (text only)" : "";
         out.push(["model:" + p.id + ":" + m.id, m.id.replace(/\.safetensors$/, "") + kind, grp]);
       }
     }
@@ -954,7 +954,7 @@ function bindImageSettings(cfg, picker) {
     };
     api("/model-options").then((o) => {
       const cur = (cfg.image_nsfw || {}).maker || "", opts = [];
-      for (const p of o.images || []) for (const m of p.models || []) opts.push([`${p.id}|${m.id}`, `${p.name || p.id}: ${m.id}${m.kind === "qwen" ? " (Qwen-Image: text only)" : m.kind === "chroma" ? " (Chroma: uncensored, text only)" : m.kind === "flux" ? " (FLUX.2: avoids nudity)" : p.local && /pony/i.test(m.id) ? " (recommended for explicit pictures)" : ""}`]);
+      for (const p of o.images || []) for (const m of p.models || []) opts.push([`${p.id}|${m.id}`, `${p.name || p.id}: ${m.id}${m.kind === "anima" ? " (Anima: text only)" : m.kind === "qwen" ? " (Qwen-Image: text only)" : m.kind === "chroma" ? " (Chroma: uncensored, text only)" : m.kind === "flux" ? " (FLUX.2: avoids nudity)" : p.local && /pony/i.test(m.id) ? " (recommended for explicit pictures)" : ""}`]);
       opts.sort((a, b) => (/pony/i.test(b[0]) ? 1 : 0) - (/pony/i.test(a[0]) ? 1 : 0));      // adult-trained models first
       if (cur && !opts.some((x) => x[0] === cur)) opts.unshift([cur, cur.replace("|", ": ")]);
       $("imgNsMaker").innerHTML = opts.length ? opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("") : '<option value="">No picture models found (start ComfyUI or add a key)</option>';
@@ -1016,7 +1016,7 @@ function bindImageSettings(cfg, picker) {
           };
         }
         const sel = box.querySelector("[data-f=model]");
-        if (sel.dataset.filled !== ids.join("|")) { sel.innerHTML = q.models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}${m.kind === "qwen" ? " (Qwen-Image: sentence prompts, no references)" : m.kind === "chroma" ? " (Chroma: sentence prompts, no references)" : m.kind === "flux" ? " (FLUX.2: reference pictures)" : ""}</option>`).join(""); sel.dataset.filled = ids.join("|"); }
+        if (sel.dataset.filled !== ids.join("|")) { sel.innerHTML = q.models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}${m.kind === "anima" ? " (Anima: sentence prompts, no references)" : m.kind === "qwen" ? " (Qwen-Image: sentence prompts, no references)" : m.kind === "chroma" ? " (Chroma: sentence prompts, no references)" : m.kind === "flux" ? " (FLUX.2: reference pictures)" : ""}</option>`).join(""); sel.dataset.filled = ids.join("|"); }
         sel.value = want;
       } else if (cur && ch && ch.provider === q.id && ch.model) cur.value = ch.model;
       card.querySelector(".ipstat").textContent = q.local ? (q.models.length ? (q.ready ? `running · ${q.models.length} model${q.models.length > 1 ? "s" : ""}` : "found, but " + (q.error || "not usable")) : "not running") : q.has_key ? (q.models.length ? "key saved" : "key saved, no models found") : "needs a key";
