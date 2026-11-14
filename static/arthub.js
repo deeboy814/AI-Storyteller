@@ -169,6 +169,8 @@ async function showSpecies(nav = {}) {
         <label>Story traits <small class="hint">(abilities, weaknesses, senses, customs: given to the narrator so it stays consistent)</small></label><textarea class="short spTraits" rows="3">${esc(sp.traits || "")}</textarea>
         <div class="actions" style="justify-content:flex-start;margin:2px 0 6px"><button class="spWrite" title="The helper model drafts both boxes from the story prompt and this species' members. Nothing is saved until you press Save.">✨ Write both from the story</button></div>
         <label>Picture maker for this species <small class="hint">(a character can still choose their own)</small></label><select class="spMaker"></select>
+        <label>LoRA for this species <small class="hint">(used for the reference picture and every character of this species; ComfyUI only)</small></label>
+        <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin:2px 0 6px"><select class="spLora" style="max-width:320px"><option value="">(none)</option></select><input class="spLoraSt" type="number" step="0.05" min="-2" max="2" value="${esc(String(sp.lora_strength ?? 1))}" style="width:80px" title="Strength: 0.6 to 1.0 is usual"><input class="spLoraTrig" value="${esc(sp.lora_trigger || "")}" placeholder="trigger word (if it has one)" style="max-width:220px"></div>
         <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><select class="spPick">${withPic.map((c) => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join("") || "<option value=''>(no pictures yet)</option>"}</select>
           <button class="spUse" ${withPic.length ? "" : "disabled"}>Use their picture as the reference</button></div>
           <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><button class="spRedraw" title="Draws 4 new reference pictures of a typical member from the description above, then you pick one, with the picture maker chosen above (even if not saved yet).">🎨 Redraw the reference (pick from 4)</button>${sp.reference_url ? '<button class="spClear">Clear the reference</button>' : ""}</div><div class="spCands"></div></div></div></div>`;
@@ -178,15 +180,17 @@ async function showSpecies(nav = {}) {
     <div class="actions" style="justify-content:flex-start"><input id="spNew" placeholder="Add a species, e.g. Elf" style="max-width:220px"><button id="spAdd">Add</button><span style="flex:1"></span><span class="hint" id="spNote"></span><button class="primary" id="spSave">Save</button></div>
     <div class="actions" style="margin-top:8px"><button id="mClose">Close</button></div>`);
   $("mClose").onclick = () => { closeModal(); renderAll(); };
-  const body = () => ({ species: [...document.querySelectorAll(".spcard")].map((el) => ({ name: (story.species[el.dataset.key] || {}).name || el.dataset.key, description: el.querySelector(".spDesc").value, traits: el.querySelector(".spTraits").value, maker: el.querySelector(".spMaker").value })) });
+  const body = () => ({ species: [...document.querySelectorAll(".spcard")].map((el) => ({ name: (story.species[el.dataset.key] || {}).name || el.dataset.key, description: el.querySelector(".spDesc").value, traits: el.querySelector(".spTraits").value, maker: el.querySelector(".spMaker").value, lora: el.querySelector(".spLora").value, lora_strength: parseFloat(el.querySelector(".spLoraSt").value) || 1, lora_trigger: el.querySelector(".spLoraTrig").value })) });
   document.querySelectorAll(".spcard").forEach((el) => {
     const key = el.dataset.key; makerSelect(el.querySelector(".spMaker"), choices, (story.species[key] || {}).maker || "");
+    { const cur = (story.species[key] || {}).lora || "", sel = el.querySelector(".spLora"), fill = (list) => { const names = [...new Set([...(list || []), ...(cur ? [cur] : [])])]; sel.innerHTML = '<option value="">(none)</option>' + names.map((n) => `<option value="${esc(n)}">${esc(n)}${list && list.includes(n) ? "" : " (not found in ComfyUI)"}</option>`).join(""); sel.value = cur; };
+      fill(null); api("/model-options").then((o) => { const p = (o.images || []).find((x) => (x.loras || []).length); fill(p ? p.loras : []); }).catch(() => {}); }
     el.querySelector(".spUse").onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "POST", body: { slug: el.querySelector(".spPick").value } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } };
     el.querySelector(".spWrite").onclick = async (e) => { e.target.disabled = true; $("spNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/write`, { method: "POST" }); el.querySelector(".spDesc").value = r.description; el.querySelector(".spTraits").value = r.traits; $("spNote").textContent = "Drafted. Edit if you like, then Save."; } catch (err) { $("spNote").textContent = err.message; } e.target.disabled = false; };
     el.querySelector(".spRedraw").onclick = async (e) => {
       const b = e.target; b.disabled = true; $("spNote").textContent = "Drawing 4 pictures… this can take a few minutes.";
       try {
-        const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/redraw`, { method: "POST", body: { maker: el.querySelector(".spMaker").value, description: el.querySelector(".spDesc").value, count: 4 } });
+        const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/redraw`, { method: "POST", body: { maker: el.querySelector(".spMaker").value, description: el.querySelector(".spDesc").value, count: 4, lora: el.querySelector(".spLora").value, lora_strength: parseFloat(el.querySelector(".spLoraSt").value) || 1, lora_trigger: el.querySelector(".spLoraTrig").value } });
         const box = el.querySelector(".spCands");
         box.innerHTML = `<div class="hint">Click a picture to see it full size, then choose the one you want.</div><div class="gallery">${r.candidates.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="primary spUseThis" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div><button class="spKeep">Keep the current one</button>`;
         $("spNote").textContent = "";
@@ -200,7 +204,7 @@ async function showSpecies(nav = {}) {
   });
   $("spAdd").onclick = async () => {
     const n = $("spNew").value.trim(); if (!n) return;
-    const b = body(); b.species.push({ name: n, description: "", traits: "", maker: "" });
+    const b = body(); b.species.push({ name: n, description: "", traits: "", maker: "", lora: "", lora_strength: 1, lora_trigger: "" });
     try { story = await api(`/stories/${story.id}/species`, { method: "PUT", body: b }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; }
   };
   $("spSave").onclick = async () => { try { story = await api(`/stories/${story.id}/species`, { method: "PUT", body: body() }); $("spNote").textContent = "✔ Saved."; } catch (err) { $("spNote").textContent = err.message; } };

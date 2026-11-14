@@ -1441,8 +1441,8 @@ def _is_flux_model(name: str) -> bool:
     return name in catalog.UNETS or bool(catalog.diffusion_kind(name))
 
 
-_WF_FILES = {"flux2": "comfyui-flux2-klein.json", "chroma": "comfyui-chroma.json", "qwen": "comfyui-qwen-image.json"}
-_WF_WANT = {"flux2": (r"qwen[_-]?3", r"flux2.*vae|flux.?2"), "chroma": (r"t5xxl", r"^ae\.|flux.*ae|(^|[_-])ae[_.]"), "qwen": (r"qwen.*2\.?5.*vl", r"qwen.*vae")}
+_WF_FILES = {"flux2": "comfyui-flux2-klein.json", "chroma": "comfyui-chroma.json", "qwen": "comfyui-qwen-image.json", "anima": "comfyui-anima.json"}
+_WF_WANT = {"flux2": (r"qwen[_-]?3", r"flux2.*vae|flux.?2"), "chroma": (r"t5xxl", r"^ae\.|flux.*ae|(^|[_-])ae[_.]"), "qwen": (r"qwen.*2\.?5.*vl", r"qwen.*vae"), "anima": (r"qwen[_-]?3[_-]?0?6b", r"qwen.*vae")}
 
 
 def _stock_workflow(model: str, plain_flux: bool = True) -> str:
@@ -1505,6 +1505,9 @@ def _full_appearance(s: dict, ch: dict) -> str:
     face = (ch.get("face") or "").strip()
     if (ch.get("face_lora") or "").strip() and (ch.get("face_trigger") or "").strip():      # the face LoRA's trigger word comes first
         face = f"{ch['face_trigger'].strip()}, {face}" if face else ch["face_trigger"].strip()
+    spl = (s.get("species") or {}).get("human") if _is_human(ch.get("species")) else sp
+    if spl and (spl.get("lora") or "").strip() and (spl.get("lora_trigger") or "").strip():     # the species LoRA's trigger word comes first
+        face = f"{spl['lora_trigger'].strip()}, {face}" if face else spl["lora_trigger"].strip()
     if face:        # the face in words comes first and is worded the same in every picture
         look = f"{face.rstrip('.')}. {look}".strip()
     return f"{look} Species traits ({sp.get('name', ch.get('species'))}): {sp['description'].strip()}" if sp and (sp.get("description") or "").strip() else look
@@ -1527,7 +1530,7 @@ def _flux_provider(cfg: dict, s: dict | None = None, model: str | None = None) -
     bg = cfg.get("image_bg") or {}
     model = model or bg.get("model") or "flux-2-klein-4b-fp8.safetensors"
     from . import catalog
-    if catalog.diffusion_kind(model) in ("chroma", "qwen"):   # Chroma and Qwen-Image: their own workflows (text encoder, negative prompt); no reference pictures
+    if catalog.diffusion_kind(model) in ("chroma", "qwen", "anima"):   # Chroma, Qwen-Image and Anima: their own workflows (text encoder, negative prompt); no reference pictures
         cw = _stock_workflow(model)
         lt0 = ((comfy.get("model_tweaks") or {}).get(model) or {}).get("loras") or ""
         if catalog.diffusion_kind(model) == "chroma" and re.search(r"flash|turbo|lightning|hyper", lt0, re.IGNORECASE):     # a speed LoRA (Chroma Flash) is on: it needs the few-step Heun settings (8 steps, cfg 1) it was made for; the negative prompt is not used at cfg 1
@@ -1538,15 +1541,15 @@ def _flux_provider(cfg: dict, s: dict | None = None, model: str | None = None) -
             cw = json.dumps(wf, indent=2)
         return {**comfy, "id": "comfyui-flux", "model": model, "workflow": cw, "workflow_ref": "", "prompt_style": "natural", "extra_positive": "",
                 "extra_negative": "", "model_tweaks": {model: {"loras": lt}} if (lt := ((comfy.get("model_tweaks") or {}).get(model) or {}).get("loras")) else {}, "ref_mode": "none"}
-    plain = (bg.get("workflow") or "").strip() or (ROOT / "workflows" / "comfyui-flux2-klein.json").read_text(encoding="utf-8")
+    plain = ((bg.get("workflow") or "").strip() if bg.get("model") == model else "") or (ROOT / "workflows" / "comfyui-flux2-klein.json").read_text(encoding="utf-8")
     ref = (ROOT / "workflows" / "comfyui-flux2-klein-ref.json").read_text(encoding="utf-8")
     return {**comfy, "id": "comfyui-flux", "model": model, "workflow": plain, "workflow_ref": ref, "prompt_style": "natural", "extra_positive": "", "extra_negative": "",
             "model_tweaks": {model: {"loras": lt}} if (lt := ((comfy.get("model_tweaks") or {}).get(model) or {}).get("loras")) else {}, "ref_mode": "characters"}   # only the LoRAs chosen for this model carry over
 
 
-def _with_face_lora(prov: dict, ch: dict | None) -> dict:
-    """Add this character's own face LoRA (🖼 Images tab → Face LoRA) to the LoRAs ComfyUI draws with. Only ComfyUI uses LoRAs; safe to call twice."""
-    name = ((ch or {}).get("face_lora") or "").strip()
+def _add_lora(prov: dict, name: str, strength) -> dict:
+    """Add one LoRA (file name and strength) to the LoRAs ComfyUI draws with. Only ComfyUI uses LoRAs; adding the same file twice does nothing."""
+    name = (name or "").strip()
     if not name or prov.get("type") != "comfyui":
         return prov
     m = prov.get("model", "")
@@ -1555,11 +1558,23 @@ def _with_face_lora(prov: dict, ch: dict | None) -> dict:
     if any(ln.split("@")[0].strip() == name for ln in have.splitlines()):
         return prov
     try:
-        st = float((ch or {}).get("face_lora_strength") or 1.0)
+        st = float(strength or 1.0)
     except (TypeError, ValueError):
         st = 1.0
     line = f"{name} @ {st:g}"
     return {**prov, "model_tweaks": {**(prov.get("model_tweaks") or {}), m: {**tw, "loras": (have.strip() + "\n" if have.strip() else "") + line}}}
+
+
+def _with_face_lora(prov: dict, ch: dict | None) -> dict:
+    """Add this character's own face LoRA (🖼 Images tab → Face LoRA) to the LoRAs ComfyUI draws with. Safe to call twice."""
+    return _add_lora(prov, (ch or {}).get("face_lora"), (ch or {}).get("face_lora_strength"))
+
+
+def _with_species_lora(prov: dict, s: dict | None, ch: dict | None) -> dict:
+    """Add the LoRA chosen for this character's species (🖼 Art → Characters → Species), so every member is drawn with it. Safe to call twice."""
+    s = s or {}
+    sp = (s.get("species") or {}).get("human") if _is_human((ch or {}).get("species")) else _species_entry(s, (ch or {}).get("species"))      # humans can have a "Human" entry too
+    return _add_lora(prov, (sp or {}).get("lora"), (sp or {}).get("lora_strength")) if sp else prov
 
 
 def _maker_spec(s: dict, ch: dict) -> str:
@@ -1593,7 +1608,7 @@ def _maker_provider(cfg: dict, s: dict, ch: dict | None, override: str | None = 
     else:
         prov = base
     _model_ctx.set(prov.get("model", ""))
-    return _with_face_lora(prov, ch)
+    return _with_face_lora(_with_species_lora(prov, s, ch), ch)
 
 
 def _tag_quality() -> tuple[str, str]:
@@ -2170,7 +2185,7 @@ async def _portrait_plan(s: dict, cfg: dict, ch: dict, mood: str, provider: str 
     explicit_pic = bool(s.get("nsfw")) and (_is_explicit(mood + " " + look_of_mood, cfg) or moods.is_nsfw(cfg, mood))
     if explicit_pic and not prov.get("nsfw_maker"):
         prov = _explicit_main(prov)      # no separate adult maker is in use: the main picture maker draws it, with the adult wording
-    prov = _with_face_lora(prov, ch)
+    prov = _with_face_lora(_with_species_lora(prov, s, ch), ch)
     urls = _portrait_urls(ch, mood)
     species_only = False
     if not urls and prov.get("workflow_ref"):    # nothing of their own yet: the first picture of their species is a (tiny) reference for the look of the species
@@ -2646,6 +2661,9 @@ class SpeciesItemIn(BaseModel):
     description: str = ""
     traits: str = ""
     maker: str = ""
+    lora: str = ""               # a LoRA used for every picture of this species (ComfyUI only)
+    lora_strength: float = 1.0
+    lora_trigger: str = ""       # its trigger word(s), put first in the prompt
 
 
 class SpeciesIn(BaseModel):
@@ -2666,6 +2684,7 @@ def update_species(sid: str, body: SpeciesIn):
         key = name.lower()
         prev = old.get(key, {})
         new[key] = {"name": name, "description": it.description.strip()[:800], "traits": it.traits.strip()[:1200], "maker": it.maker.strip()[:120],
+                    "lora": it.lora.strip()[:200], "lora_strength": max(-2.0, min(2.0, float(it.lora_strength or 1.0))), "lora_trigger": " ".join(it.lora_trigger.split())[:120],
                     "reference_url": prev.get("reference_url", ""), "from": prev.get("from", "")}
     for key in old.keys() - new.keys():
         f = _portrait_file(old[key].get("reference_url", ""))
@@ -2733,6 +2752,9 @@ class SpeciesRedrawIn(BaseModel):
     maker: str | None = None      # draw with this maker (same spellings as a species' maker); None = the species' own, else the story's
     description: str | None = None
     count: int = 4
+    lora: str | None = None           # the species LoRA to draw with (None = the saved one)
+    lora_strength: float | None = None
+    lora_trigger: str | None = None
 
 
 def _species_cands(sid: str, sp: dict) -> list[Path]:
@@ -2753,7 +2775,14 @@ async def redraw_species_reference(sid: str, key: str, body: SpeciesRedrawIn):
         raise HTTPException(400, "Write what is true of the whole species first (skin, eyes, crests, build, clothing): that is what the picture is drawn from.")
     maker = body.maker if body.maker is not None else sp.get("maker", "")
     fake = {"name": f"A typical {sp['name']}", "slug": "species-" + _slug(sp["name"]), "appearance": desc, "species": "", "maker": maker, "moods": {}}
+    lora = (body.lora if body.lora is not None else sp.get("lora") or "").strip()
+    trig = (body.lora_trigger if body.lora_trigger is not None else sp.get("lora_trigger") or "").strip()
+    if lora and trig:
+        fake["appearance"] = f"{trig}, {desc}"
     plan = await _portrait_plan(s, cfg, fake, "default")
+    if lora:
+        plan["prov"] = _add_lora(plan["prov"], lora, body.lora_strength if body.lora_strength is not None else sp.get("lora_strength"))
+    plan["negative"] = (plan["negative"] + ", " if plan["negative"] else "") + "multiple people, two people, crowd, duplicate, multiple views, character sheet, 2girls, 2boys"      # one typical member, alone
     for f in _species_cands(sid, sp):      # an earlier set that was never picked from
         f.unlink(missing_ok=True)
     n = max(1, min(int(body.count), 6))
@@ -7071,7 +7100,7 @@ async def _draw_now(sid: str, key: str) -> None:
                 prov = ns
             elif s.get("nsfw") and _is_explicit(scene + " " + now.get("wearing", ""), cfg):
                 prov = _explicit_main(prov)      # no separate adult maker: the main one draws it, with the adult wording
-            prov = _with_face_lora(prov, ch)
+            prov = _with_face_lora(_with_species_lora(prov, s, ch), ch)
             _model_ctx.set(prov.get("model", ""))
             refs = _load_refs(_portrait_urls(ch, mood or None), int(cfg.get("image_max_refs", 3)), prov)
             art = _nsfw_art(await _art_with_setting(s, cfg), prov)

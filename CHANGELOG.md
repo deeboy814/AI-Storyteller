@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.6.4
+**New**
+
+- **Species LoRA (Art → Characters → Species).** Each species can have a LoRA (file, strength and an optional trigger word). It is used when you redraw the species' reference picture and for every character of that species: portraits, the Now card and scenes where they are the character with their own picture maker. The trigger word goes first in the prompt, and it stacks with a character's own Face LoRA. Works with ComfyUI; story packages don't carry it (the file is on your computer).
+- **Anima picture models.** Anima diffusion models (and merges based on them) in ComfyUI's `diffusion_models` folder are recognised by what they are and drawn with their own workflow. They show as "(Anima)" in the picture-maker lists. They need their text encoder and VAE files in ComfyUI.
+
+**Improved**
+
+- **Redrawing a species reference draws one typical member**, not groups, duplicates or character sheets.
+
+**Fixed**
+
+- **Drawing a species reference no longer fails with a ComfyUI error when the story's backdrop maker is a different kind of model.**
+
 ## 1.6.3
 **New**
 

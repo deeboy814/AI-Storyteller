@@ -161,7 +161,7 @@ def _header_kind(name: str) -> str:
                     n = struct.unpack("<Q", fh.read(8))[0]
                     keys = json.loads(fh.read(n)).keys() if n < 50_000_000 else []
                 ks = " ".join(keys)
-                kind = ("chroma" if "distilled_guidance_layer" in ks else "flux2" if "double_stream_modulation_img" in ks
+                kind = ("anima" if "adaln_modulation_cross_attn" in ks else "chroma" if "distilled_guidance_layer" in ks else "flux2" if "double_stream_modulation_img" in ks
                         else "qwen" if ("txt_norm" in ks and "transformer_blocks.0.img_mod" in ks and not re.search(r"edit", name, re.IGNORECASE)) else "")
             except Exception:
                 kind = ""
@@ -178,6 +178,8 @@ def diffusion_kind(name: str) -> str:
     n = str(name)
     if re.search(r"flux[._ -]?2", n, re.IGNORECASE):
         return "flux2"
+    if re.search(r"anima", n, re.IGNORECASE):
+        return "anima"
     if re.search(r"chroma|uncanny", n, re.IGNORECASE):
         return "chroma"
     if re.search(r"qwen[._ -]?image", n, re.IGNORECASE) and not re.search(r"edit", n, re.IGNORECASE):
