@@ -86,7 +86,7 @@ async def _openai(p, prompt, negative, shape, refs, seed):
     if not p.get("api_key"):
         raise ImageError(f"No API key set for the image provider '{p.get('name', 'openai')}'. Add one in Settings.")
     base = (p.get("base_url") or "https://api.openai.com/v1").rstrip("/")
-    model = p.get("model") or "gpt-image-1"
+    model = p.get("model") or "gpt-image-2"
     headers = {"authorization": f"Bearer {p['api_key']}"}
     text = prompt + (f"\nAvoid: {plain(negative)}" if negative else "")
     use_refs = bool(refs) and p.get("allow_refs", True)

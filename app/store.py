@@ -91,7 +91,7 @@ DEFAULT_CONFIG = {
         {"id": "gemini", "type": "gemini", "name": "Gemini", "base_url": "https://generativelanguage.googleapis.com",
          "api_key": "", "model": "gemini-2.5-flash-image"},
         {"id": "openai", "type": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1",
-         "api_key": "", "model": "gpt-image-1", "send_size": True, "allow_refs": True},
+         "api_key": "", "model": "gpt-image-2", "send_size": True, "allow_refs": True},
         {"id": "xai", "type": "openai", "name": "xAI Grok Imagine", "base_url": "https://api.x.ai/v1",
          "api_key": "", "model": "grok-imagine-image", "send_size": False, "allow_refs": False},
         {"id": "comfyui", "type": "comfyui", "name": "ComfyUI (local)", "base_url": "http://127.0.0.1:8188",

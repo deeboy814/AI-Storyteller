@@ -1,24 +1,6 @@
 // Cast library: characters made once, with a picture, that any story can use. Opened from the Home screen (make and edit them)
 // and from a story's Cast screen ("From the library": adds a copy to that story, picture included).
-async function showCastLibrary(opts = {}) {
-  const list = await api("/cast-library"), inStory = !!(story && story.id && opts.pick !== false && story.cast);
-  const pic = (a) => a.image ? `<img src="${thumbUrl(a.image.split("?")[0], 360)}" alt="">` : `<span>${esc((a.name || "?").charAt(0).toUpperCase())}</span>`;
-  modal(`<h2>Character library</h2>
-    <p class="hint">Make characters once and use them in any story. A story gets its own copy (their look, face and picture), so changing it in a story never changes the library. The picture becomes their face reference there.</p>
-    <div class="cardgrid">${list.map((a) => `<div class="charcard avcard" data-id="${esc(a.id)}"><div class="avthumb">${pic(a)}</div>
-        <div class="meta"><b>${esc(a.name)}</b><small>${esc(oneLine(a.appearance || "", 70)) || "no description yet"}</small>
-        <div class="avbtns"><button data-edit="${esc(a.id)}">Edit</button>${inStory ? `<button data-use="${esc(a.id)}" class="primary">Add to story</button>` : ""}</div></div></div>`).join("")}
-      <button class="charcard addcard" id="clNew"><div class="noart">＋ New character</div></button></div>
-    <div class="actions"><button id="mClose">${inStory ? "← Cast" : "Close"}</button></div>`);
-  $("mClose").onclick = () => { if (inStory && typeof showCast === "function") showCast("Characters"); else closeModal(); };
-  $("clNew").onclick = () => showCastLibraryEditor(null, opts);
-  document.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => showCastLibraryEditor(b.dataset.edit, opts));
-  document.querySelectorAll("[data-use]").forEach((b) => b.onclick = async () => {
-    b.disabled = true; b.textContent = "Adding…";
-    try { story = await api(`/stories/${story.id}/cast/from-library`, { method: "POST", body: { id: b.dataset.use } }); if (typeof renderAll === "function") renderAll(); showCast("Characters"); }
-    catch (err) { alert(err.message); showCastLibrary(opts); }
-  });
-}
+async function showCastLibrary(opts = {}) { return showLibrary("Characters", opts); }   // the character cards live in the Library window now
 
 async function showCastLibraryEditor(id, opts = {}) {
   let c = id ? (await api("/cast-library")).find((x) => x.id === id) : { id: null, name: "", appearance: "", face: "", personality: "", bio: "", image: "" };

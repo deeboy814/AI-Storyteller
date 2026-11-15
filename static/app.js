@@ -24,7 +24,7 @@ function inlineMd(text) {
       l = l.replace(/!\[[^\]]*\]\(intro:([^)]+)\)/g, (_, name) => { imgs += introPanelHtml(name); return ""; });
       l = l.replace(/!\[[^\]]*\]\(place:([^)]+)\)/g, (_, name) => { imgs += placeHtml(name); return ""; });
       l = l.replace(/^&gt;\s?/, "");   // "> quote" marker: show the text without it
-      l = l.replace(/!\[[^\]]*\]\((\/(?:static|portraits)\/[^)\s]*)\)/g, (_, u) => { imgs += `<img class="portrait" src="${u}">`; return ""; })
+      l = l.replace(/!\[[^\]]*\]\((\/(?:static|portraits)\/[^)\s]*)\)/g, (_, u) => { imgs += `<img class="portrait" src="${u}" data-name="${esc(decodeURIComponent(u.split("?")[0].split("/").pop().replace(/\.[a-z0-9]+$/i, "")))}">`; return ""; })
            .replace(/!\[[^\]]*\]\([^)]*\)/g, "");
       // Asterisks that are literal text (escaped \*, or inside a word like f**k / b*tch) must not
       // be read as bold/italic markers. Park them as \u0001 while formatting, then restore.
@@ -77,7 +77,6 @@ setInterval(refreshCache, 30000);
 
 // ---------- rendering ----------
 function renderHeader() {
-  const eb = $("btnEndings"); if (eb) eb.classList.toggle("hidden", !(story && (story.endings || []).length));
   $("title").textContent = story ? story.title : "AI Storyteller";
   const te = $("titleEdit");
   te.classList.toggle("hidden", !story);
@@ -350,8 +349,28 @@ async function undo() {
 
 // ---------- modals ----------
 let artBack = null;   // set while a screen opened from the 🖼 Art menu is showing: a "← Art menu" button on top of it reopens the menu
+let storyNav = null;  // set while a window opened from the 📝 Story button is showing: its tab strip (Story, Narration, Options, Memory, Beats, Endings) goes on top of it
+let modalDirty = false;
+const STORY_TABS = [["Story", "📝 Story"], ["Narration", "🎙 Narration"], ["Options", "⚙ Writing & panel"], ["Memory", "🧠 Memory"], ["Beats", "📅 Beats"], ["Endings", "🏁 Endings"]];
+// The 📝 Story button: one window with tabs. Each tab is the same screen that used to have its own button.
+function showStoryHub(tab = "Story") {
+  if (!story) return editStory(null);                 // no story open: this is where a new one is made
+  if (modalDirty && !confirm("Leave without saving the changes on this page?")) return;
+  storyNav = tab;
+  ({ Story: () => editStory(story), Narration: () => showNarration(), Options: () => showSettings("Story", { only: true }), Memory: () => showMemory(), Beats: () => showBeats(), Endings: () => showEndings() }[tab] || (() => editStory(story)))();
+}
 function modal(html) {
   $("modalCard").className = "card"; $("modalCard").innerHTML = html; $("modal").classList.remove("hidden");
+  modalDirty = false;
+  if (storyNav && story) {
+    const has = (t) => t !== "Endings" || (story.endings || []).length;
+    const strip = document.createElement("div");
+    strip.className = "tabs storytabs";
+    strip.innerHTML = STORY_TABS.filter(([t]) => has(t)).map(([t, l]) => `<button type="button" class="tab${t === storyNav ? " on" : ""}" data-st="${t}">${l}</button>`).join("");
+    strip.querySelectorAll("button").forEach((b) => b.onclick = () => { if (b.dataset.st !== storyNav) showStoryHub(b.dataset.st); });
+    $("modalCard").prepend(strip);
+  }
+  const mc = $("modalCard"); mc.oninput = mc.onchange = () => { modalDirty = true; };
   if (artBack) {
     const b = document.createElement("button");
     b.type = "button"; b.className = "backart"; b.textContent = "← Art menu";
@@ -371,7 +390,7 @@ function foldLongHints(root) {
   });
 }
 let onModalClose = null;
-function closeModal() { artBack = null; $("modal").classList.add("hidden"); if (onModalClose) onModalClose(); }
+function closeModal() { artBack = null; storyNav = null; modalDirty = false; $("modal").classList.add("hidden"); if (onModalClose) onModalClose(); }
 $("modal").addEventListener("mousedown", (e) => { if (e.target === $("modal")) closeModal(); });
 
 // Import a story played elsewhere: memory summary + latest status panel (+ optional last few turns word for word).
@@ -453,6 +472,18 @@ async function fillStyleBoxes() {
     const P = await api("/style-presets"), cur = (story && story.style) || {};
     box.innerHTML = Object.entries(P).map(([k, g]) => `<label>${esc(g.label)}</label><select data-style="${k}">${g.options.map((o) => `<option value="${esc(o.id)}" title="${esc(o.hint)}" ${o.id === (cur[k] || "") ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select>`).join("");
   } catch (e) { box.innerHTML = `<span class="hint">Could not load the styles: ${esc(e.message)}</span>`; }
+  // Previews: this story's narrator writes a few lines of the current moment with the options as chosen right now (even before Save).
+  const run = async (only, btn) => {
+    const out = $("pvOut"); out.classList.remove("hidden"); out.textContent = "The narrator is writing…";
+    document.querySelectorAll("#pvAll, #pvSarcasm, #pvWall").forEach((b) => b.disabled = true);
+    try {
+      const r = await api(`/stories/${story.id}/style-preview`, { method: "POST", body: { style: styleChosen(), only } });
+      const label = only ? (document.querySelector(`[data-style="${only}"]`) || { selectedOptions: [{ text: "" }] }).selectedOptions[0].text : Object.values(r.used).length + " option" + (Object.values(r.used).length === 1 ? "" : "s");
+      out.innerHTML = `<div class="hint">${only ? "Preview: " + esc(label) : "Preview with " + esc(label)} · ${esc(r.model)}</div><div style="white-space:pre-wrap;margin-top:4px">${esc(r.text)}</div>`;
+    } catch (e) { out.textContent = e.message; }
+    document.querySelectorAll("#pvAll, #pvSarcasm, #pvWall").forEach((b) => b.disabled = false);
+  };
+  if ($("pvAll")) { $("pvAll").onclick = () => run(null); $("pvSarcasm").onclick = () => run("sarcasm"); $("pvWall").onclick = () => run("fourth_wall"); }
 }
 function showPlayer() {
   if (!story) return;
@@ -461,8 +492,7 @@ function showPlayer() {
     ? `<div><label>${label}</label><textarea class="short" id="av_${key}" rows="${rows}">${esc(av[key] || "")}</textarea></div>`
     : `<div><label>${label}</label><input id="av_${key}" value="${esc(av[key] || "")}"></div>`;
   const preview = () => story.avatar_image ? `<img class="avatar" src="${story.avatar_image}" alt="">` : '<div class="avatar noimg">No image</div>';
-  modal(`<h2>Player</h2>
-    <div class="tabs"><button class="tab on" data-tab="Avatar">Avatar</button><button class="tab" data-tab="Notes">User notes</button></div>
+  modal(`<h2>Avatar</h2>
     <div id="tabAvatar">
       ${config.avatar_library ? avatarLibraryRow() : ""}
       <div class="avrow"><div id="avPreview">${preview()}</div>
@@ -475,21 +505,8 @@ function showPlayer() {
       ${field("appearance", "Appearance", 3)}${field("personality", "Personality", 3)}${field("background", "Background", 3)}
       ${field("abilities", "Abilities / stats / starting inventory", 3)}
     </div>
-    <div id="tabNotes" class="hidden">
-      <label>Narration style</label>
-      <div id="styleBoxes" class="chkgrid" style="grid-template-columns:1fr 2fr"><span class="hint">Loading…</span></div>
-      <p class="hint">One-click choices for this story. "As the story is written" leaves it to the story prompt. The story's own rules and formats always come first.</p>
-      <label>Standing instructions for the narrator</label>
-      <textarea id="uNotes" placeholder="e.g. Keep combat gritty and consequences permanent. Slow-burn romance. Never skip time without asking. Avoid repeating a character's catchphrase…">${esc(story.user_notes || "")}</textarea>
-      <p class="hint">Sent every turn, right after the story's memory. Edit any time; changes apply from the next turn.</p>
-    </div>
     <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="mSave">Save</button></div>`);
   if (config.avatar_library) avatarLibraryInit();
-  fillStyleBoxes();
-  document.querySelectorAll(".tab").forEach((b) => b.onclick = () => {
-    document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
-    for (const n of ["Avatar", "Notes"]) $("tab" + n).classList.toggle("hidden", n !== b.dataset.tab);
-  });
   const refresh = () => { $("avPreview").innerHTML = preview(); renderSidebar(); };
   $("avFile").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
@@ -537,7 +554,27 @@ function showPlayer() {
   $("mSave").onclick = async () => {
     const avatar = {};
     for (const k of ["name", "gender", "age", "appearance", "personality", "background", "abilities"]) avatar[k] = $("av_" + k).value;
-    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar, user_notes: $("uNotes").value, style: document.querySelector("[data-style]") ? styleChosen() : null } });
+    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar, user_notes: story.user_notes || "", style: null } });      // (notes and narration style are saved in 📝 Story → Narration)
+    closeModal(); renderAll();
+  };
+}
+// 📝 Story → Narration: the one-click narration styles (with previews) and the standing instructions for the narrator.
+function showNarration() {
+  if (!story) return;
+  modal(`<h2>Narration</h2>
+      <label>Narration style</label>
+      <div id="styleBoxes" class="chkgrid" style="grid-template-columns:1fr 2fr"><span class="hint">Loading…</span></div>
+      <p class="hint">One-click choices for this story. "As the story is written" leaves it to the story prompt. The story's own rules and formats always come first.</p>
+      <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button type="button" id="pvAll" title="The narrator writes a few lines of the story's current moment with every option chosen above (one small model call, nothing is saved)">▶ Preview narration</button><button type="button" id="pvSarcasm" title="A few lines with only the Sarcasm choice">▶ Preview sarcasm</button><button type="button" id="pvWall" title="A few lines with only the Fourth wall choice">▶ Preview fourth wall</button></div>
+      <div id="pvOut" class="aiBox hidden" role="status"></div>
+      <label>Standing instructions for the narrator</label>
+      <textarea id="uNotes" placeholder="e.g. Keep combat gritty and consequences permanent. Slow-burn romance. Never skip time without asking. Avoid repeating a character's catchphrase…">${esc(story.user_notes || "")}</textarea>
+      <p class="hint">Sent every turn, right after the story's memory. Edit any time; changes apply from the next turn.</p>
+    <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="mSave">Save</button></div>`);
+  fillStyleBoxes();
+  $("mClose").onclick = closeModal;
+  $("mSave").onclick = async () => {
+    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar: story.avatar || {}, user_notes: $("uNotes").value, style: styleChosen() } });
     closeModal(); renderAll();
   };
 }
@@ -551,7 +588,7 @@ function currentChoices() { // what this story uses right now, including older s
   if (out.images && !out.images.model) out.images = null;
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v));
 }
-async function showSettings(tab = "AI") {
+async function showSettings(tab = "AI", opts = {}) {
   config = await api("/config");
   const provHtml = (p, i) => `<div class="prov" data-i="${i}"><label>Provider name</label><input data-f="name" value="${esc(p.name)}">
     <div class="grid2" style="grid-template-columns:1fr 2fr"><div><label>Type</label><select data-f="type"><option value="ollama">ollama (local)</option><option value="anthropic">anthropic (Claude)</option><option value="openai">openai-compatible</option></select></div>
@@ -560,7 +597,7 @@ async function showSettings(tab = "AI") {
     <label>Models (comma-separated${p.type === "ollama" ? "; installed ones are found automatically" : "; found automatically once a key is saved"})</label><input data-f="models" value="${esc((p.models || []).join(", "))}">
     <div class="actions" style="margin-top:8px"><button class="danger" data-rm="${i}">Remove provider</button></div></div>`;
   const field = (label, control, help = "") => `<div class="field"><label>${label}</label>${control}${help ? `<div class="hint">${help}</div>` : ""}</div>`;
-  modal(`<h2>Settings</h2>
+  modal(`<h2>${opts.only ? "Writing & side panel" : "Settings"}</h2>
     <div class="tabs"><button class="tab stt" data-t="AI">AI models</button><button class="tab stt" data-t="Story">Story &amp; narration</button><button class="tab stt" data-t="Memory">Memory &amp; cost</button><button class="tab stt" data-t="Appearance">Appearance</button><button class="tab stt" data-t="Phone">Phone &amp; tablet</button><button class="tab stt" data-t="Local">Local models</button><button class="tab stt" data-t="Backup">Libraries &amp; backup</button></div>
 
     <div class="stpane" data-p="AI">
@@ -628,13 +665,6 @@ async function showSettings(tab = "AI") {
       <label class="chk top"><input type="checkbox" id="sLocal" ${config.local_mode ? "checked" : ""}><span><b>Local-model mode (steadier writing)</b><span class="hint">One switch for the app's own writing helpers, which cost no AI calls. With any model, online or local: removes the unfinished last sentence of a reply cut off by the length limit, closes unclosed italics, bold and picture tags, and tells the narrator which phrases it keeps repeating and when replies drift from the story's usual length. With Ollama models only (an online model gains nothing from them): keeps the prompt inside the model's window (dropping the oldest history if needed, and folding history into the summary sooner), forces clean JSON from the helper jobs, uses steadier sampling, runs helper jobs one at a time after the reply is written, fills the right-now card and scene-picture prompts without the AI (mood read from the words around a name when there is no portrait tag), and logs key events once every third reply. Turn it off to go back to normal.</span></span></label>
       <label class="chk top"><input type="checkbox" id="sRtText" ${config.rt_text ? "checked" : ""}><span><b>Manage local text models automatically</b><span class="hint">When you open a story (or change its AI), its local model is loaded and ready, and local models no story is using are unloaded to free video memory. Turn off to leave Ollama alone.</span></span></label>
       <div class="grid2">${field("Unload an idle model after", `<input id="sKeep" value="${esc(config.keep_alive || "30m")}">`, "e.g. 10m, 30m, 2h. Ollama frees the model itself after this much time without a turn; it reloads automatically at your next turn.")}<div></div><div></div></div>
-      <h3>Picture generator (ComfyUI)</h3>
-      <div class="hint">Its address and which checkpoint to use are under <b>🖼 Art → Picture makers</b> inside a story; this section only controls starting and stopping it.</div>
-      <label class="chk top"><input type="checkbox" id="sRtComfy" ${config.rt_comfy ? "checked" : ""}><span><b>Start and stop ComfyUI automatically</b><span class="hint">ComfyUI starts when you open a story that draws pictures locally (or when a picture is asked for), and shuts down after it has been idle for the time below. Starting takes about 15 to 30 seconds.</span></span></label>
-      <div class="grid2">${field("Idle time before it stops", `<input id="sRtIdle" type="number" min="1" step="1" value="${config.rt_comfy_idle_min ?? 15}">`, "minutes without drawing. Pictures are drawn in bursts, so a longer time than for text suits it.")}
-        ${field("When idle", `<select id="sRtMode"><option value="stop">Stop ComfyUI completely</option><option value="free">Keep it running, free its video memory</option></select>`, "Stopping frees the most; keeping it running restarts faster.")}<div></div></div>
-      ${field("How to start ComfyUI", `<input id="sRtCmd" value="${esc(config.rt_comfy_cmd || "")}" placeholder="~/ComfyUI/start.sh, or start.bat on Windows (default)">`, "A command or script path on this computer. Leave empty for the default.")}
-      <label class="chk top"><input type="checkbox" id="sRtSwap" ${config.rt_swap !== false ? "checked" : ""}><span><b>Make room for pictures</b><span class="hint">If video memory is short when a local picture is about to be drawn, the local text model is unloaded first (it reloads at your next turn). Helpful on 12 GB cards that can't hold both.</span></span></label>
     </div>
 
     <div class="stpane hidden" data-p="Phone">
@@ -644,6 +674,11 @@ async function showSettings(tab = "AI") {
       <label class="chk top"><input type="checkbox" id="sLanRestart" ${config.lan_restart ? "checked" : ""} ${isThisComputer() ? "" : "disabled"}><span><b>Let phones and tablets restart the app</b><span class="hint">Off by default. When on, a phone or tablet that is already connected (it has entered the PIN) gets a Restart button on its Home screen, for when the app is stuck and you are away from the computer. It can only restart the app, never close it, and it cannot change this setting: ${isThisComputer() ? "only this computer can." : "turn it on at the computer."} Phone and tablet access must be on and the app restarted once before phones can connect.</span></span></label>
     </div>
     <div class="stpane hidden" data-p="Backup">
+      ${story ? `<h3>This story</h3><div class="hint">Save “${esc(story.title)}” as text, an illustrated page, a story package or a backup.</div>
+      <div class="actions" style="justify-content:flex-start"><button id="sExport">📤 Export “${esc(story.title)}”…</button></div>` : ""}
+      <h3>Storage</h3>
+      <div class="hint">Disk use, clean-up, and stories you deleted (restore them).</div>
+      <div class="actions" style="justify-content:flex-start"><button id="sStorage">🗂 Storage &amp; deleted stories…</button></div>
       <h3>Something went wrong?</h3>
       <div class="hint">Make a bug report file (how far your game got, the problems the app can find, recent errors) with personal data removed, to attach to a problem report.</div>
       <div class="actions" style="justify-content:flex-start"><button id="sBugReport">🐞 Report a bug…</button></div>
@@ -653,7 +688,6 @@ async function showSettings(tab = "AI") {
       <h3>Reuse across stories</h3>
       <div class="hint">Both are off by default and work independently.</div>
       <label class="chk top"><input type="checkbox" id="sAvLib" ${config.avatar_library ? "checked" : ""}><span><b>Avatar library</b><span class="hint">Create several player avatars (a sheet and a picture each) and reuse them in any story. Each story uses exactly one, as its own copy. Adds a 🧑 Avatars button on the Home screen and a library row in Player → Avatar.</span></span></label>
-      <label class="chk top"><input type="checkbox" id="sReuse" ${config.reuse_art ? "checked" : ""}><span><b>Reuse character art across stories</b><span class="hint">Borrow a character's pictures from another story as a face reference (Cast → character → Images). Only identity carries over: each story's own art style and setting still apply, so the character looks like they belong to the new story.</span></span></label>
       <h3>Back up everything</h3>
       <div class="hint">One .zip with all your stories, character pictures, scene pictures, avatars, usage log and settings. Your per-story backups (🧠 → Backups) protect against bad edits; this protects against a lost or broken disk, so keep a copy on another drive.</div>
       <label class="chk top"><input type="checkbox" id="bkKeys"><span><b>Include API keys</b><span class="hint">Off by default. If you include them, keep the file private.</span></span></label>
@@ -672,11 +706,15 @@ async function showSettings(tab = "AI") {
   $("modalCard").classList.add("tall");   // same window size on every tab
   const showTab = (t) => { document.querySelectorAll(".stt").forEach((b) => b.classList.toggle("on", b.dataset.t === t)); document.querySelectorAll(".stpane").forEach((p) => p.classList.toggle("hidden", p.dataset.p !== t)); };
   document.querySelectorAll(".stt").forEach((b) => b.onclick = () => showTab(b.dataset.t));
+  if (opts.only) { tab = "Story"; document.querySelector(".stt").parentElement.classList.add("hidden"); }          // 📝 Story → Options: only the story & narration settings
+  else if (story) { const st = document.querySelector('.stt[data-t="Story"]'); if (st) st.classList.add("hidden"); if (tab === "Story") tab = "AI"; }   // in a story they live under 📝 Story; with no story open (Home) they stay here for new stories
   showTab(tab);
   document.querySelectorAll(".prov").forEach((el, i) => el.querySelector('[data-f="type"]').value = config.providers[i].type);
   $("sTtl").value = config.cache_ttl || "5m";
   document.querySelectorAll(".stpane").forEach((p) => collapsify(p));   // each section can be minimised; the first of each tab starts open
   $("sUsage").onclick = () => showUsage();
+  if ($("sExport")) $("sExport").onclick = () => showExport();
+  $("sStorage").onclick = () => showStorage();
   $("sbDefault").value = config.sidebar_default_mode || "prompt";
   if (story) {
     const SBH = { prompt: "Shows whatever the story prompt's own status panel or state block provides, and nothing extra.", player: "Shows only the fields you tick. Read from the story's status panel when it writes one; otherwise the AI reads each reply (one small background call).", ai: "The AI reads your story prompt, decides what is worth tracking, and updates it after each reply (one small background call)." };
@@ -736,7 +774,6 @@ async function showSettings(tab = "AI") {
       $("bkRestoreNote").textContent = `Restored ${j.files} files (${j.stories} stories). Reloading…`; setTimeout(() => location.reload(), 1500);
     } catch (err) { $("bkRestoreNote").textContent = err.message; }
   };
-  $("sRtMode").value = config.rt_comfy_mode || "stop";
   const rtRefresh = async () => {
     try {
       const r = await api("/runtime"), loaded = r.ollama.loaded.map((m) => `${esc(m.name)} (${m.size_gb} GB)`).join(", ") || "nothing loaded";
@@ -747,9 +784,11 @@ async function showSettings(tab = "AI") {
   $("rtFree").onclick = async (e) => { e.target.disabled = true; await api("/runtime/free", { method: "POST" }); await rtRefresh(); e.target.disabled = false; };
   let styleBox = null;
   const picker = mountAIChooser($("aiPick"), { initial: currentChoices(), roles: ["story", "recaps", "small"] });
-  const imgPicker = mountAIChooser($("aiPickImg"), { initial: currentChoices(), roles: ["images"] });   // hidden: only tells the art-style list which picture maker is chosen (changed in 🖼 Art → Picture makers)
-  styleBox = mountArtStyle($("artStyleBox"), imgPicker, story ? (story.art || {}).direction || "" : config.default_art_direction || "");
-  imgPicker.ready.then(() => styleBox.render());
+  if (!story) {      // the default art style for new stories (inside a story the style is chosen in 🖼 Art → Style & options)
+    const imgPicker = mountAIChooser($("aiPickImg"), { initial: currentChoices(), roles: ["images"] });   // hidden: only tells the art-style list which picture maker is chosen
+    styleBox = mountArtStyle($("artStyleBox"), imgPicker, config.default_art_direction || "");
+    imgPicker.ready.then(() => styleBox.render());
+  } else $("artStyleBox").classList.add("hidden");
   $("sThink").value = config.claude_thinking ? "on" : "off";
   $("sEffort").value = config.claude_effort || "low";
   $("sEvents").value = config.events_mode || "every";
@@ -777,10 +816,10 @@ async function showSettings(tab = "AI") {
     config.budget_daily = +$("sBudD").value || 0; config.budget_monthly = +$("sBudM").value || 0; config.budget_action = $("sBudAct").value;
     config.backup_auto_days = +$("bkDays").value || 0; config.backup_keep = +$("bkKeep").value || 5; config.backup_dir = $("bkDir").value.trim();
     config.sidebar_default_mode = $("sbDefault").value;
-    const styleDir = styleBox.get(), styleChanged = styleDir !== (story ? (story.art || {}).direction || "" : config.default_art_direction || "");
-    if (styleChanged || styleDir) config.default_art_direction = styleDir;   // new stories start with it
-    config.local_mode = $("sLocal").checked; config.rt_text = $("sRtText").checked; config.rt_comfy = $("sRtComfy").checked; config.rt_comfy_idle_min = +$("sRtIdle").value || 15; config.rt_comfy_mode = $("sRtMode").value; config.rt_comfy_cmd = $("sRtCmd").value.trim(); config.rt_swap = $("sRtSwap").checked;
-    config.avatar_library = $("sAvLib").checked; config.reuse_art = $("sReuse").checked;
+    const styleDir = styleBox ? styleBox.get() : null, styleChanged = !!styleBox && styleDir !== (config.default_art_direction || "");
+    if (styleBox && (styleChanged || styleDir)) config.default_art_direction = styleDir;   // new stories start with it
+    config.local_mode = $("sLocal").checked; config.rt_text = $("sRtText").checked;
+    config.avatar_library = $("sAvLib").checked;
     config.lan_access = $("sLan").checked; if (isThisComputer()) config.lan_restart = $("sLanRestart").checked; config.update_check = $("sUpd").checked;
     config.keep_warm = $("sWarm").checked; config.keep_warm_hours = +$("sWarmH").value || 2;
     config.summarize_when = +$("sWhen").value || 24; config.keep_recent = +$("sRecent").value || 10;
@@ -795,7 +834,9 @@ async function showSettings(tab = "AI") {
       const custom = sbTrk ? sbTrk.get() : (old.custom || []), strip = (l) => JSON.stringify((l || []).map((f) => [f.label, f.scope || f.id.split(".")[0], f.kind, f.min ?? null, f.max ?? null, String(Array.isArray(f.options) ? f.options.join(",") : f.options || ""), f.unit || "", f.note || "", String(Array.isArray(f.levels) ? f.levels.join(",") : f.levels || "").replace(/\s+/g, ""), String(f.max_level ?? ""), String(((l || []).find((h) => h.id && h.id === f.counts) || {}).label || f.counts || "").toLowerCase(), (Array.isArray(f.spend_on) ? f.spend_on.map((x) => ((l || []).find((h) => h.id === x) || {}).label || x).join(",") : String(f.spend_on || "")).toLowerCase().replace(/\s+/g, ""), String(f.spend_cap ?? "")]));
       if (mode !== old.mode || JSON.stringify(fields) !== JSON.stringify(old.fields || []) || strip(custom) !== strip(old.custom)) story = await api(`/stories/${story.id}/sidebar`, { method: "PUT", body: { mode, fields, custom } });
     }
-    if (story && styleChanged) story = await api(`/stories/${story.id}/art`, { method: "PUT", body: { ...story.art, direction: styleDir, setting: (story.art || {}).setting ?? null } });
+    const pickedStyle = styleBox ? styleBox.id() : "";
+    if (story && pickedStyle) { story = await api(`/stories/${story.id}/art-styles/${encodeURIComponent(pickedStyle)}/apply`, { method: "POST" }); config = await api("/config"); }   // the style's whole look, not only its words
+    else if (story && styleChanged) story = await api(`/stories/${story.id}/art`, { method: "PUT", body: { ...story.art, direction: styleDir, setting: (story.art || {}).setting ?? null } });
     if (story && $("sNsfw")) { const on = $("sNsfw").checked; if (on !== !!story.nsfw) story = await api(`/stories/${story.id}/nsfw?on=${on}`, { method: "PUT" }); }
     closeModal(); await loadModels(); renderAll(); runtimeSelect(); refreshBudget();
     if (!$("home").classList.contains("hidden")) showHome();
@@ -907,18 +948,11 @@ bindTools();
   menu.onclick = () => setMenu(!tools.classList.contains("open"));
   tools.addEventListener("click", e => { if (e.target.closest("button")) setMenu(false); });
   document.addEventListener("click", e => { if (tools.classList.contains("open") && !e.target.closest("#tools, #btnMenu")) setMenu(false); }); }
-$("btnEdit").onclick = () => story ? editStory(story) : editStory(null);
+$("btnStory").onclick = () => showStoryHub();
 $("btnSettings").onclick = () => showSettings();
-$("btnPlayer").onclick = showPlayer;
-$("btnMemory").onclick = showMemory;
-$("btnJournal").onclick = () => showJournal();
-$("btnItems").onclick = () => showInventory();
-$("btnEndings").onclick = showEndings;
-$("btnCast").onclick = () => showCast();
 $("btnArt").onclick = () => showArtHub();
 $("btnIllustrate").onclick = () => illustrate();
 $("btnReplies").onclick = () => fetchReplies(true);
-$("btnBeats").onclick = () => showBeats();
 $("btnContinue").onclick = () => { if (busy || !story || !story.turns.length) return; sendCommand("continue"); };
 $("narrative").addEventListener("scroll", () => { const at = narrativeAtBottom(); if (at && !wasAtBottom) maybeShowReplies(); wasAtBottom = at; });
 $("modelSelect").onchange = async (e) => {

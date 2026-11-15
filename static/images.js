@@ -13,7 +13,7 @@ function applyPortraitSize() {
 // Intro / webtoon panels: ![](intro:It1) in the opening scene shows the story's panel named It1.
 function introPanelHtml(name) {
   const im = ((story && story.intro_images) || []).find((p) => p.name.toLowerCase() === name.trim().toLowerCase());
-  return im ? `<a href="${im.url}" target="_blank"><img class="intro-panel" src="${thumbUrl(im.url, 1100)}" alt=""></a>` : "";
+  return im ? `<a href="${im.url}" target="_blank"><img class="intro-panel" src="${thumbUrl(im.url, 1100)}" alt="" data-name="${esc(im.name)}"></a>` : "";
 }
 // A place picture (![](place:Old library)): a fixed picture of a room or location the story returns to often.
 function placeHtml(name) {
@@ -78,7 +78,8 @@ function portraitHtml(spec) {
   const p = portraitInfo(spec);
   if (!p) return "";
   const crop = isActionMood(p.mood) && p.exact;     // action pictures (combat, dead, showering...): show the upper body here; a click opens the whole picture
-  let h = p.url ? `<img class="npcpic${crop ? " upper" : ""}" loading="lazy" src="${thumbUrl(p.url, 640)}" alt="">` : "";
+  const shown = Object.entries(p.ch.moods || {}).find(([, u]) => u === p.url), label = `${p.ch.name}${shown ? ` · ${shown[0]}` : ""}`;    // the name of the picture on screen, shown when it is opened full screen
+  let h = p.url ? `<img class="npcpic${crop ? " upper" : ""}" loading="lazy" src="${thumbUrl(p.url, 640)}" alt="" data-name="${esc(label)}">` : "";
   const key = p.ch.slug + "|" + p.mood;
   if (!p.exact && /^[a-z0-9][a-z0-9 _-]{0,29}$/.test(p.mood) && (p.ch.appearance || "").trim() && !newMoodSeen.has(key)) {
     newMoodSeen.add(key);
@@ -206,7 +207,7 @@ function showImportPortraits() {
 // ---------- art style dropdown on AI & story (under Pictures) ----------
 // Offers the styles that make sense for what the app found: your local checkpoint(s) and any online picture service with a key.
 function mountArtStyle(el, picker, current) {
-  let value = current || "";
+  let value = current || "", picked = "";   // picked = the id of a style chosen in this window (applied in full when settings are saved)
   const render = () => {
     const o = picker.opts(); if (!o) { el.innerHTML = ""; return; }
     const ch = picker.choice("images"), imgs = o.images || [];
@@ -217,17 +218,25 @@ function mountArtStyle(el, picker, current) {
       const fams = new Set(local.flatMap((p) => p.models.map((m) => modelFamily(m.id) || "any")));
       styles = fams.has("any") ? ART_STYLES : ART_STYLES.filter((s) => s.family === "any" || fams.has(s.family));
     }
-    const match = ART_STYLES.find((s) => s.direction === value);
+    const match = ART_STYLES.find((s) => s.id === picked) || ART_STYLES.find((s) => s.direction === value);
     const star = (s) => (fam && s.family === fam ? " ★" : "");
     const none = !online && !local.length;
     el.innerHTML = `<div class="field"><label>Art style <small class="muted">for ${story ? "this story's" : "new stories'"} pictures</small></label>
       <select id="sArtStyle" ${none ? "disabled" : ""}><option value="">${value && !match ? "Keep my own style" : "No style chosen"}</option>${styles.map((s) => `<option value="${esc(s.id)}" ${match && match.id === s.id ? "selected" : ""}>${esc(s.label)}${star(s)}</option>`).join("")}</select>
+      ${story ? `<div class="row" style="gap:.5rem;margin-top:.4rem"><button class="ghost small" id="sArtSave" type="button">Save this story's whole picture look as a style…</button>${match && match.user ? `<button class="ghost small" id="sArtDel" type="button">Delete “${esc(match.label)}”</button>` : ""}</div>` : ""}
       <div class="hint">${none ? "Add an API key for Gemini, Grok or OpenAI, or start ComfyUI with a checkpoint, and styles that suit them appear here."
         : `Styles for ${[online ? "your online picture services" : "", local.length ? "your local checkpoint" + (local[0].models.length > 1 ? "s" : "") : ""].filter(Boolean).join(" and ")}${fam ? ". ★ = suits the selected checkpoint" : ""}. You can still write your own in the story's Art tab.`}</div></div>`;
     const sel = el.querySelector("#sArtStyle");
-    sel.onchange = () => { const st = ART_STYLES.find((x) => x.id === sel.value); if (st) value = st.direction; else if (!sel.value && !match) { /* keep own */ } else value = ""; };
+    sel.onchange = () => { const st = ART_STYLES.find((x) => x.id === sel.value); picked = st ? st.id : ""; if (st) value = st.direction; else if (!sel.value && !match) { /* keep own */ } else value = ""; };
+    const reload = async () => { ART_STYLES = await (await fetch("/api/art-styles")).json(); render(); };
+    const sv = el.querySelector("#sArtSave"), dl = el.querySelector("#sArtDel");
+    if (sv) sv.onclick = async () => {
+      const label = (prompt("Name this style (it copies this story’s art direction, avoid-words, picture sizes and shapes, picture maker with its LoRAs and extra words, each picture category’s prompt wording, adult-picture maker and backdrop maker):", "") || "").trim(); if (!label) return;
+      try { await api(`/stories/${story.id}/art-styles`, { method: "POST", body: { label } }); await reload(); } catch (e) { alert(e.message); }
+    };
+    if (dl) dl.onclick = async () => { if (!confirm(`Delete the style “${match.label}”? Stories already using it keep their pictures and settings.`)) return; try { await api(`/art-styles/${match.id}`, { method: "DELETE" }); picked = ""; await reload(); } catch (e) { alert(e.message); } };
   };
-  return { render, get: () => value };
+  return { render, get: () => value, id: () => picked };
 }
 
 // ---------- art style presets ----------
@@ -607,8 +616,7 @@ function showCharacter(slug, tab = "Bio") {
     box.innerHTML = `<p class="hint" style="margin-bottom:2px">What your story prompt says about them:</p>` + r.lines.map((l, i) => `<div class="pline"><span>${esc(oneLine(l, 260))}</span><button class="usebio" data-i="${i}">Use as bio</button></div>`).join("");
     box.querySelectorAll(".usebio").forEach((b) => b.onclick = () => { $("chBioText").value = r.lines[+b.dataset.i]; });
   }).catch(() => {});
-  if ($("chFaceLora")) { const cur = c.face_lora || "", fillLoras = (list) => { const sel = $("chFaceLora"); if (!sel) return; const names = [...new Set([...(list || []), ...(cur ? [cur] : [])])]; sel.innerHTML = '<option value="">(none)</option>' + names.map((n) => `<option value="${esc(n)}">${esc(n)}${list && list.includes(n) ? "" : " (not found in ComfyUI)"}</option>`).join(""); sel.value = cur; };
-    fillLoras(null); api("/model-options").then((o) => { const p = (o.images || []).find((x) => (x.loras || []).length); fillLoras(p ? p.loras : []); }).catch(() => {}); }
+  if ($("chFaceLora")) bindLoraSelect($("chFaceLora"), c.face_lora || "", () => ($("chMaker") ? $("chMaker").value : c.maker) || c.maker || "", $("chMaker"));
   if ($("chMaker")) { makerSelect($("chMaker"), [["", "Same as the story"]], c.maker || ""); makerChoices().then((ch) => { if ($("chMaker")) makerSelect($("chMaker"), ch, c.maker || ""); }); }
   $("chSave").onclick = async () => {
     const name = $("chName").value.trim(); if (!name) { status("chStatus", "Give the character a name."); return; }
@@ -824,7 +832,7 @@ async function makerChoices() {
     for (const p of o.images || []) {
       const grp = p.name + (p.ready ? "" : p.local ? " (not running)" : " (needs an API key)");
       for (const m of p.models || []) {
-        const kind = m.kind === "flux" ? " (FLUX: reference pictures)" : m.kind === "chroma" ? " (Chroma)" : m.kind === "qwen" ? " (Qwen-Image)" : m.kind === "anima" ? " (Anima)" : p.local ? " (text only)" : "";
+        const kind = m.kind === "flux" ? " (FLUX: reference pictures)" : m.kind === "chroma" ? " (Chroma)" : m.kind === "qwen" ? " (Qwen-Image)" : m.kind === "krea2" ? " (Krea 2)" : m.kind === "anima" ? " (Anima)" : p.local ? " (text only)" : "";
         out.push(["model:" + p.id + ":" + m.id, m.id.replace(/\.safetensors$/, "") + kind, grp]);
       }
     }
@@ -841,6 +849,8 @@ function makerSelect(sel, choices, cur) {
   sel.value = cur || "";
 }
 
+// The adult-picture maker settings the open story uses: the app's default (chosen with no story open) with the story's own choices over it.
+function nsNow(cfg) { return typeof story !== "undefined" && story ? { ...(cfg.image_nsfw || {}), ...(story.nsfw_pic || {}) } : (cfg.image_nsfw || {}); }
 function imageSettingsHtml(cfg) {
   const provs = cfg.image_providers || [];
   return `<h3>Picture settings</h3>
@@ -867,11 +877,11 @@ function imageSettingsHtml(cfg) {
       <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="imgBgStarter" type="button">Reset to the built-in workflow for this model</button><button id="imgBgTest" type="button">Test: draw a small backdrop</button></div>
       <div id="imgBgOut"></div>
     </div>
-    ${typeof story !== "undefined" && story && story.nsfw ? `<h3>Adult (NSFW) pictures</h3>
-    <label class="chk top"><input type="checkbox" id="imgNsOn" ${(cfg.image_nsfw || {}).on ? "checked" : ""}><span><b>Use a different picture maker for explicit pictures</b><span class="hint">Shown because this story has adult content on (Settings → AI &amp; story). Used only in stories with adult content on, and only for pictures that are explicit (a scene or picture type that mentions nudity or sex). Everything else keeps using your normal picture makers. Off by default.</span></span></label>
-    <div id="imgNsBox" class="${(cfg.image_nsfw || {}).on ? "" : "hidden"}">
+    ${typeof story === "undefined" || !story || story.nsfw ? `<h3>Adult (NSFW) pictures${typeof story !== "undefined" && story ? " for this story" : " (the default for new stories)"}</h3>
+    <label class="chk top"><input type="checkbox" id="imgNsOn" ${nsNow(cfg).on ? "checked" : ""}><span><b>Use a different picture maker for explicit pictures</b><span class="hint">Shown because this story has adult content on (Settings → AI &amp; story). Used only in stories with adult content on, and only for pictures that are explicit (a scene or picture type that mentions nudity or sex). Everything else keeps using your normal picture makers. Off by default.</span></span></label>
+    <div id="imgNsBox" class="${nsNow(cfg).on ? "" : "hidden"}">
       <label>Picture maker for explicit pictures</label>
-      <select id="imgNsMaker" style="min-width:260px">${(cfg.image_nsfw || {}).maker ? `<option value="${esc(cfg.image_nsfw.maker)}">${esc(cfg.image_nsfw.maker.replace("|", ": "))}</option>` : '<option value="">Loading…</option>'}</select>
+      <select id="imgNsMaker" style="min-width:260px">${nsNow(cfg).maker ? `<option value="${esc(nsNow(cfg).maker)}">${esc(nsNow(cfg).maker.replace("|", ": "))}</option>` : '<option value="">Loading…</option>'}</select>
       <details class="fold" id="imgNsTune" open><summary><b>Settings for this model (explicit pictures only)</b></summary>
         <div class="hint"><b>These settings are used only when this model draws an explicit picture.</b> They do not change the model when it draws anything else (its ordinary settings are under Picture services above), and each model keeps its own set.</div>
         ${[["ref_weight", "Face match strength (how closely the face follows Normal 1)", 0, 1.6, 0.05, 0.85],
@@ -897,17 +907,51 @@ function imageSettingsHtml(cfg) {
       </details>
 
       <label>Extra words added to its prompts <small class="hint">(empty = the app's choice for that model, shown faded)</small></label>
-      <input id="imgNsWords" value="${esc((cfg.image_nsfw || {}).words || "")}" placeholder="nsfw, explicit, uncensored, nude">
+      <input id="imgNsWords" value="${esc(nsNow(cfg).words || "")}" placeholder="nsfw, explicit, uncensored, nude">
       <label>Picture types and words that count as explicit <small class="hint">(comma separated, whole words or phrases; a short core list such as nude, naked and sex always counts)</small></label>
-      <textarea class="short" id="imgNsTypes" rows="4" placeholder="Loading the built-in list…">${esc((cfg.image_nsfw || {}).types || "")}</textarea>
+      <textarea class="short" id="imgNsTypes" rows="4" placeholder="Loading the built-in list…">${esc(nsNow(cfg).types || "")}</textarea>
       <div class="actions" style="justify-content:flex-start"><button type="button" id="imgNsTypesReset">Restore the built-in list</button></div>
       <div class="hint" id="imgNsNote"></div>
     </div>` : ""}`;
 }
+// ---------- LoRAs sorted by the model they work with ----------
+// ComfyUI's loras folder holds files for several kinds of model (SDXL / Illustrious, Chroma, FLUX, Anima, Krea 2...). The app reads what each was trained for and lists the ones that fit the
+// chosen model first, then the others by kind.
+const loraFit = (mf, lf) => (!mf || mf === "unknown" || !lf || lf === "unknown") ? "unknown" : lf === mf ? "yes" : (mf === "chroma" && lf === "flux1") ? "partly" : "no";
+function makerModelId(spec) {      // the model a species' or character's maker spec names ("" = the story's own picture model)
+  spec = String(spec || "");
+  if (spec.startsWith("model:")) return spec.split(":").slice(2).join(":");
+  if (spec.startsWith("ckpt:")) return spec.slice(5);
+  if (spec === "flux") return "flux-2-klein-4b-fp8.safetensors";
+  const m = ((typeof story !== "undefined" && story && story.models) || {}).images || ((typeof config !== "undefined" && config && config.default_models) || {}).images || {};
+  return m.model || "";
+}
+function loraOptionsHtml(p, modelId, current, none = true) {
+  const fams = (p && p.lora_families) || {}, labels = (p && p.lora_labels) || {}, have = (p && p.loras) || [];
+  const names = [...new Set([...have, ...(current ? [current] : [])])];
+  const m = ((p && p.models) || []).find((x) => x.id === modelId), mf = m ? m.family : "";
+  const fam = (n) => fams[n] || "unknown", opt = (n) => `<option value="${esc(n)}">${esc(n)}${have.includes(n) ? "" : " (not found in ComfyUI)"}</option>`;
+  const group = (label, list) => list.length ? `<optgroup label="${esc(label)}">${list.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })).map(opt).join("")}</optgroup>` : "";
+  const yes = names.filter((n) => loraFit(mf, fam(n)) === "yes"), partly = names.filter((n) => loraFit(mf, fam(n)) === "partly");
+  const rest = names.filter((n) => !yes.includes(n) && !partly.includes(n)), by = {};
+  rest.forEach((n) => (by[fam(n)] ||= []).push(n));
+  const order = ["sdxl", "chroma", "flux1", "flux2", "anima", "krea2", "qwen", "unknown"].filter((f) => by[f]);
+  const modelName = (modelId || "").replace(/\.(safetensors|gguf)$/i, "");
+  return (none ? '<option value="">(none)</option>' : "") + (mf ? group(`✔ Works with ${modelName}`, yes) + group("≈ Partly works (FLUX.1-style LoRAs on Chroma)", partly) : "")
+    + order.map((f) => group(`${mf ? "✖ For other models: " : ""}${labels[f] || f}`, by[f])).join("");
+}
+async function bindLoraSelect(sel, current, getSpec, makerSel) {      // fills a LoRA picker, grouped by what fits the chosen picture maker, and regroups when the maker changes
+  let prov = null;
+  const render = () => { const keep = sel.value || current || ""; sel.innerHTML = loraOptionsHtml(prov, makerModelId(getSpec()), current); sel.value = keep; if (sel.value !== keep) sel.value = ""; };
+  render();
+  try { const o = await api("/model-options"); prov = (o.images || []).find((x) => (x.loras || []).length) || null; } catch (e) { /* the list is a convenience */ }
+  render();
+  if (makerSel) makerSel.addEventListener("change", render);
+}
 // Family of a checkpoint / model by its name: "anime", "real" or "" (unknown). Used to suggest art styles and the prompt style.
 function modelFamily(id) {
   const n = (id || "").toLowerCase();
-  if (/anim|illustri|noob|pony|waifu|anything|counterfeit|meina|hassaku|danbooru|cartoon|toon/.test(n)) return "anime";
+  if (/anim|vivid.?gloom|illustri|noob|pony|waifu|anything|counterfeit|meina|hassaku|danbooru|cartoon|toon/.test(n)) return "anime";
   if (/real|photo|juggernaut|epic|cyber|lifelike|raw|dreamshaper|sdxl_base|flux/.test(n)) return "real";
   return "";
 }
@@ -953,8 +997,8 @@ function bindImageSettings(cfg, picker) {
         : /pony/i.test(m) ? "Good choice: Pony models are trained on adult content and get their own score and rating tags automatically." : v ? "Tip: a checkpoint trained on adult content (Pony, Illustrious) follows explicit prompts best." : "";
     };
     api("/model-options").then((o) => {
-      const cur = (cfg.image_nsfw || {}).maker || "", opts = [];
-      for (const p of o.images || []) for (const m of p.models || []) opts.push([`${p.id}|${m.id}`, `${p.name || p.id}: ${m.id}${m.kind === "anima" ? " (Anima: text only)" : m.kind === "qwen" ? " (Qwen-Image: text only)" : m.kind === "chroma" ? " (Chroma: uncensored, text only)" : m.kind === "flux" ? " (FLUX.2: avoids nudity)" : p.local && /pony/i.test(m.id) ? " (recommended for explicit pictures)" : ""}`]);
+      const cur = nsNow(cfg).maker || "", opts = [];
+      for (const p of o.images || []) for (const m of p.models || []) opts.push([`${p.id}|${m.id}`, `${p.name || p.id}: ${m.id}${m.kind === "krea2" ? " (Krea 2: text only)" : m.kind === "anima" ? " (Anima: text only)" : m.kind === "qwen" ? " (Qwen-Image: text only)" : m.kind === "chroma" ? " (Chroma: uncensored, text only)" : m.kind === "flux" ? " (FLUX.2: avoids nudity)" : p.local && /pony/i.test(m.id) ? " (recommended for explicit pictures)" : ""}`]);
       opts.sort((a, b) => (/pony/i.test(b[0]) ? 1 : 0) - (/pony/i.test(a[0]) ? 1 : 0));      // adult-trained models first
       if (cur && !opts.some((x) => x[0] === cur)) opts.unshift([cur, cur.replace("|", ": ")]);
       $("imgNsMaker").innerHTML = opts.length ? opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("") : '<option value="">No picture models found (start ComfyUI or add a key)</option>';
@@ -964,7 +1008,7 @@ function bindImageSettings(cfg, picker) {
     }).catch(() => {});
     $("imgNsMaker").onchange = hint;
     // per-model explicit-picture settings: own values in cfg.image_nsfw.tweaks[model]; empty boxes show the tuned value faded
-    const nsT = JSON.parse(JSON.stringify((cfg.image_nsfw || {}).tweaks || {}));
+    const nsT = JSON.parse(JSON.stringify(nsNow(cfg).tweaks || {}));
     let nsModel = "";
     const tuneBoxes = () => [...document.querySelectorAll("#imgNsTune [data-n]")];
     const keepTune = () => { if (!nsModel) return; const o = {}; tuneBoxes().forEach((b) => { if (b.type === "range" ? b.dataset.set === "1" : b.value.trim()) o[b.dataset.n] = b.value.trim(); }); nsT[nsModel] = o; };
@@ -988,6 +1032,15 @@ function bindImageSettings(cfg, picker) {
     window.__nsfwFill = fillTune;
     $("imgNsOn").dataset.collect = "1";
     window.__nsfwTweaks = () => { keepTune(); return nsT; };
+    // In a story these settings belong to the story and save as you change them (a style you saved keeps them too); with no story open they are the default for new stories.
+    if (typeof story !== "undefined" && story) {
+      let t = 0;
+      const save = () => { clearTimeout(t); t = setTimeout(async () => {
+        try { const r = await api(`/stories/${story.id}/nsfw-pic`, { method: "PUT", body: { on: $("imgNsOn").checked, maker: $("imgNsMaker").value, words: $("imgNsWords").value.trim(), tweaks: window.__nsfwTweaks() } }); story.nsfw_pic = r.nsfw_pic; } catch (e) { /* it saves again with the next change */ }
+      }, 600); };
+      ["imgNsOn", "imgNsBox"].forEach((id) => { $(id).addEventListener("change", save); $(id).addEventListener("input", save); });
+      $("imgNsTuneReset").addEventListener("click", save);
+    }
     api("/images/nsfw-types").then((r) => {     // an empty box means the built-in list: show it so it can be read and edited
       if (!$("imgNsTypes").value.trim()) $("imgNsTypes").value = r.types;
       $("imgNsTypesReset").onclick = () => { $("imgNsTypes").value = r.types; };
@@ -1016,13 +1069,14 @@ function bindImageSettings(cfg, picker) {
           };
         }
         const sel = box.querySelector("[data-f=model]");
-        if (sel.dataset.filled !== ids.join("|")) { sel.innerHTML = q.models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}${m.kind === "anima" ? " (Anima: sentence prompts, no references)" : m.kind === "qwen" ? " (Qwen-Image: sentence prompts, no references)" : m.kind === "chroma" ? " (Chroma: sentence prompts, no references)" : m.kind === "flux" ? " (FLUX.2: reference pictures)" : ""}</option>`).join(""); sel.dataset.filled = ids.join("|"); }
+        if (sel.dataset.filled !== ids.join("|")) { sel.innerHTML = q.models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}${m.kind === "krea2" ? " (Krea 2: sentence prompts)" : m.kind === "anima" ? " (Anima: tag and sentence prompts, no references)" : m.kind === "qwen" ? " (Qwen-Image: sentence prompts, no references)" : m.kind === "chroma" ? " (Chroma: sentence prompts, no references)" : m.kind === "flux" ? " (FLUX.2: reference pictures)" : ""}</option>`).join(""); sel.dataset.filled = ids.join("|"); }
         sel.value = want;
       } else if (cur && ch && ch.provider === q.id && ch.model) cur.value = ch.model;
       card.querySelector(".ipstat").textContent = q.local ? (q.models.length ? (q.ready ? `running · ${q.models.length} model${q.models.length > 1 ? "s" : ""}` : "found, but " + (q.error || "not usable")) : "not running") : q.has_key ? (q.models.length ? "key saved" : "key saved, no models found") : "needs a key";
       card.querySelector(".imnote").textContent = noteFor(q, box.querySelector("[data-f=model]").value);
       const lp = card.querySelector(".lorapick");
-      if (lp && lp.dataset.filled !== (q.loras || []).join("|")) { lp.innerHTML = (q.loras || []).map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join("") || '<option value="">(no LoRAs found in ComfyUI)</option>'; lp.dataset.filled = (q.loras || []).join("|"); }
+      const mdl = box.querySelector("[data-f=model]").value;
+      if (lp && lp.dataset.filled !== (q.loras || []).join("|") + "@" + mdl) { lp.innerHTML = (q.loras || []).length ? loraOptionsHtml(q, mdl, "", false) : '<option value="">(no LoRAs found in ComfyUI)</option>'; lp.dataset.filled = (q.loras || []).join("|") + "@" + mdl; }
       loadTweaks(card, p, box.querySelector("[data-f=model]").value);
       const pst = card.querySelector('[data-f="prompt_style"]');
       if (pst && !pst.dataset.bound) { pst.dataset.bound = "1"; pst.addEventListener("change", () => { pst.dataset.mine = card.dataset.tm || ""; const n = card.querySelector(".psnote"); if (n && card.dataset.tm) n.textContent = `Remembered for ${card.dataset.tm}: it switches back to this whenever you pick this model.`; }); }
@@ -1072,8 +1126,9 @@ function collectImageSettings(cfg) {
   cfg.mood_looks = looks;
   cfg.image_max_refs = +$("imgRefs").value || 0;
   if ($("imgBgOn")) cfg.image_bg = { on: $("imgBgOn").checked, model: $("imgBgModel").value, workflow: $("imgBgFlow").value.trim() };
-  if ($("imgNsOn")) cfg.image_nsfw = { on: $("imgNsOn").checked, maker: $("imgNsMaker").value, words: $("imgNsWords").value.trim(), types: $("imgNsTypes").value.trim(),
-    style_mode: (cfg.image_nsfw || {}).style_mode || "match", style: (cfg.image_nsfw || {}).style || "", tweaks: window.__nsfwTweaks ? window.__nsfwTweaks() : ((cfg.image_nsfw || {}).tweaks || {}) };
+  if ($("imgNsOn") && typeof story !== "undefined" && story) cfg.image_nsfw = { ...(cfg.image_nsfw || {}), types: $("imgNsTypes").value.trim() };   // in a story the maker is the story's own (saved as it changes); only the app-wide word list lives here
+  else if ($("imgNsOn")) cfg.image_nsfw = { on: $("imgNsOn").checked, maker: $("imgNsMaker").value, words: $("imgNsWords").value.trim(), types: $("imgNsTypes").value.trim(),
+    style_mode: nsNow(cfg).style_mode || "match", style: nsNow(cfg).style || "", tweaks: window.__nsfwTweaks ? window.__nsfwTweaks() : (nsNow(cfg).tweaks || {}) };
   document.querySelectorAll(".iprov").forEach((card) => {
     const p = cfg.image_providers[+card.dataset.i];
     card.querySelectorAll("[data-f]").forEach((inp) => { p[inp.dataset.f] = inp.type === "checkbox" ? inp.checked : inp.value; });

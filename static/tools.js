@@ -400,10 +400,8 @@ async function exportHtml(withStatus, progress) {
 }
 
 function bindTools() {   // called by app.js once $ and the page exist
-  $("btnSearch").onclick = () => showSearch();
   $("btnQuick").onclick = () => { renderQuick(); $("quickBar").classList.toggle("hidden"); };
   $("btnCompare").onclick = showCompare;
-  $("btnExport").onclick = showExport;
 }
 
 

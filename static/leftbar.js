@@ -14,45 +14,30 @@ async function loadLeftList(force = false) {
   renderLeft();
 }
 
+// The story tools: what used to be separate buttons in the top bar. Only the open story has a Cast, an Avatar, an Inventory, a Journal and a Search.
+const toolList = () => [
+  ["cast", "🎭", "Cast", story ? `${(story.cast || []).length}` : "", !story], ["lore", "📚", "Lore library", "", false], ["avatar", "🧑", "Avatar", "", !story],
+  ["items", "🎒", "Inventory", "", !story], ["journal", "📖", "Journal", "", !story], ["search", "🔍", "Search", "", !story],
+];
+function runTool(go) {
+  if (go === "home") showHome(); else if (go === "settings") showSettings();
+  else if (go === "cast" && story) showCast(); else if (go === "lore") showLore(); else if (go === "avatar" && story) showPlayer();
+  else if (go === "items" && story) showInventory(); else if (go === "journal" && story) showJournal(); else if (go === "search" && story) showSearch();
+}
+function toolButtons() { return toolList().map(([go, icon, label, n, off]) => `<button data-go="${go}" ${off ? "disabled" : ""}>${icon} <span>${label}</span>${n ? `<small>${n}</small>` : ""}</button>`).join(""); }
+
 function renderLeft(force = false) {
   const el = $("leftbar"); if (!el) return;
-  if (!force && leftOpen && document.activeElement && document.activeElement.id === "lbSearch") return;   // do not pull the search box away while typing
   el.classList.toggle("hidden", !leftOpen);
   document.body.classList.toggle("leftopen", leftOpen);
-  const lt = $("leftTab"); if (lt) { lt.textContent = leftOpen ? "‹" : "›"; lt.title = leftOpen ? "Close the stories panel" : "Open your stories"; }
+  const lt = $("leftTab"); if (lt) { lt.textContent = leftOpen ? "‹" : "›"; lt.title = leftOpen ? "Close the tools panel" : "Open the story tools"; }
   if (!leftOpen) return;
-  const q = leftQuery.trim().toLowerCase();
-  let rows = leftList.filter((s) => !q || (s.title + " " + (s.subtitle || "") + " " + (s.player || "")).toLowerCase().includes(q));
-  if (leftFilter === "recent" && !q) rows = rows.slice(0, 8);
-  const cur = story && story.id;
-  el.innerHTML = `<div class="lbhead"><b>Stories</b><span style="flex:1"></span><button class="lbclose" title="Hide this panel">«</button></div>
-    <button class="primary lbnew" id="lbNew">＋ New story</button>
-    <input id="lbSearch" class="lbsearch" type="search" placeholder="Search stories" value="${esc(leftQuery)}" autocomplete="off">
-    <div class="lbtabs"><button class="lbtab${leftFilter === "recent" ? " on" : ""}" data-f="recent">Recent</button><button class="lbtab${leftFilter === "all" ? " on" : ""}" data-f="all">All <small>${leftList.length}</small></button></div>
-    <div class="lblist">${rows.map((s) => `<button class="lbitem${s.id === cur ? " on" : ""}" data-id="${esc(s.id)}" title="${esc(s.subtitle || s.title)}">
-        <span class="lbthumb" style="${s.cover ? "" : `background:${gradientFor(s.title)}`}">${s.cover ? `<img loading="lazy" src="${thumbUrl(s.cover, 96)}" alt="">` : esc((s.title || "?").trim().charAt(0).toUpperCase())}</span>
-        <span class="lbtxt"><b>${esc(s.title)}</b><small>${s.turns} turn${s.turns === 1 ? "" : "s"} · ${leftAgo(s.updated)}</small></span></button>`).join("") || '<div class="side-empty">No stories match.</div>'}</div>
-    <div class="lbnav">
-      <button data-go="home">🏠 <span>Home</span></button><button data-go="avatars">👤 <span>Avatars</span></button><button data-go="lore">📚 <span>Lore library</span></button>
-      <button data-go="art" ${story ? "" : "disabled"}>🖼 <span>Art</span></button><button data-go="usage">💲 <span>Usage</span></button><button data-go="settings">⚙ <span>Settings</span></button>
-    </div>`;
-  const keep = $("lbSearch");
-  keep.oninput = () => { leftQuery = keep.value; const pos = keep.selectionStart; renderLeft(true); const n = $("lbSearch"); n.focus(); n.setSelectionRange(pos, pos); };
+  el.innerHTML = `<div class="lbhead"><b>${story ? esc(story.title) : "Story tools"}</b><span style="flex:1"></span><button class="lbclose" title="Hide this panel">«</button></div>
+    <div class="lbnav lbtools">${toolButtons()}</div>
+    <div class="lbspacer"></div>
+    <div class="lbnav bottom"><button data-go="home">🏠 <span>Home</span></button><button data-go="settings">⚙ <span>Settings</span></button></div>`;
   el.querySelector(".lbclose").onclick = () => setLeft(false);
-  $("lbNew").onclick = () => { if (innerWidth <= 760) setLeft(false); editStory(null); };
-  el.querySelectorAll(".lbtab").forEach((b) => b.onclick = () => { leftFilter = b.dataset.f; try { localStorage.setItem("leftFilter", leftFilter); } catch (e) { /* not saved */ } renderLeft(); });
-  el.querySelectorAll(".lbitem").forEach((b) => b.onclick = async () => {
-    if (busy) { alert("A reply is still being written. Wait for it to finish before switching stories."); return; }
-    if (innerWidth <= 760) setLeft(false);
-    if (story && story.id === b.dataset.id && $("home").classList.contains("hidden")) return;
-    await openStory(b.dataset.id);
-  });
-  el.querySelectorAll(".lbnav button").forEach((b) => b.onclick = () => {
-    if (innerWidth <= 760) setLeft(false);
-    const go = b.dataset.go;
-    if (go === "home") showHome(); else if (go === "avatars") showAvatarLibrary(); else if (go === "lore") showLore();
-    else if (go === "art" && story) showArtHub(); else if (go === "usage") showUsage(); else if (go === "settings") showSettings();
-  });
+  el.querySelectorAll(".lbnav button").forEach((b) => b.onclick = () => { if (innerWidth <= 760) setLeft(false); runTool(b.dataset.go); });
 }
 
 function setLeft(on) {
@@ -82,9 +67,13 @@ function showStoriesModal(query = "") {
     closeModal(); if (!(story && story.id === b.dataset.id)) await openStory(b.dataset.id);
   });
 }
-$("btnLeft").onclick = () => { if (isPhone()) showStoriesModal(); else setLeft(!leftOpen); };
+// 📚 always opens the stories window (switch story, search, New story); 🧰 (or the little tab on the left edge) shows or hides the tools panel. On a phone the tools open in a window.
+function showToolsModal() {
+  modal(`<h2>${story ? esc(story.title) : "Story tools"}</h2><div class="lbnav lbtools">${toolButtons()}</div><div class="actions"><button id="mClose">Close</button></div>`);
+  $("mClose").onclick = closeModal;
+  document.querySelectorAll("#modalCard .lbnav button").forEach((b) => b.onclick = () => { closeModal(); runTool(b.dataset.go); });
+}
+$("btnLeft").onclick = () => showStoriesModal();
+$("btnTools").onclick = () => { if (isPhone()) showToolsModal(); else setLeft(!leftOpen); };
 $("leftTab").onclick = () => setLeft(!leftOpen);
-$("btnAvatars").onclick = () => showAvatarLibrary();
-$("btnLore").onclick = () => showLore();
-$("btnUsage").onclick = () => showUsage();
 setTimeout(() => loadLeftList(true), 400);

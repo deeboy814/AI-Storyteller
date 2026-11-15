@@ -571,6 +571,91 @@ def enforce_spent(story: dict) -> list[dict]:
     return out
 
 
+def enforce_text(story: dict, text: str) -> str:
+    """The reply right after the player spent points: its printed status line is put right the same way enforce_spent puts the tracker right. A stat the player spent on that
+    the reply still prints at the old value gets the spent value, and the points left, printed at the old total, get the real total. Without this the stale numbers stay in the
+    reply, the next status line copies them (or the next reply reads them back), and the spend is quietly lost."""
+    tr = story.get("tracker") or {}
+    lock, pf = tr.get("_lock"), points_field(story)
+    if not lock or not pf or not text:
+        return text
+
+    def put(label: str, fix) -> None:
+        nonlocal text
+        pat = re.compile(r"(?<![A-Za-z])(" + re.escape(label) + r")(\s*[:=]\s*\**\s*)(-?\d+(?:\.\d+)?)(?!\d)", re.IGNORECASE)
+        ms = list(pat.finditer(text))
+        if not ms:
+            return
+        m = ms[-1]                                      # the status line is at the end of the reply
+        new = fix(float(m.group(3)))
+        if new is not None:
+            text = text[:m.start(3)] + (str(int(new)) if float(new).is_integer() else str(new)) + text[m.end(3):]
+
+    by = {t["id"]: t["label"] for t in spend_targets(story)}
+    for tid, want in (lock.get("stats") or {}).items():
+        if tid in by and want is not None:
+            put(by[tid], lambda v, w=want: w if v < w else None)
+    if lock.get("points_before") is not None and lock.get("points_after") is not None and lock["points_after"] != lock["points_before"]:
+        put(pf["label"], lambda v: lock["points_after"] if v == lock["points_before"] else None)
+    return text
+
+
+_XP_PLUS = re.compile(r"\bXP\s*\+\s*(\d+)", re.IGNORECASE)
+_XP_REWARD = re.compile(r"\b(\d+)\s*XP\b", re.IGNORECASE)
+
+
+def xp_gain(reply: str) -> int:
+    """XP the reply itself awards, read from its notifications: "XP +80: two dusk stalkers", and the reward of a quest that was COMPLETED (not one that was only started)."""
+    total = 0
+    for ln in reply.split("\n"):
+        low = ln.lower()
+        if _XP_PLUS.search(ln):
+            total += sum(int(x) for x in _XP_PLUS.findall(ln))
+        elif "quest completed" in low or "quest complete" in low or "completed:" in low:
+            r = low.split("reward", 1)
+            if len(r) == 2:
+                m = _XP_REWARD.search(r[1])
+                if m:
+                    total += int(m.group(1))
+    return total
+
+
+def enforce_xp_text(story: dict, text: str) -> str:
+    """XP is a running total that only goes up (unless the story takes it away). A reply whose printed status line shows LESS XP than the story had before it
+    (a helper or narrator that reset it, or read a quest's "Reward: 20 XP" as the total) is put right: the old total plus what the reply itself awards, with the
+    goal for the next level and the Level number worked out from the story's own level table."""
+    tr = story.get("tracker") or {}
+    fields = active_fields(story)
+    for f in fields:
+        if f.get("kind") != "number" or not f.get("levels"):
+            continue
+        sec, k = f["id"].split(".")
+        prev = _num((tr.get(sec) or {}).get(k))
+        if prev is None or sec not in ("scene", "me"):
+            continue
+        pat = re.compile(r"(?<![A-Za-z])" + re.escape(f["label"]) + r"(\s*[:=]\s*\**\s*)(\d+(?:\.\d+)?)(\s*/\s*)?(\d+)?", re.IGNORECASE)
+        ms = list(pat.finditer(text))
+        if not ms:
+            continue
+        m = ms[-1]
+        printed = float(m.group(2))
+        shrank = printed < prev
+        xp = prev + xp_gain(text) if shrank else printed
+        level, nxt = level_for(f["levels"], xp, f.get("max_level"))
+        goal_bad = bool(m.group(3) and m.group(4) and nxt and int(m.group(4)) != nxt)        # "XP: 90/50": the goal and the Level are worked out from the story's own table
+        if not shrank and not goal_bad:
+            continue
+        rep = (str(int(xp)) if float(xp).is_integer() else str(xp)) + ((m.group(3) or "") + str(nxt) if m.group(3) and nxt else "")
+        text = text[:m.start(2)] + rep + text[m.end():]
+        lv = next((g for g in fields if g["id"].startswith(sec + ".") and g["label"].strip().lower() == "level" and g["id"] != f["id"]), None)
+        if lv:
+            lp = re.compile(r"(?<![A-Za-z])" + re.escape(lv["label"]) + r"(\s*[:=]\s*\**\s*)(\d+)", re.IGNORECASE)
+            lms = list(lp.finditer(text))
+            if lms:
+                text = text[:lms[-1].start(2)] + str(level) + text[lms[-1].end(2):]
+    return text
+
+
 def _clock_note(story: dict) -> str:
     from . import clock
     return clock.note(story)
