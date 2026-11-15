@@ -14,7 +14,7 @@ Everything runs on your own computer. Your stories, pictures and settings are st
 
 **It does not:**
 - **Include an AI.** The writing comes from an AI you connect yourself (an online service with its own account and billing, or a free local one you install). Without one, the app cannot write anything.
-- **Include stories, characters or pictures of its own.** It ships with only two small example prompts. You write, paste or import your own story prompt.
+- **Include stories, characters or pictures of its own.** It ships with two small example prompts and one example story package (*The Lantern Market*, in `examples/`), which shows every feature of the app. You write, paste or import your own story prompt.
 - **Cost anything itself.** The app is free. Online AIs and online picture services charge you directly, per use.
 - **Decide what content is allowed.** Your chosen AI service has its own rules and may refuse or filter some content. The app's adult setting only lets the narrator try; it can't override a provider's rules. Content involving anyone under 18 is never written.
 - **Work as a multiplayer or online game.** It is for one player. You can open it from your phone or tablet on your home network, but it is not a website for others.
@@ -62,7 +62,7 @@ Want to see a finished story package? Import `examples/Example Story Package - T
     - ChatGPT (OpenAI): platform.openai.com → API keys
     - Gemini (Google): aistudio.google.com → Get API key
     - Grok (xAI): console.x.ai → API keys
-    - **Tested and working:** Claude, Gemini and Grok have each been tried in the app for story writing, and Gemini and Grok for pictures too (version 1.6.1). Gemini needs a Google account with billing switched on for its picture models and its Pro models; on Google's free tier those answer with a quota error, and Google no longer offers its older 2.5 models to new keys, so pick a newer one from the model list. ChatGPT (OpenAI) is supported the same way but has not been tried as recently.
+    - **Tested and working:** Claude, ChatGPT, Gemini and Grok have each been tried in the app for story writing, and ChatGPT (version 1.7.0), Gemini and Grok (version 1.6.1) for pictures too. ChatGPT was tried with several models as the narrator and as the helper AI (full turns with status lines, suggested replies, and helper jobs such as the scene prompt) and with three of its picture models (portraits and scene pictures included); a small "nano" model is better as a helper than as the narrator, because it gets numbers such as XP wrong. OpenAI retires picture models from time to time: if the saved one disappears, the app switches to the best current model the service offers. Gemini needs a Google account with billing switched on for its picture models and its Pro models; on Google's free tier those answer with a quota error, and Google no longer offers its older 2.5 models to new keys, so pick a newer one from the model list.
   - or a **local AI** through *Ollama* (free, private, runs on your graphics card). Quality depends on your graphics card: 12 GB of video memory runs a mid-sized model well; 8 GB or less is limited.
 - **Optional, for pictures:** either an online picture service (Gemini, OpenAI or Grok, billed per picture) or *ComfyUI* on your own graphics card (free; needs about 6 GB of video memory or more).
 
@@ -97,7 +97,7 @@ Open **⚙ Settings** (from the Home screen or inside a story). These are the se
 | 10 | **Appearance** | Optional: background and text colours, two-tone story text (dim narration, bright dialogue) and showing a backdrop on the sides of wide windows. | Comfort. |
 | 11 | **Libraries & backup** and **🖼 Art → Picture makers** | Optional: switch on the **avatar library** (reuse player avatars across stories) in Libraries & backup, and **reuse character art across stories** in Art → Picture makers. | Off by default. |
 
-Local-model owners should also glance at **Advanced → Context size** (how much text a local model reads at once; bigger remembers more but needs more video memory; 8192 is safe on 12 GB).
+Local-model owners should also glance at **Context size** (📝 Story → Writing & panel: how much text a local model reads at once; bigger remembers more but needs more video memory; 8192 is safe on 12 GB).
 
 ## Quick start (five minutes)
 
@@ -299,7 +299,7 @@ Each story has up to four AI jobs: the **narrator** (writes the story, so qualit
 
 The layout adapts to small screens. To play from a phone or tablet on your home network, turn on **Settings → Phone & tablet** and restart: the tab shows the address to open on the phone and a 6-digit **PIN** (other devices enter it once; this computer never needs it). Only devices on your home network are let in, and the phone talks only to this computer. If your computer has a firewall (Ubuntu's `ufw`), allow your home network once, as shown in that tab. (`./run-lan.sh` still works for a one-off session.) A device that has entered the PIN is **remembered**, also after a restart (Settings → Phone & tablet lists them with a *Forget* button). On a phone the header folds into a slim row with a ☰ menu, and a small tab on the right edge (or a swipe from the edge) opens the status panel.
 
-**Tested on a phone:** checked on a real Android phone over a home network and at phone width in a desktop browser: all 38 screens and dialogs open without sideways overflow or script errors, the phone loads nothing from the internet, and a phone cannot read the PIN, close the app or make a bug report. iPhone, iPad and Windows have not been tested.
+**Tested on a phone (version 1.6):** checked on a real Android phone over a home network and at phone width in a desktop browser: all 38 screens and dialogs open without sideways overflow or script errors, the phone loads nothing from the internet, and a phone cannot read the PIN, close the app or make a bug report. The version 1.7 screens were reorganised: the new tools panel was checked at phone width (it opens as a window), but the full phone pass has not been repeated. iPhone, iPad and Windows have not been tested.
 
 ---
 
@@ -327,7 +327,7 @@ The layout adapts to small screens. To play from a phone or tablet on your home 
 |---|---|
 | The icon does nothing | Run `./launch.sh` (Windows: `launch.bat`) in a terminal and read the message; check `data/server.log`. The first-time setup (`.venv`) must be done. |
 | "needs a key" / no models listed | Paste the API key in Settings → AI models, press **Save key** next to it, then *Re-scan*. Check the key belongs to that company. |
-| A reply is cut off | Raise **Settings → Advanced → Longest reply**, or press **…** (continue) on the reply. With Claude, set *Effort* to Low so hidden thinking doesn't use the budget. |
+| A reply is cut off | Raise **📝 Story → Writing & panel → Longest reply**, or press **…** (continue) on the reply. With Claude, set *Effort* to Low so hidden thinking doesn't use the budget. |
 | Pictures don't appear next to dialogue | The narrator must write portrait tags. Make sure the story prompt's *Images* section tells it to (see Technical notes), and that the character has pictures in 🧰 → Cast. |
 | Picture drawing fails | 🖼 Art → Picture makers → Test. For ComfyUI, check it is running (Settings → Local models shows this). |
 | A local model is very slow | It doesn't fit in video memory. Choose a smaller model, lower the context size, or turn on *Make room for pictures* / use online pictures. |
@@ -373,7 +373,7 @@ sudo systemctl edit ollama   # add under [Service]: Environment="OLLAMA_FLASH_AT
 sudo systemctl restart ollama
 ```
 
-**Adding another AI service.** Anything with an OpenAI-compatible API (OpenRouter, LM Studio, DeepSeek…) can be added under Settings → Advanced → Providers. Provider code lives in `app/providers.py`.
+**Adding another AI service.** Anything with an OpenAI-compatible API (OpenRouter, LM Studio, DeepSeek…) can be added under Settings → AI models → Providers. Provider code lives in `app/providers.py`.
 
 ## License and privacy
 
