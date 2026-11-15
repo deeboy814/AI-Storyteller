@@ -18,7 +18,7 @@ async function showMoodTypes(startName, back) {
     <div class="actions"><span class="hint">${adultOk ? "" : "Adult pictures are hidden because this story has adult content off."}</span><span style="flex:1"></span><button id="mClose">Close</button></div>`);
   const close = () => { if (back) back(); else closeModal(); };
   $("mClose").onclick = close;
-  const reload = async () => { data = await api(`/moods?sid=${story.id}`); list = data.moods; cats = data.categories; config = await api("/config"); };
+  const reload = async () => { data = await api(`/moods?sid=${story.id}`); list = data.moods; cats = data.categories; config = await api("/config"); for (const x of list) if (typeof moodCatCache !== "undefined") moodCatCache[x.name] = x.category; };   // the cast Images tab remembers each picture's category: keep it current
   const drawList = () => {
     const q = $("mtFilter").value.trim().toLowerCase();
     $("mtItems").innerHTML = cats.filter((c) => adultOk || !c.nsfw).map((c) => {

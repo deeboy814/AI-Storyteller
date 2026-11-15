@@ -100,6 +100,7 @@ async def ollama_models(p: dict) -> dict:
 
 
 FILES: dict = {"clips": [], "vaes": []}     # text encoders and VAEs ComfyUI listed last time (so a built-in workflow can use the file names you actually have)
+LORAS: set[str] = set()     # LoRA files ComfyUI listed last time
 UNETS: set[str] = set()     # diffusion models ComfyUI listed last time (FLUX.2 and the like): drawn with the FLUX workflow, not the checkpoint one
 
 
@@ -128,7 +129,9 @@ async def comfy_checkpoints(p: dict) -> dict:
             pass
     UNETS.clear()
     UNETS.update(unets)
-    return {"ok": True, "ids": ids, "unets": unets, "loras": loras}
+    LORAS.clear()
+    LORAS.update(loras)
+    return {"ok": True, "ids": ids, "unets": unets, "loras": loras, "lora_families": {l: lora_family(l) for l in loras}}
 
 
 _KIND_CACHE: dict = {}
@@ -161,13 +164,101 @@ def _header_kind(name: str) -> str:
                     n = struct.unpack("<Q", fh.read(8))[0]
                     keys = json.loads(fh.read(n)).keys() if n < 50_000_000 else []
                 ks = " ".join(keys)
-                kind = ("anima" if "adaln_modulation_cross_attn" in ks else "chroma" if "distilled_guidance_layer" in ks else "flux2" if "double_stream_modulation_img" in ks
+                kind = ("krea2" if "txtfusion.projector.weight" in ks else "anima" if "adaln_modulation_cross_attn" in ks else "chroma" if "distilled_guidance_layer" in ks else "flux2" if "double_stream_modulation_img" in ks
                         else "qwen" if ("txt_norm" in ks and "transformer_blocks.0.img_mod" in ks and not re.search(r"edit", name, re.IGNORECASE)) else "")
             except Exception:
                 kind = ""
             _KIND_CACHE[key] = kind
             return kind
     return ""
+
+
+# ---------- which models a LoRA works with ----------
+LORA_FAMILY_LABEL = {"sdxl": "SDXL / Illustrious / Pony checkpoints", "chroma": "Chroma", "flux1": "FLUX.1-style (works on Chroma, partly)", "flux2": "FLUX.2 klein",
+                     "anima": "Anima / Vivid Gloom", "krea2": "Krea 2", "qwen": "Qwen-Image", "unknown": "Unknown (not sure which model)"}
+_LORA_CACHE: dict = {}
+
+
+def lora_family(name: str) -> str:
+    """Which kind of model a LoRA file was trained for: read from its own header (the architecture and base model the trainer wrote, else the layer names), then its name.
+    "sdxl" (SDXL, Illustrious, Pony checkpoints), "chroma", "flux1" (FLUX.1-shaped: partly works on Chroma), "flux2", "anima", "krea2", "qwen" or "unknown"."""
+    import json, struct
+    from pathlib import Path
+    roots = [Path.home() / "ComfyUI"]
+    try:
+        from . import store
+        cmd = (store.load_config().get("rt_comfy_cmd") or "").strip()
+        if cmd:
+            roots.insert(0, Path(cmd.split()[0]).expanduser().parent)
+    except Exception:
+        pass
+    f = next((r / "models" / "loras" / name for r in roots if (r / "models" / "loras" / name).is_file()), None)
+    low = str(name).lower()
+    meta, ks = {}, ""
+    if f:
+        key = (str(f), f.stat().st_mtime)
+        if key in _LORA_CACHE:
+            return _LORA_CACHE[key]
+        try:
+            with open(f, "rb") as fh:
+                n = struct.unpack("<Q", fh.read(8))[0]
+                h = json.loads(fh.read(n)) if n < 80_000_000 else {}
+            meta = h.pop("__metadata__", None) or {}
+            ks = " ".join(list(h)[:400])
+        except Exception:
+            pass
+    def from_words(txt: str) -> str:
+        if re.search(r"krea", txt):
+            return "krea2"
+        if re.search(r"anima(?!gine)", txt):
+            return "anima"
+        if re.search(r"flux2|klein", txt):
+            return "flux2"
+        if re.search(r"chroma", txt):
+            return "chroma"
+        if re.search(r"flux", txt):
+            return "flux1"
+        if re.search(r"qwen", txt):
+            return "qwen"
+        if re.search(r"sdxl|stable-diffusion-xl", txt):
+            return "sdxl"
+        return ""
+    fam = from_words(" ".join(str(meta.get(k, "")) for k in ("modelspec.architecture", "ss_base_model_version")).lower()) or from_words(str(meta.get("ss_sd_model_name", "")).lower())
+    if not fam and ks:           # no usable header words: the layer names say what it was trained on
+        if re.search(r"txtfusion|blocks\.\d+\.attn\.gate|blocks_\d+_attn_gate", ks):
+            fam = "krea2"
+        elif re.search(r"cross_attn|adaln", ks):
+            fam = "anima"
+        elif re.search(r"input_blocks|output_blocks|down_blocks|up_blocks|middle_block|mid_block", ks):
+            fam = "sdxl"
+        elif re.search(r"single_blocks|single_transformer_blocks|double_blocks", ks):
+            fam = "flux1"
+    if not fam:
+        fam = "krea2" if re.search(r"krea", low) else "anima" if re.search(r"anima(?!gine)", low) else "chroma" if "chroma" in low else "flux2" if re.search(r"flux2|klein", low) else "flux1" if "flux" in low else "sdxl" if re.search(r"illustrious|pony|sdxl|xl\b|ilxl|\bill\b", low) else "unknown"
+    if fam == "flux1" and "chroma" in low:       # a "chroma" LoRA trained with the FLUX.1 trainer is still a Chroma LoRA
+        fam = "chroma"
+    if f:
+        _LORA_CACHE[key] = fam
+    return fam
+
+
+def model_family(name: str, is_checkpoint: bool = False) -> str:
+    """The LoRA family a picture model takes: checkpoints are SDXL-style; diffusion models are what their file says they are."""
+    if is_checkpoint:
+        return "sdxl"
+    k = diffusion_kind(name)
+    return {"flux2": "flux2", "chroma": "chroma", "anima": "anima", "krea2": "krea2", "qwen": "qwen"}.get(k, "unknown")
+
+
+def lora_fits(model_fam: str, lora_fam: str) -> str:
+    """"yes", "partly" (a FLUX.1-shaped LoRA on Chroma) or "no"."""
+    if lora_fam == "unknown" or model_fam == "unknown":
+        return "unknown"
+    if lora_fam == model_fam:
+        return "yes"
+    if model_fam == "chroma" and lora_fam == "flux1":
+        return "partly"
+    return "no"
 
 
 def diffusion_kind(name: str) -> str:
@@ -178,7 +269,9 @@ def diffusion_kind(name: str) -> str:
     n = str(name)
     if re.search(r"flux[._ -]?2", n, re.IGNORECASE):
         return "flux2"
-    if re.search(r"anima", n, re.IGNORECASE):
+    if re.search(r"krea[._ -]?2", n, re.IGNORECASE):
+        return "krea2"
+    if re.search(r"anima|vividgloom", n, re.IGNORECASE):
         return "anima"
     if re.search(r"chroma|uncanny", n, re.IGNORECASE):
         return "chroma"
@@ -243,7 +336,10 @@ async def _image_provider(p: dict, hw: dict) -> dict:
         elif hw["vram_gb"] < hardware.SDXL_VRAM_GB:
             e["error"] = f"Local picture making needs about {hardware.SDXL_VRAM_GB} GB of video memory."
         e["loras"] = r.get("loras", [])
-        e["models"] = [{"id": i, "tier": "local"} for i in r["ids"]] + [{"id": i, "tier": "local", "kind": "flux" if is_flux(i) else diffusion_kind(i)} for i in r["unets"]]
+        e["lora_families"] = r.get("lora_families", {})          # LoRA file -> the kind of model it was trained for
+        e["lora_labels"] = LORA_FAMILY_LABEL
+        e["models"] = ([{"id": i, "tier": "local", "family": "sdxl"} for i in r["ids"]]
+                       + [{"id": i, "tier": "local", "kind": "flux" if is_flux(i) else diffusion_kind(i), "family": model_family(i)} for i in r["unets"]])
     elif e["has_key"]:
         r = await live_ids(p)
         ids = [i for i in r["ids"] if IS_IMAGE.search(i)] if r["ok"] else []

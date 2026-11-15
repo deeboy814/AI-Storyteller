@@ -27,24 +27,13 @@ window.__bugErr = [];
     <button class="icon hmenu" id="btnMenu" title="Menu: story tools and settings" aria-expanded="false">☰</button>
     <div class="tools" id="tools">
       <select id="modelSelect" title="Model"></select>
-      <button class="icon" id="btnLeft" title="Stories panel: switch story, search, shortcuts">📚</button>
+      <button class="icon" id="btnLeft" title="Your stories: switch story or start a new one">📚</button>
+      <button class="icon" id="btnTools" title="Story tools panel: Cast, Lore library, Avatar, Inventory, Journal, Search">🧰</button>
       <button class="icon" id="btnSide" title="Status panel">ℹ️</button>
       <button class="icon" id="btnHome" title="Home: all your stories">🏠</button>
-      <button class="icon mobonly" id="btnAvatars" title="Avatar library">🧑</button>
-      <button class="icon mobonly" id="btnLore" title="Lore library">📖</button>
-      <button class="icon mobonly" id="btnUsage" title="Usage and costs">💲</button>
       <span class="tsep"></span>
-      <button class="icon" id="btnArt" title="Art: every picture tool of this story (characters, places, backgrounds, cover, style)">🖼️</button>
-      <button class="icon" id="btnCast" title="Cast, portraits &amp; gallery">🎭</button>
-      <button class="icon hidden" id="btnEndings" title="Possible endings (spoilers)">🏁</button>
-      <button class="icon" id="btnBeats" title="Story beats: the key events this story schedules, sent to the narrator at the right time (hidden spoilers)">📅</button>
-      <button class="icon" id="btnMemory" title="Memory: summary, pinned facts, backups">🧠</button>
-      <button class="icon" id="btnItems" title="Inventory: let the app keep your items as cards (quantity, effect, equipped)">🎒</button>
-      <button class="icon" id="btnJournal" title="Journal: a recap, the story so far and a timeline of key events, quests and bookmarks">📖</button>
-      <button class="icon" id="btnSearch" title="Search the story and bookmarks">🔍</button>
-      <button class="icon" id="btnPlayer" title="Player: avatar & user notes">👤</button>
-      <button class="icon" id="btnEdit" title="Edit the story: prompt, opening, endings, options">📝</button>
-      <button class="icon" id="btnExport" title="Export &amp; backups: text, illustrated page, story package, backups">💾</button>
+      <button class="icon lbl" id="btnArt" title="Art: every picture tool of this story (characters, species, places, backgrounds, cover, styles, picture makers)">🖼️ <span>Art</span></button>
+      <button class="icon lbl" id="btnStory" title="Story: the story itself, narration style and notes, options, memory, beats and endings">📝 <span>Story</span></button>
       <span class="tsep"></span>
       <button class="icon" id="btnSettings" title="Settings">⚙️</button>
     </div>
@@ -101,6 +90,7 @@ window.__bugErr = [];
 <script src="/static/tools.js"></script>
 <script src="/static/avatars.js"></script>
 <script src="/static/castlib.js"></script>
+<script src="/static/library.js"></script>
 <script src="/static/home.js"></script>
 <script src="/static/firstrun.js"></script>
 <script src="/static/storysetup.js"></script>

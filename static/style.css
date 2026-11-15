@@ -397,6 +397,8 @@ details.iprov .imnote:empty { display: none; }
 #lightbox .lbwrap img { margin: auto; max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; border-radius: 4px; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
 #lightbox.actual .lbwrap img { max-width: none; max-height: none; cursor: zoom-out; }
 #lightbox .lbnav { position: absolute; top: 50%; transform: translateY(-50%); z-index: 2; background: rgba(0,0,0,.45); color: #fff; border: 0; font-size: 34px; width: 44px; height: 72px; cursor: pointer; border-radius: 8px; }
+#lightbox .lbnav, #lightbox .lbbar { transition: opacity .35s; } #lightbox.idle .lbnav, #lightbox.idle .lbbar { opacity: 0; pointer-events: none; } #lightbox.idle { cursor: none; }
+#lightbox .lbcap { position: absolute; left: 0; right: 0; bottom: 0; padding: 36px 18px 16px; background: linear-gradient(transparent, rgba(0,0,0,.78)); pointer-events: none; color: #f2eef8; font-size: 15px; line-height: 1.4; text-align: center; max-height: 30vh; overflow: hidden; z-index: 2; transition: opacity .35s; } #lightbox.idle .lbcap { opacity: 0; }
 #lightbox .lbprev { left: 10px; } #lightbox .lbnext { right: 10px; } #lightbox.single .lbnav { display: none; }
 img:not(.hcover img):not(#lightbox img) { cursor: zoom-in; }
 
@@ -625,8 +627,14 @@ button.icon.mobonly { display: none; }
 @media (max-width: 760px) { #leftbar, .lefttab { display: none !important; } button.icon.mobonly { display: inline-flex; } }
 }
 
-/* the stories panel already has Home, Art and Settings: hide their copies in the top bar while it is open (wide screens) */
-@media (min-width: 761px) { body.leftopen #btnHome, body.leftopen #btnArt, body.leftopen #btnSettings { display: none; } }
+/* the tools panel already has Home and Settings: hide their copies in the top bar while it is open (wide screens) */
+@media (min-width: 761px) { body.leftopen #btnHome, body.leftopen #btnSettings { display: none; } }
+button.icon.lbl { width: auto; padding: 0 12px; gap: 6px; font-size: 14px; } button.icon.lbl span { font-family: system-ui, sans-serif; }
+.card .storytabs { margin: -4px 0 12px; }
+#leftbar .lbnav.lbtools { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; } #leftbar .lbnav.lbtools button, #leftbar .lbnav.bottom button, #modalCard .lbnav.lbtools button { display: flex; align-items: center; justify-content: flex-start; gap: 10px; text-align: left; padding: 10px 12px; font-size: 14px; }
+#leftbar .lbnav.lbtools button small { margin-left: auto; color: var(--muted); } #modalCard .lbnav.lbtools { display: flex; flex-direction: column; gap: 8px; }
+#leftbar .lbspacer { flex: 1; }
+#leftbar .lbnav.bottom { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
 
 /* wide screens: when the stories panel is closed, a small tab on the left edge brings it back (the 📚 button does too) */
 @media (min-width: 761px) {

@@ -16,7 +16,7 @@ async function maybeStorySetup() {
   const curModels = { ...(config.default_models || {}), ...(story.models || {}) };
   const styleCards = [
     ...(own ? [{ id: "__own", label: "This story's own style", direction: own, note: oneLine(own, 90) }] : []),
-    ...styles.map((x) => ({ id: x.id, label: x.label, direction: x.direction, note: "" })),
+    ...styles.map((x) => ({ id: x.id, label: x.label, direction: x.direction, negative: x.negative || "", user: !!x.user, note: "" })),
     { id: "__custom", label: "Write my own…", direction: "", note: "" },
   ];
   const startStyle = own ? "__own" : (styles.find((x) => x.direction === (config.default_art_direction || "").trim()) || {}).id || (styles[0] || {}).id || "__custom";
@@ -81,7 +81,8 @@ async function maybeStorySetup() {
         if (chosen.images) story.models = await api(`/stories/${sid}/models`, { method: "PUT", body: { images: chosen.images } });
         const sheet = mode === "blank" ? sheetNow() : null, filled = !!(sheet && Object.values(sheet).some(Boolean));
         const clear = mode === "skip" || (mode === "blank" && !filled);      // "decide later", or a blank sheet left blank: no starter character, the plain "you"
-        story = await api(`/stories/${sid}/setup`, { method: "POST", body: { nsfw: $("suNsfw").checked, art_direction: direction, avatar: filled ? sheet : null, clear_avatar: clear, done: true } });
+        story = await api(`/stories/${sid}/setup`, { method: "POST", body: { nsfw: $("suNsfw").checked, art_direction: direction, art_negative: (card && card.negative) || "", avatar: filled ? sheet : null, clear_avatar: clear, done: true } });
+        if (card && card.user) { story = await api(`/stories/${sid}/art-styles/${encodeURIComponent(card.id)}/apply`, { method: "POST" }); config = await api("/config"); }   // one of your own styles: everything it saved
       }
       closeModal(); renderAll(false); applyTheme(config); refreshArtSuggestions();
       return true;

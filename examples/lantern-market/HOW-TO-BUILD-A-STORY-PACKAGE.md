@@ -2,13 +2,13 @@
 
 A **story package** is one `.zip` file that holds everything an author makes for a story: the prompt, the opening, the cast and their pictures, places, art settings, side-panel trackers, endings and a starter player character. Players import it from the Home screen with **📦 Import a story** and can start playing at once.
 
-The example package **The Lantern Market** (`Example Story Package - The Lantern Market.zip`) is a complete, playable story built to show every part and to use every feature of the app: its prompt's `GUIDE:` lines say where each feature is and how to try it. Import it, open **📝 Edit story** and read the lines that start with `GUIDE:` in the prompt; then come back here for the details.
+The example package **The Lantern Market** (`Example Story Package - The Lantern Market.zip`) is a complete, playable story built to show every part and to use every feature of the app: its prompt's `GUIDE:` lines say where each feature is and how to try it. Import it, open **📝 Story** and read the lines that start with `GUIDE:` in the prompt; then come back here for the details.
 
-The quickest way to make your own: import the example, change each part in the app, then export it with **💾 Export & backups → Story package**.
+The quickest way to make your own: import the example, change each part in the app, then export it with **Settings → Libraries & backup → Export this story → Story package**.
 
 ---
 
-## 1. The story prompt (📝 Edit story → Prompt)
+## 1. The story prompt (📝 Story → Story → Basics)
 
 **What it is:** the instructions the narrator reads before *every* reply. Everything that must always be true goes here.
 
@@ -36,25 +36,25 @@ The quickest way to make your own: import the example, change each part in the a
 
 ---
 
-## 2. The prologue (📝 Edit story → Options)
+## 2. The prologue (📝 Story → Story → Story start)
 
 **What it is:** a short scene-setter the player reads before the first message.
 **Length:** 2 to 5 sentences. No choices, no dialogue.
 **Example:** "Vessaline is a city of a hundred islands, fog and lamplight. On moonless nights the Lantern Market rises… Tonight, for the first time, the market's lanterns are going out."
 
-## 3. The opening (📝 Edit story → Opening)
+## 3. The opening (📝 Story → Story → Story start)
 
 **What it is:** the narrator's first message, written by you. It sets the voice the AI will copy, so write it exactly the way you want every reply to look.
 **Length:** 150 to 400 words.
 **Include:** a place picture tag for the first location (`![](place:The Lantern Market)`), at least one character speaking with a portrait tag before their line (`[[Ottilie Brask/stern]]` then the quote), and end on a hook the player can answer.
 **Tip:** keep "Send the opening to the AI" on, so the narrator sees it as its own first reply.
 
-## 4. Suggested first moves and endings (📝 Edit story → Options)
+## 4. Suggested first moves and endings (📝 Story → Story → Story start and Trackers & endings)
 
 - **First moves:** 2 to 4 different one-sentence moves (one cautious, one bold, one curious). They appear as buttons under the opening.
-- **Endings:** 2 to 4, each with a title and 1 to 3 sentences of what has to happen. They are hidden behind the 🏁 button, and the player can choose one to steer toward. Mix a happy ending, a bittersweet one and a failure.
+- **Endings:** 2 to 4, each with a title and 1 to 3 sentences of what has to happen. They are hidden under 📝 Story → Endings, and the player can choose one to steer toward. Mix a happy ending, a bittersweet one and a failure.
 
-## 5. The cast (🎭 Cast → a character)
+## 5. The cast (🧰 tools panel → Cast → a character)
 
 One card per main character. Each card has:
 
@@ -71,9 +71,24 @@ One card per main character. Each card has:
 
 **Pictures:** in the character's **Images** tab use **Draw options…** to pick a face (it becomes *Normal 1*, the reference for every later picture), then draw a set of moods. Describe looks the same way every time; the first picture decides the face for good.
 
-## 6. Species (🖼 Art → Characters → Species & makers…)
+## 6. Species (🖼 Art → Species & makers…)
 
-For non-human peoples: a description of what is true of the whole species (body, face, covering, eyes, wings), and optionally a picture maker. The first picture of a species becomes its reference. **Be explicit about features a picture model might confuse**: the example says "NO animal ears, two long feathery antennae", because a moth person was first drawn with rabbit ears.
+For non-human peoples (and, if you like, for Human): a description of what is true of the whole species (body, face, covering, eyes, wings), and optionally a picture maker. The first picture of a species becomes its reference. **Be explicit about features a picture model might confuse**: the example says "NO animal ears, two long feathery antennae", because models often add ears by default.
+
+Each species card also has these options, all optional and all added to the picture prompts of every member:
+
+| Option | What it does | Example (Mothfolk) |
+|---|---|---|
+| **Colour palette** | The colours the species is drawn in. | "soft greys and dusty browns with powdery cream patterns on the wings" |
+| **Clothing style** | What it wears every day. | "small layered shawls and waistcoats stitched with many tiny pockets" |
+| **Combat clothing** | What it wears in fights; used instead of the clothing style in the Actions pictures and in scene pictures of a fight. | "a padded canvas vest and leather bracers" |
+| **Words to keep out** | The negative prompt for this species. | "animal ears, snout, tail, human ears" |
+| **Gender** | Any (both sexes), female only, male only, hermaphrodite only, unisex only (no male or female) or other only with a note. The prompts get the matching words and tags, and the narrator is told. | the Wisplings are "unisex only" |
+| **LoRA** | A LoRA for this species (ComfyUI only), listed with the files that fit the picture maker first. | |
+
+**✨ Fill everything from the story** drafts all of these from your prompt and the species' members, and **Save to library** keeps a species (with a picture) for other stories. The example also gives **Human** a palette, clothing and combat clothing, to show that humans can have them too. Species and their options travel in the package.
+
+---
 
 ## 7. Places (🖼 Art → Places)
 
@@ -89,7 +104,7 @@ Locations the story returns to. Each has a **name** the narrator uses in place t
 
 Also in this tab: portrait shape, whether new characters get art offered, the "right now" card and where scene pictures appear. A **cover** (🖼 Art → Cover) and a **backdrop** (🖼 Art → Backgrounds) finish the package.
 
-## 9. Side-panel trackers (⚙️ Settings → Story & narration → Side panel)
+## 9. Side-panel trackers (📝 Story → Writing & panel → Side panel)
 
 Choose **I choose the fields**, then add one tracker per label in your status line, with exactly the same label:
 
@@ -105,13 +120,13 @@ Choose **I choose the fields**, then add one tracker per label in your status li
 
 Values printed as `Label: value` are read for free, without an extra AI call.
 
-## 10. Starter avatar (👤 Player)
+## 10. Starter avatar (🧰 tools panel → Avatar)
 
 A ready-made player character that fits the world: name, gender, age, looks, personality, background and abilities. Players can keep it or replace it. The example is **Rowan Hale**, a former canal-boat courier.
 
 ## 11. Export
 
-**💾 Export & backups → Story package:**
+**Settings → Libraries & backup → Export this story → Story package:**
 - **All pictures** (or one per character for a smaller file);
 - tick **Include my avatar sheet as a starter character**;
 - tick **Smaller file: save pictures as WebP** to make the file several times smaller;
@@ -119,7 +134,7 @@ A ready-made player character that fits the world: name, gender, age, looks, per
 
 Turns, memory, notes, usage and API keys are never included.
 
-## 12. Lore entries (📚 Lore, in the 🧠 Memory screen)
+## 12. Lore entries (🧰 tools panel → 📚 Lore library)
 
 **What they are:** facts about your world that the app keeps and sends to the narrator **only when they matter**. Each entry has a title, **trigger words**, and the text the narrator should know. When one of its trigger words appears in the player's move or the last two turns, the entry is added to the narrator's instructions, hidden from the player. An entry ticked **Always send** goes out every turn. No AI is involved, so it costs nothing.
 
@@ -141,7 +156,7 @@ Turns, memory, notes, usage and API keys are never included.
 
 ## 13. Stat points and dice (optional, for stories with stats)
 
-- **Points the player spends:** give your Points tracker a **spend points on** list (Settings → Story & narration → Side panel; for example `Strength, Stamina`) and an optional **max**. The side panel then shows **+** buttons, the app does the arithmetic, a window opens at the start of a new game to place starting points (read from the avatar sheet: "Strength 8, … Free points: 5"), and the narrator is told the final numbers and never assigns points itself. Players can add skills (for example a class's) in that window.
+- **Points the player spends:** give your Points tracker a **spend points on** list (📝 Story → Writing & panel → Side panel; for example `Strength, Stamina`) and an optional **max**. The side panel then shows **+** buttons, the app does the arithmetic, a window opens at the start of a new game to place starting points (read from the avatar sheet: "Strength 8, … Free points: 5"), and the narrator is told the final numbers and never assigns points itself. Players can add skills (for example a class's) in that window.
 - **Dice:** the 🎲 button in ⚡ rolls a d20 + (stat − 5) against a difficulty and sends the outcome to the narrator as final. If your story prompt mentions rolls, checks or dice, the app also rolls **automatically** for risky actions; otherwise rolls happen only when the player presses 🎲. The player can change this in the same window.
 
 ## Checklist
@@ -157,23 +172,25 @@ Turns, memory, notes, usage and API keys are never included.
 
 ---
 
-## 12. More parts a package can carry
+## 14. More parts a package can carry
 
 Besides the parts above, a package can ship all of these (the Lantern Market uses each one):
 
 | Part | Where it lives in the app | What the example does |
 |---|---|---|
-| **Alternate openings** | ✎ Edit story → Story start → Alternate openings (up to 6) | Three ways to begin: the Lily Raft, the Drowned Archive, a late arrival. The player picks before the first move. |
-| **Story beats** | 📅 in the header | Seven beats: by move count (`turn`), by Night, by the Lanterns count, and two that fire only for the road taken (`Route`). |
-| **Lore** | 🧠 Memory → 📚 Lore | Nine entries sent only when a trigger word appears; one tone entry is always sent. |
-| **World clock** | ✎ Edit story → Options → World clock | On, starts at 20:00, 20 minutes per reply. |
+| **Alternate openings** | 📝 Story → Story → Story start → Alternate openings (up to 6) | Three ways to begin: the Lily Raft, the Drowned Archive, a late arrival. The player picks before the first move. |
+| **Story beats** | 📝 Story → Beats | Seven beats: by move count (`turn`), by Night, by the Lanterns count, and two that fire only for the road taken (`Route`). |
+| **Lore** | 🧰 tools panel → 📚 Lore library | Nine entries sent only when a trigger word appears; one tone entry is always sent. |
+| **World clock** | 📝 Story → Story → Options → World clock | On, starts at 20:00, 20 minutes per reply. |
 | **Dice** | 🎲 in the ⚡ Quick window | Automatic rolls on, medium difficulty, against four stat trackers. |
-| **Command buttons** | ✎ Edit story → Options → Command buttons | Five buttons: two that send, one that opens the input box, one that opens the stat-points window. |
-| **Trackers with a start value, a point pool and a counter** | Settings → AI & story → Side panel | Stats with starting values, a Points tracker that is spent on the stats, a "Night turn" counter, a Route choice and a per-character Trust slider. |
-| **Inventory** | 🎒 | On, with four starting items. |
-| **Generic characters** | 🎭 Cast → Cast tools → Generic characters… | Three throwaway characters shown as one card. |
-| **A character with no picture** | 🎭 Cast → click a character → Images | Pim, so you can try drawing a face (pick from 4). |
+| **Command buttons** | 📝 Story → Story → Options → Command buttons | Five buttons: two that send, one that opens the input box, one that opens the stat-points window. |
+| **Trackers with a start value, a point pool and a counter** | 📝 Story → Writing & panel → Side panel | Stats with starting values, a Points tracker that is spent on the stats, a "Night turn" counter, a Route choice and a per-character Trust slider. |
+| **Inventory** | 🧰 tools panel → 🎒 Inventory | On, with four starting items. |
+| **Generic characters** | 🧰 Cast → Cast tools → Generic characters… | Three throwaway characters shown as one card. |
+| **A character with no picture** | 🧰 Cast → click a character → Images | Pim, so you can try drawing a face (pick from 4). |
 | **Also-called names** | A character's page → Also called | "the Warden" for Ottilie. |
-| **Intro panels** | ✎ Edit story → Media, or 🖼 Art → Intro panels | Three panels shown above the story's start. |
+| **Narration style** | 📝 Story → Narration | A mystery tone, vivid prose, a dry wit and occasional winks (the sarcasm and fourth-wall choices); the Preview buttons show how it reads. |
+| **Species options** | 🖼 Art → Species & makers… | Mothfolk and Human have a palette, clothing, combat clothing and words to keep out; the Wisplings are an all-unisex species. |
+| **Intro panels** | 🖼 Art → Intro panels | Three panels shown above the story's start. |
 
 What a package never carries: turns, memory, notes, the side panel's current values, pictures you draw later, usage and API keys.
