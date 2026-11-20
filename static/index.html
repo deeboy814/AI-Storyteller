@@ -27,7 +27,7 @@ window.__bugErr = [];
     <button class="icon hmenu" id="btnMenu" title="Menu: story tools and settings" aria-expanded="false">☰</button>
     <div class="tools" id="tools">
       <select id="modelSelect" title="Model"></select>
-      <button class="icon" id="btnLeft" title="Your stories: switch story or start a new one">📚</button>
+      <button class="icon mobonly lbl" id="btnCast" title="Cast: characters, relationships and gallery">👥 <span>Cast</span></button>
       <button class="icon" id="btnTools" title="Story tools panel: Cast, Lore library, Avatar, Inventory, Journal, Search">🧰</button>
       <button class="icon" id="btnSide" title="Status panel">ℹ️</button>
       <button class="icon" id="btnHome" title="Home: all your stories">🏠</button>
@@ -48,6 +48,7 @@ window.__bugErr = [];
   </main>
 
   <footer>
+    <button id="footToggle" class="foottoggle" title="Hide the bottom controls" aria-label="Hide or show the bottom controls">▾</button>
     <div id="artBanner" class="artbanner hidden"></div>
     <div id="cacheNote" class="cachenote"></div>
     <div id="updateNote" class="budgetnote hidden"></div>
@@ -97,6 +98,7 @@ window.__bugErr = [];
 <script src="/static/images.js"></script>
 <script src="/static/arthub.js"></script>
 <script src="/static/lightbox.js"></script>
+<script src="/static/media.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/leftbar.js"></script>
 </body>

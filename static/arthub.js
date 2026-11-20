@@ -21,6 +21,10 @@ function showArtHub(tab = "Overview") {
     <div id="hubOverview" class="hubgrid">
       ${card("🎭", "Characters", `${cast.length} character${cast.length === 1 ? "" : "s"} · ${withArt} with pictures${need ? ` · <b>${need} need art</b>` : ""}`,
         `<button id="hCast">Cast &amp; pictures…</button><button id="aNew">Draw art for new characters…</button><button id="hGal">Gallery</button><button id="hSpecies">Species &amp; makers…</button>`)}
+      ${(() => { const sb = story.statsheets || {}; if (!sb.on) return "";       // character sheets: shown only in stories that have them on
+        const has = (c) => { const h = (sb.items || {})[c.slug]; return !!(h && ((h.stats || []).length || (h.notes || "").trim())); }, n = cast.filter(has).length, shown = cast.slice(0, 12);
+        return card("📋", "Character sheets", `${n} of ${cast.length} character${cast.length === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} a sheet · the narrator updates them: ${onoff(sb.auto !== false)}`,
+          shown.map((c) => `<button class="hSheet" data-slug="${esc(c.slug)}" title="Open ${esc(c.name)}'s sheet">${has(c) ? "✓ " : ""}${esc(c.name)}</button>`).join("") + (cast.length > shown.length ? `<button id="hSheetMore">All characters…</button>` : "")); })()}
       ${card("🧑", "Your avatar", story.avatar_image ? "Has a picture" : "No picture yet", `<button id="hAvatar">Avatar picture…</button>`)}
       ${card("📍", "Places", `${places.length} place${places.length === 1 ? "" : "s"} · ${placesArt} with pictures`, `<button id="hPlaces">Manage places…</button>`)}
       ${card("🌄", "Backgrounds", `Showing: ${esc(bd.name || (bd.url ? "a picture you chose" : "nothing yet"))}<br>Changes automatically: ${onoff(a.auto_backdrop)}${a.dynamic_backdrop ? " (also for dramatic moments)" : ""} · screen display: ${onoff(config && config.ui_backdrop)}`, `<button id="hBg">Backgrounds…</button>`)}
@@ -62,6 +66,8 @@ function showArtHub(tab = "Overview") {
   const back = () => showArtHub("Overview");
   const via = (f) => () => { artBack = back; f(); };    // the screen that opens gets a "← Art menu" button (see modal() in app.js)
   $("hCast").onclick = via(() => showCast("Characters"));
+  document.querySelectorAll(".hSheet").forEach((b) => b.onclick = via(() => showCharacter(b.dataset.slug, "Sheet")));
+  if ($("hSheetMore")) $("hSheetMore").onclick = via(() => showCast("Characters"));
   $("hGal").onclick = via(() => showCast("Gallery"));
   $("hSpecies").onclick = via(() => showSpecies({ back }));
   $("hIntro").onclick = via(() => showCast("Intro"));
@@ -129,6 +135,7 @@ async function mountMakers(box) {
 const fld = (label, control, help = "") => `<div class="field"><label>${label}</label>${control}${help ? `<div class="hint">${help}</div>` : ""}</div>`;
   box.innerHTML = `<h3>Which AI draws pictures${story ? ` in “${esc(story.title)}”` : ""}</h3><div id="mkPick"></div>
     ${imageSettingsHtml(config)}
+    ${videoSettingsHtml(config)}
     <h3>Local picture generator (ComfyUI)</h3>
     <div class="hint">Its address and which checkpoint to use are in the picture makers above; this section controls when it starts and stops, and whether characters can borrow pictures from other stories. These are app-wide.</div>
     <label class="chk top"><input type="checkbox" id="sRtComfy" ${config.rt_comfy ? "checked" : ""}><span><b>Start and stop ComfyUI automatically</b><span class="hint">ComfyUI starts when you open a story that draws pictures locally (or when a picture is asked for), and shuts down after it has been idle for the time below. Starting takes about 15 to 30 seconds.</span></span></label>

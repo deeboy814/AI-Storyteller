@@ -29,16 +29,35 @@ def _blockish(line: str, labels: list[str]) -> bool:
     return len(s) <= HEADING_MAX and not re.search(r"[.!?,;]$", s)
 
 
+def _fenced_block(text: str, lines: list[str], offs: list[int], labels: list[str]) -> tuple[int, int] | None:
+    """A status panel printed inside a code fence at the very end of the reply: the whole fence (both ``` lines included), so the panel look is kept."""
+    close = len(lines) - 1
+    while close >= 0 and not lines[close].strip():
+        close -= 1
+    if close < 1 or lines[close].strip() != SKIP_FENCE:
+        return None
+    opn = close - 1
+    while opn >= 0 and not lines[opn].strip().startswith(SKIP_FENCE):
+        opn -= 1
+    if opn < 0 or close - opn > 40:
+        return None
+    if not any(rules._line_is_status(ln, labels) for ln in lines[opn + 1:close]):
+        return None
+    return offs[opn], offs[close] + len(lines[close].rstrip())
+
+
 def find_block(text: str, labels: list[str]) -> tuple[int, int] | None:
     """(start, end) character offsets of the status block at the end of a reply, or None. The block holds the status line (the one carrying the labels the
     story prompt describes) plus any "Label: value" lines and short heading around it, up to the end of the reply."""
-    if not labels or not text or SKIP_FENCE in text.split("\n")[-1]:
+    if not labels or not text:
         return None
     lines = text.split("\n")
     offs, pos = [], 0
     for ln in lines:
         offs.append(pos)
         pos += len(ln) + 1
+    if SKIP_FENCE in lines[-1] or SKIP_FENCE in text.rstrip().split("\n")[-1]:
+        return _fenced_block(text, lines, offs, labels)
     stat = [i for i, ln in enumerate(lines) if rules._line_is_status(ln, labels)]
     if not stat:
         return None

@@ -20,7 +20,7 @@ function inlineMd(text) {
     .map((l) => {
       let imgs = "";
       l = l.replace(/!\[[^\]]*\]\(portrait:([^)]+)\)/g, (_, spec) => { imgs += portraitHtml(spec); return ""; });
-      l = l.replace(/\[\[([^\]\/\n|]{1,40})\/([^\]\n|]{1,40})\]\]/g, (_, n, m) => { imgs += portraitHtml(n.trim() + "/" + m.trim()); return ""; });   // the compact tag the narrator writes while a reply is still streaming
+      l = l.replace(/\[\[([^\]\/\n|]{1,40})\/([^\]\n|]{1,90})\]\]/g, (_, n, m) => { imgs += portraitHtml(n.trim() + "/" + m.trim()); return ""; });   // the compact tag the narrator writes while a reply is still streaming
       l = l.replace(/!\[[^\]]*\]\(intro:([^)]+)\)/g, (_, name) => { imgs += introPanelHtml(name); return ""; });
       l = l.replace(/!\[[^\]]*\]\(place:([^)]+)\)/g, (_, name) => { imgs += placeHtml(name); return ""; });
       l = l.replace(/^&gt;\s?/, "");   // "> quote" marker: show the text without it
@@ -48,7 +48,7 @@ function md(text) {
     return `<pre class="note">${esc(body.replace(/\n+$/, ""))}</pre>`;
   }).join("");
 }
-function stripState(t) { t = t.replace(/<items>[\s\S]*?(<\/items>|$)/gi, ""); const cut = ["<state", "<scene", "<newchar"].map((k) => t.indexOf(k)).filter((i) => i >= 0); return cut.length ? t.slice(0, Math.min(...cut)) : t; }
+function stripState(t) { t = t.replace(/<(items|sheet)>[\s\S]*?(<\/\1>|$)/gi, "").replace(/<hidden>[\s\S]*?(<\/hidden>|$)/gi, ""); const cut = ["<state", "<scene", "<newchar"].map((k) => t.indexOf(k)).filter((i) => i >= 0); return cut.length ? t.slice(0, Math.min(...cut)) : t; }
 
 // Token readout under the latest reply. Claude reports cached vs new prompt tokens. Ollama reports the prompt size and
 // how long it took to read: a fast read on a long prompt means its cached copy was reused.
@@ -135,7 +135,7 @@ function renderSidebar() {
     h += "<h4>You</h4>" + (story.avatar_image ? `<img class="avatar" src="${story.avatar_image}" alt="">` : "") + (av.name ? `<div><b>${esc(av.name)}</b></div>` : "");
   }
   h += panel;
-  if (story && story.user_notes) h += `<h4>User notes</h4><div class="side-empty">Active (sent every turn)</div>`;
+  if (story) h += `<h4>User notes</h4><div class="side-empty">${story.user_notes ? "Active (sent every turn)" : "None yet"} · <a href="#" class="unEdit" title="Open 🧰 → Avatar → User notes">${story.user_notes ? "edit" : "write some"}</a></div>`;
   if (!panel) {   // stories whose prompt uses the state block and have no tracked data yet
     if (s.when) h += `<h4>When</h4><div>${esc(s.when)}</div>`;
     if (s.location) h += `<h4>Location</h4><div>${esc(s.location)}</div>`;
@@ -151,6 +151,7 @@ function renderSidebar() {
   if (story && story.summary) h += "<h4>Memory</h4><div class='side-empty'>Older events summarized (" + story.summary.length + " chars)</div>";
   el.innerHTML = h || '<div class="side-empty">The sheet fills in as the story is played.</div>';
   el.querySelectorAll(".pname[data-slug]").forEach((n) => n.onclick = () => showCharacter(n.dataset.slug));
+  el.querySelectorAll(".unEdit").forEach((a) => a.onclick = (e) => { e.preventDefault(); showPlayer("Notes"); });
   el.querySelectorAll(".nowscbtn button").forEach((b) => b.onclick = async () => {   // the scene picture's own buttons (same as under a reply)
     const turn = +b.dataset.turn, im = story.turns[turn] && (story.turns[turn].images || [])[+b.dataset.img]; if (!im) return;
     if (b.dataset.act === "redraw") illustrate(turn, im.scene);
@@ -197,6 +198,53 @@ const repliesWanted = () => { try { return !!story && localStorage.getItem("repl
 function setRepliesWanted(on) { try { if (story) localStorage.setItem("repliesOn:" + story.id, on ? "1" : "0"); } catch {} }
 let repliesFetching = false, wasAtBottom = true;
 const narrativeAtBottom = () => { const b = $("narrative"); return b.scrollHeight - b.scrollTop - b.clientHeight < 40; };
+// Turning the phone (portrait <-> landscape) re-wraps the text, so the old scroll position points somewhere else. The reader's place is remembered as
+// "this turn, this far down it" (or "at the bottom") while scrolling, and put back once the new width has laid out. A changed height alone
+// (the keyboard opening) is ignored.
+(() => {
+  let anchor = null, restoring = false, lastW = 0, raf = 0;
+  const box = () => document.getElementById("narrative");
+  const measure = () => {
+    const b = box();
+    if (b && !lastW) lastW = b.clientWidth;
+    if (!b || restoring || !b.clientHeight || b.clientWidth !== lastW) return;      // (a changed width is handled by turned(): never remember the re-wrapped position)
+    if (b.scrollHeight - b.scrollTop - b.clientHeight < 40) { anchor = { bottom: true }; return; }
+    const top = b.getBoundingClientRect().top;
+    for (const el of b.querySelectorAll(".turn")) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom > top + 1) { anchor = { i: el.dataset.i, f: Math.max(0, top - r.top) / Math.max(1, r.height) }; return; }
+    }
+    anchor = null;
+  };
+  document.addEventListener("scroll", (e) => { if (e.target && e.target.id === "narrative" && !raf) raf = requestAnimationFrame(() => { raf = 0; measure(); }); }, true);
+  const restore = () => {
+    const b = box();
+    if (!b || !anchor || !b.clientHeight) return;
+    b.style.scrollBehavior = "auto";
+    if (anchor.bottom) b.scrollTop = b.scrollHeight;
+    else {
+      const el = b.querySelector(`.turn[data-i="${anchor.i}"]`);
+      if (el) { const r = el.getBoundingClientRect(); b.scrollTop += r.top - b.getBoundingClientRect().top + anchor.f * r.height; }
+    }
+    b.style.scrollBehavior = "";
+  };
+  const turned = () => {
+    const b = box();
+    if (!b || b.clientWidth === lastW) return;
+    const first = !lastW;
+    lastW = b.clientWidth;
+    if (first) { measure(); return; }
+    restoring = true;               // scroll events caused by the re-wrap must not overwrite the remembered place
+    restore();
+    [120, 400].forEach((ms) => setTimeout(restore, ms));      // again once the rotation animation and the images have settled
+    setTimeout(() => { restoring = false; measure(); }, 600);
+  };
+  addEventListener("resize", turned);
+  addEventListener("orientationchange", () => setTimeout(turned, 50));
+  const watch = () => { const b = box(); if (b && "ResizeObserver" in window) new ResizeObserver(turned).observe(b); else setTimeout(watch, 500); };   // also fires when the width changes without a window event
+  watch();
+  setInterval(() => { const b = box(); if (!b || restoring) return; if (lastW && b.clientWidth !== lastW) turned(); else measure(); }, 700);      // a safety net: scroll or resize events can be missed (a page opened already scrolled, a story just loaded, a hidden tab)
+})();
 function maybeShowReplies() {
   const ro = story && story.reply_options, fresh = ro && ro.options && ro.options.length && ro.for === (story.turns || []).length;
   if (repliesWanted() && story && !busy && !repliesFetching && !fresh && story.turns.length) fetchReplies(false);
@@ -238,7 +286,17 @@ function setBusy(b) {
 // ---------- playing a turn ----------
 const rollText = (r) => `${r.label ? r.label + " " + (r.mod >= 0 ? "+" : "") + r.mod + ": " : ""}d20 ${r.die}${r.rolls && r.rolls.length > 1 ? " (" + r.rolls.join(", ") + ")" : ""} = ${r.total} vs ${r.dc} (${r.difficulty}): ${r.outcome}${r.auto ? " · automatic" : ""}`;
 // Story commands (▶ Continue, ⚔ Continue the fight, 🔞 Full adult scene) are sent with a move; the adult one can be "armed" so it goes with the next move(s)
-const CMD_LABEL = { continue: "▶ Continue", fight: "⚔ Continue the fight", adult: "🔞 Full adult scene" };
+const CMD_LABEL = { continue: "▶ Continue", fight: "⚔ Continue the fight", adult: "🔞 Full adult scene", improvise: "✍ Improvise", ooc: "💬 Out of character (OOC)" };
+// Writing mode: how the narrator treats the next move. "" = normal; "improvise" = it also writes your character; "ooc" = you are talking to the author, the story does not move.
+let wmode = "";
+const wmodeKeep = () => { try { return localStorage.getItem("wmodeKeep") === "1"; } catch (e) { return false; } };
+const WMODE_HINT = { improvise: "Improvise: type a direction (or nothing) and the narrator also writes your character…", ooc: "Out of character: ask the narrator something; the story does not move…" };
+function setWmode(m) {
+  wmode = m || "";
+  document.querySelectorAll("[data-wm]").forEach((b) => b.classList.toggle("armed", b.dataset.wm === wmode));
+  const i = $("input"); if (i) i.placeholder = WMODE_HINT[wmode] || "What do you do?";
+  const q = $("btnQuick"); if (q) q.classList.toggle("armed", !!wmode || armed);
+}
 let armed = false, armedFor = "";
 const cmdKeep = () => { try { return localStorage.getItem("adultKeep") === "1"; } catch (e) { return false; } };
 function setArmed(on) { armed = !!on && !!(story && story.nsfw); armedFor = armed ? story.id : ""; document.querySelectorAll("[data-cmd='adult']").forEach((b) => b.classList.toggle("armed", armed)); const i = $("btnQuick"); if (i) i.classList.toggle("armed", armed); }
@@ -248,9 +306,12 @@ function sendCommand(cmd, opts = {}) {
 }
 async function send(text, override, forceBudget = false, note = "", redraw = false, cmds = [], cmdOpts = {}, roll = null) {
   text = (text || "").trim();
+  if (!text && wmode && !busy && story) text = CMD_LABEL[wmode];       // improvise with nothing typed: just let the narrator go
   if (!text || busy || !story) return;
   if (armed && story.nsfw && armedFor === story.id && !cmds.includes("adult")) cmds = [...cmds, "adult"];       // the armed adult instruction goes with this move
   if (!cmdKeep()) setArmed(false);
+  if (wmode && !cmds.includes(wmode)) cmds = [...cmds, wmode];          // the writing mode goes with this move
+  if (!wmodeKeep()) setWmode("");
   const own = story.models && story.models.story;   // the story's own choice is used by the server; the header menu only matters for older stories
   const [provider, model] = override ? override.split("|") : own ? [undefined, undefined] : ($("modelSelect").value || "|").split("|");
   $("input").value = ""; autosize();
@@ -378,6 +439,11 @@ function modal(html) {
     $("modalCard").prepend(b);
   }
   foldLongHints($("modalCard"));
+  const bar = document.createElement("div");      // phones: a close button that stays at the top while you scroll (the dialog's own Close is at the very bottom of a long page)
+  bar.className = "mobclose";
+  bar.innerHTML = '<button type="button" aria-label="Close this window">✕ Close</button>';
+  bar.firstChild.onclick = closeModal;
+  $("modalCard").prepend(bar);
 }
 // Long explanations in dialogs show two lines and a "More" link, so the controls stay easy to find.
 function foldLongHints(root) {
@@ -485,7 +551,7 @@ async function fillStyleBoxes() {
   };
   if ($("pvAll")) { $("pvAll").onclick = () => run(null); $("pvSarcasm").onclick = () => run("sarcasm"); $("pvWall").onclick = () => run("fourth_wall"); }
 }
-function showPlayer() {
+function showPlayer(tab = "Avatar") {
   if (!story) return;
   const av = story.avatar || {};
   const field = (key, label, rows) => rows
@@ -493,10 +559,11 @@ function showPlayer() {
     : `<div><label>${label}</label><input id="av_${key}" value="${esc(av[key] || "")}"></div>`;
   const preview = () => story.avatar_image ? `<img class="avatar" src="${story.avatar_image}" alt="">` : '<div class="avatar noimg">No image</div>';
   modal(`<h2>Avatar</h2>
+    <div class="tabs"><button class="tab on" data-tab="Avatar">Avatar</button><button class="tab" data-tab="Notes">User notes</button></div>
     <div id="tabAvatar">
       ${config.avatar_library ? avatarLibraryRow() : ""}
       <div class="avrow"><div id="avPreview">${preview()}</div>
-        <div><input type="file" id="avFile" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:4px">
+        <div><input type="file" id="avFile" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:4px">${story && story.avatar_image ? videoBar(story.avatar_image) : ""}
         <div class="actions" style="justify-content:flex-start;margin-top:8px"><button id="avGen" title="Draws four pictures from the Avatar fields below with this story's picture maker, and you pick one">✨ Draw 4 options from the info below</button><button class="danger" id="avRemove">Remove image</button></div>
         <div class="actions" style="justify-content:flex-start;margin-top:4px"><button id="avBuild" title="Only have a name? The text model fills the empty boxes below from the story prompt, and you review them before saving">🪄 Build from story</button><span class="hint" id="avBuildNote"></span></div>
         <div id="avCand" class="hint">Upload your own, or generate one from the name, age, gender and appearance below (a safe-for-work description is written from them first). Uploads and removals apply immediately (PNG/JPEG/WebP/GIF, up to 8 MB). The picture also joins the Cast as you, so scenes can use it as a face reference; whether it is shown in scenes is up to your story prompt.</div></div></div>
@@ -505,8 +572,16 @@ function showPlayer() {
       ${field("appearance", "Appearance", 3)}${field("personality", "Personality", 3)}${field("background", "Background", 3)}
       ${field("abilities", "Abilities / stats / starting inventory", 3)}
     </div>
+    <div id="tabNotes" class="hidden">
+      <label>User notes: standing instructions for the narrator</label>
+      <textarea id="uNotes" style="min-height:280px" placeholder="e.g. Keep combat gritty and consequences permanent. Slow-burn romance. Never skip time without asking. Avoid repeating a character's catchphrase…">${esc(story.user_notes || "")}</textarea>
+      <p class="hint">Sent every turn, right after the story's memory. Edit any time; changes apply from the next turn. (The one-click narration styles are under 📝 Story → Narration.)</p>
+    </div>
     <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="mSave">Save</button></div>`);
   if (config.avatar_library) avatarLibraryInit();
+  const showTab = (t) => { document.querySelectorAll("#modalCard .tab[data-tab]").forEach((x) => x.classList.toggle("on", x.dataset.tab === t)); for (const n of ["Avatar", "Notes"]) $("tab" + n).classList.toggle("hidden", n !== t); };
+  document.querySelectorAll("#modalCard .tab[data-tab]").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
+  showTab(tab);
   const refresh = () => { $("avPreview").innerHTML = preview(); renderSidebar(); };
   $("avFile").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
@@ -554,7 +629,7 @@ function showPlayer() {
   $("mSave").onclick = async () => {
     const avatar = {};
     for (const k of ["name", "gender", "age", "appearance", "personality", "background", "abilities"]) avatar[k] = $("av_" + k).value;
-    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar, user_notes: story.user_notes || "", style: null } });      // (notes and narration style are saved in 📝 Story → Narration)
+    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar, user_notes: $("uNotes").value, style: null } });      // (the narration style is saved in 📝 Story → Narration)
     closeModal(); renderAll();
   };
 }
@@ -567,14 +642,11 @@ function showNarration() {
       <p class="hint">One-click choices for this story. "As the story is written" leaves it to the story prompt. The story's own rules and formats always come first.</p>
       <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button type="button" id="pvAll" title="The narrator writes a few lines of the story's current moment with every option chosen above (one small model call, nothing is saved)">▶ Preview narration</button><button type="button" id="pvSarcasm" title="A few lines with only the Sarcasm choice">▶ Preview sarcasm</button><button type="button" id="pvWall" title="A few lines with only the Fourth wall choice">▶ Preview fourth wall</button></div>
       <div id="pvOut" class="aiBox hidden" role="status"></div>
-      <label>Standing instructions for the narrator</label>
-      <textarea id="uNotes" placeholder="e.g. Keep combat gritty and consequences permanent. Slow-burn romance. Never skip time without asking. Avoid repeating a character's catchphrase…">${esc(story.user_notes || "")}</textarea>
-      <p class="hint">Sent every turn, right after the story's memory. Edit any time; changes apply from the next turn.</p>
     <div class="actions"><button id="mClose">Cancel</button><button class="primary" id="mSave">Save</button></div>`);
   fillStyleBoxes();
   $("mClose").onclick = closeModal;
   $("mSave").onclick = async () => {
-    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar: story.avatar || {}, user_notes: $("uNotes").value, style: styleChosen() } });
+    story = await api(`/stories/${story.id}/player`, { method: "PUT", body: { avatar: story.avatar || {}, user_notes: story.user_notes || "", style: styleChosen() } });
     closeModal(); renderAll();
   };
 }
@@ -929,6 +1001,12 @@ bindTools();
 // side panel on a phone: a small tab on the right edge (or a swipe from the edge) slides it over the story; tap the tab, the story or swipe back to close
 { const sb = $("sidebar"), tab = $("sideTab");
   const setSide = on => { sb.classList.toggle("open", on); document.body.classList.toggle("sideopen", on); tab.textContent = on ? "›" : "‹"; tab.title = on ? "Close the status panel" : "Open the status panel"; };
+  const _ft = $("footToggle");
+  if (_ft) {
+    const setFold = (f) => { document.body.classList.toggle("footfold", f); _ft.textContent = f ? "▴" : "▾"; _ft.title = f ? "Show the bottom controls" : "Hide the bottom controls"; try { localStorage.setItem("footfold", f ? "1" : ""); } catch (e) {} };
+    try { if (localStorage.getItem("footfold")) setFold(true); } catch (e) {}
+    _ft.onclick = () => setFold(!document.body.classList.contains("footfold"));
+  }
   $("btnSide").onclick = () => setSide(!sb.classList.contains("open"));
   tab.onclick = () => setSide(!sb.classList.contains("open"));
   document.addEventListener("click", e => { if (sb.classList.contains("open") && e.target.isConnected && !e.target.closest("#sidebar, #sideTab, #btnSide, .modal, #modal")) setSide(false); });   // a tap on a panel tab redraws the panel, so its target is already detached: that is not a tap outside

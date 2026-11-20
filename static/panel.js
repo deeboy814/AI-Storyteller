@@ -11,6 +11,17 @@ function activeFields() {
 const fmtVal = (v) => (v === null || v === undefined ? "(nothing yet)" : Array.isArray(v) ? (v.map((q) => q.name + (q.status && q.status !== "active" ? ` (${q.status})` : "")).join(", ") || "(none)") : STATUS_WORDS[v] || String(v));
 let panelTab = (() => { try { return localStorage.getItem("panelTab") || ""; } catch (e) { return ""; } })();
 let panelMin = (() => { try { return localStorage.getItem("panelMin") === "1"; } catch (e) { return false; } })();
+const openSheets = new Set();   // character sheets opened in the Cast pane (kept across updates)
+function sheetBlockHtml(c) {   // a character's sheet (stats, notes, picture) inside the side panel's Cast list; empty unless sheets are on for this story and they have one
+  const sb = story.statsheets || {}; if (!sb.on || !c || c.player) return "";
+  const sh = (sb.items || {})[c.slug]; if (!sh || !((sh.stats || []).length || (sh.notes || "").trim())) return "";
+  const n = (sh.stats || []).length;
+  return `<details class="pcsheet" data-slug="${esc(c.slug)}"${openSheets.has(c.slug) ? " open" : ""}><summary>📋 Sheet${n ? ` · ${n} stat${n > 1 ? "s" : ""}` : ""}</summary>`
+    + (sh.stats || []).map((x) => `<div class="kv"><small>${esc(x.name)}</small> ${esc(x.value)}</div>`).join("")
+    + ((sh.notes || "").trim() ? `<div class="kv sheetnotes"><small>Notes</small> ${esc(sh.notes)}</div>` : "")
+    + (sh.image ? `<a href="${esc(sh.image)}" target="_blank"><img class="sheetimg" loading="lazy" src="${esc(sh.image)}" alt=""></a>` : "")
+    + `<div class="qstat"><a href="#" class="sheetedit" data-slug="${esc(c.slug)}">✎ Edit sheet</a></div></details>`;
+}
 const openQuests = new Set();   // quest rows the player has opened (kept across updates)
 
 // The latest dice roll the app made, at the top of the side panel. It belongs to the player's most recent move: the moment a later move has no roll, it is gone.
@@ -26,7 +37,7 @@ function rollCardHtml() {
 }
 function panelSidebarHtml() {
   const tr = story && story.tracker; if (!tr) return "";
-  const F = activeFields(), byId = Object.fromEntries(F.map((f) => [f.id, f])), changes = tr.changes || [];
+  const F = activeFields().filter((f) => !f.hidden), byId = Object.fromEntries(F.map((f) => [f.id, f])), changes = tr.changes || [];
   const find = (s, n, k) => changes.find((c) => c.s === s && (c.n || null) === (n || null) && c.k === k);
   // stat points the player spends with buttons (a number tracker with a "spend on" list)
   const pf = F.find((f) => f.kind === "number" && (f.spend_on || []).length && /^(me|scene)\./.test(f.id));
@@ -69,6 +80,7 @@ function panelSidebarHtml() {
   if (me) info += `<h4>Stats</h4>${me}`;
   const itemsHtml = (typeof invCardsHtml === "function" ? invCardsHtml() : "") + kv("me", isItem);
   const cf = F.filter((f) => f.id.startsWith("chars."));
+  const sheetShown = new Set();   // cast members whose sheet is already in the list
   const names = Object.keys(tr.chars || {}).filter((n) => cf.some((f) => tr.chars[n][f.id.split(".")[1]] != null));
   if (cf.length && names.length) {
     const sl = cf.filter((f) => f.kind === "slider"), main = sl[0];
@@ -86,13 +98,21 @@ function panelSidebarHtml() {
         const d = ch && typeof ch.b === "number" && typeof ch.a === "number" ? ch.a - ch.b : 0;
         return `<div class="row"><small>${esc(f.label)} ${v}${d ? ` <span class="${d > 0 ? "up" : "down"}">${d > 0 ? "+" : ""}${d}</span>` : ""}</small></div><div class="aff${mark(ch)}"><i class="${v < 0 ? "neg" : ""}" style="${fill}"></i><b style="left:${zero}%"></b></div>`;
       }).join("");
-      const lines = cf.filter((f) => f.kind === "text" || f.kind === "number" || (f.kind === "status" && f !== st)).map((f) => { const k = f.id.split(".")[1]; if (c[k] == null || c[k] === "") return ""; const ch = find("chars", n, k); return `<div class="kv${mark(ch)}"><small>${esc(f.label)}</small> ${esc(String(c[k]))}${f.kind === "number" && f.unit ? " " + esc(f.unit) : ""}</div>`; }).join("");
+      const pairOf = (k, v) => { const low = Object.keys(tr.chars || {}); const hit = low.find((x) => x.toLowerCase() === String(v).toLowerCase()) || low.find((x) => x.toLowerCase().split(" ")[0] === String(v).toLowerCase().split(" ")[0]); const back = hit && String((tr.chars[hit] || {})[k] || "").toLowerCase(); return { name: hit || v, mutual: !!back && (back === n.toLowerCase() || back === n.toLowerCase().split(" ")[0]) }; };
+      const lines = cf.filter((f) => f.kind === "text" || f.kind === "number" || f.kind === "pair" || (f.kind === "status" && f !== st)).map((f) => { const k = f.id.split(".")[1]; if (c[k] == null || c[k] === "") return "";
+        if (f.kind === "pair") { if (/^(none|nobody|no one|n\/a|-)$/i.test(String(c[k]).trim())) return ""; const pr = pairOf(k, c[k]); const ch0 = find("chars", n, k); return `<div class="kv pairrow ${pr.mutual ? "mutual" : "oneside"}${mark(ch0)}" title="${pr.mutual ? "Both chose each other" : "Only " + esc(n) + " has chosen: " + esc(pr.name) + " has not chosen " + esc(n) + " back"}"><small>${esc(f.label)}</small> ${pr.mutual ? "💞" : "↗"} ${esc(pr.name)}${pr.mutual ? "" : " <span class=\"muted\">(not mutual)</span>"}</div>`; } const ch = find("chars", n, k); return `<div class="kv${mark(ch)}"><small>${esc(f.label)}</small> ${esc(String(c[k]))}${f.kind === "number" && f.unit ? " " + esc(f.unit) : ""}</div>`; }).join("");
       const pic = cast && normalUrl(cast) ? `<img src="${thumbUrl(normalUrl(cast), 96)}" alt="">` : esc(n.charAt(0).toUpperCase());
       const head = `<span class="pav sm">${pic}</span>`;
+      const sheetH = sheetBlockHtml(cast); if (sheetH) sheetShown.add(cast.slug);
       const mk = (body) => `<div class="pchar ${stv === "dead" ? "dead" : ""}"><div class="row">${head}<span class="pname" ${cast ? `data-slug="${esc(cast.slug)}"` : ""}>${esc(n)}${isNew ? ` <span class="newtag" title="First appeared this turn">new</span>` : ""}</span>${needArt ? `<button class="artneed" data-art="${esc(cast.name)}" title="${esc(cast.name)} has no pictures yet. Click to create some.">🎨</button>` : ""}${stv ? chip(stv, find("chars", n, st.id.split(".")[1])) : ""}</div>${body}</div>`;
-      return { rel: sliders ? mk(sliders) : "", cast: lines ? mk(lines) : "" };
+      return { rel: sliders ? mk(sliders) : "", cast: lines || sheetH ? mk(lines + sheetH) : "" };
     };
     names2.forEach((n) => { const r = build(n); rel += r.rel; castH += r.cast; });
+  }
+  for (const c of (story.statsheets || {}).on ? story.cast || [] : []) {      // characters with a sheet but no row of their own in the tracker
+    if (sheetShown.has(c.slug)) continue;
+    const blk = sheetBlockHtml(c); if (!blk) continue;
+    castH += `<div class="pchar"><div class="row"><span class="pav sm">${normalUrl(c) ? `<img src="${thumbUrl(normalUrl(c), 96)}" alt="">` : esc(c.name.charAt(0).toUpperCase())}</span><span class="pname" data-slug="${esc(c.slug)}">${esc(c.name)}</span></div>${blk}</div>`;
   }
   for (const f of F.filter((x) => x.kind === "quests")) {
     const k = f.id.split(".")[1], list = (tr.me || {})[k]; if (!Array.isArray(list)) continue;
@@ -145,6 +165,8 @@ function bindPanel(el) {   // tab clicks, minimize, quest rows (called after the
     if (day !== null && !(day > 0)) return alert("Type a Day number, such as 9.");
     try { const r = await api(`/stories/${story.id}/quest-deadline`, { method: "PUT", body: { name: b.dataset.dl, day } }); story.tracker = r.tracker; renderSidebar(); } catch (e) { alert(e.message); }
   });
+  el.querySelectorAll("details.pcsheet").forEach((d) => d.addEventListener("toggle", () => { if (d.open) openSheets.add(d.dataset.slug); else openSheets.delete(d.dataset.slug); }));
+  el.querySelectorAll(".sheetedit").forEach((a) => a.onclick = (ev) => { ev.preventDefault(); showCharacter(a.dataset.slug, "Sheet"); });
   el.querySelectorAll("details.quest").forEach((d) => d.addEventListener("toggle", () => { if (d.open) openQuests.add(d.dataset.q); else openQuests.delete(d.dataset.q); }));
 }
 
@@ -167,7 +189,7 @@ function nextLevelAt(levels, v, cap) {   // same rule as the server's tracker.le
 
 // ---- the player's own trackers: type a name, say where it lives and how it looks (text / number / slider / status)
 const TRK_SCOPES = [["me", "You"], ["scene", "Scene"], ["chars", "Each character"]];
-const TRK_KINDS = [["slider", "Slider (gauge)"], ["number", "Number"], ["status", "Status (labels)"], ["text", "Text"], ["quests", "Quest log (tab)"]];
+const TRK_KINDS = [["slider", "Slider (gauge)"], ["number", "Number"], ["status", "Status (labels)"], ["text", "Text"], ["quests", "Quest log (tab)"], ["history", "History (last few values of another tracker)"], ["pair", "Pair (a character's partner; both sides must agree)"]];
 function trackerEditor(el, initial, ctx) {
   // ctx: { storyId?, title?, base_prompt?, models? } for the "Suggest" helper. Returns { get() } giving the cleaned list.
   let list = JSON.parse(JSON.stringify(initial || []));
@@ -175,9 +197,11 @@ function trackerEditor(el, initial, ctx) {
     el.querySelectorAll(".trow").forEach((r, i) => {
       const f = list[i]; if (!f) return; const g = (k) => { const x = r.querySelector(`[data-k="${k}"]`); return x ? x.value : undefined; };
       f.label = g("label"); f.scope = g("scope"); f.kind = g("kind"); f.note = g("note");
+      { const hx = r.querySelector('[data-k="hidden"]'); f.hidden = !!(hx && hx.checked); }
+      if (f.kind === "history") { f.of = g("of"); f.keep = g("keep"); }
       if (f.kind === "slider") { f.min = g("min"); f.max = g("max"); }
       if (f.kind === "status") f.options = g("options");
-      if (f.kind === "number") { f.unit = g("unit"); f.levels = g("levels"); f.max_level = g("max_level"); f.counts = g("counts"); f.spend_on = g("spend_on"); f.spend_cap = g("spend_cap"); }
+      if (f.kind === "number") { f.unit = g("unit"); f.levels = g("levels"); f.max_level = g("max_level"); f.counts = g("counts"); f.counts_unit = g("counts_unit"); f.spend_on = g("spend_on"); f.spend_cap = g("spend_cap"); }
     });
   };
   const draw = () => {
@@ -194,8 +218,12 @@ function trackerEditor(el, initial, ctx) {
             <label title="Optional, for an XP tracker: the XP totals where each level begins (level 2 at the first number, level 3 at the second…). The app then keeps a tracker named “Level” in step with the XP, shows the next goal (XP 160 / 300) and tells the narrator the level.">levels at <input data-k="levels" placeholder="optional, e.g. 50, 150, 300" value="${esc(Array.isArray(f.levels) ? f.levels.join(", ") : f.levels || "")}"></label>
             <label title="Optional: the highest level there is. At this level the XP shows no next goal and the narrator is told there are no more level-ups.">max level <input data-k="max_level" type="number" min="2" style="width:80px" placeholder="none" value="${esc(String(f.max_level ?? ""))}"></label>
             <label title="Optional: the app counts the narrator's replies since another tracker (for example Day) last changed, so you get a turn-of-the-day counter that never depends on the narrator counting. The narrator is told the number each turn.">counts replies since <select data-k="counts" style="max-width:150px"><option value="">(not a counter)</option>${list.filter((g, n) => n !== i && (g.label || "").trim() && ["number", "text", "status"].includes(g.kind || "")).map((g) => { const cur = (list.find((h) => h.id && h.id === f.counts) || {}).label || f.counts || ""; return `<option value="${esc(g.label)}" ${String(g.label).toLowerCase() === String(cur).toLowerCase() ? "selected" : ""}>${esc(g.label)}</option>`; }).join("")}</select> changes</label>
+            <label title="Count the narrator's replies, or the in-world days (needs a tracker called Day)">in <select data-k="counts_unit"><option value="replies" ${f.counts_unit !== "days" ? "selected" : ""}>replies</option><option value="days" ${f.counts_unit === "days" ? "selected" : ""}>days</option></select></label>
             <label title="Optional, for a points tracker (unspent stat or skill points): the stats and skills the player may spend them on, separated by commas. The side panel then shows + buttons, the app does the arithmetic, and the narrator is told the final numbers and never assigns points itself.">spend points on <input data-k="spend_on" style="min-width:170px" placeholder="optional, e.g. Strength, Stamina" value="${esc(Array.isArray(f.spend_on) ? f.spend_on.map((x) => (list.find((h) => h.id === x) || {}).label || x).join(", ") : f.spend_on || "")}"></label>
             <label title="Optional: the most a stat can reach by spending points">max <input data-k="spend_cap" type="number" min="1" style="width:70px" placeholder="none" value="${esc(String(f.spend_cap ?? ""))}"></label>` : ""}
+          ${k === "history" ? `<label title="The tracker whose earlier values are remembered, e.g. the current Breaker">remembers <select data-k="of" style="max-width:160px">${list.filter((g, n) => n !== i && (g.label || "").trim() && g.scope !== "chars" && ["text", "status", "number"].includes(g.kind || "")).map((g) => `<option value="${esc(g.label)}" ${String(g.label).toLowerCase() === String((list.find((h) => h.id && h.id === f.of) || {}).label || f.of || "").toLowerCase() ? "selected" : ""}>${esc(g.label)}</option>`).join("")}</select></label><label>keeps the last <input data-k="keep" type="number" min="1" max="10" style="width:60px" value="${esc(String(f.keep ?? 3))}"></label>` : ""}
+          ${k === "pair" ? `<span class="hint">Put each character's partner's name here. The side panel shows 💞 when both name each other, and the narrator is told which pairs are mutual.</span>` : ""}
+          <label class="chk" title="The narrator reads and updates it every reply, but the side panel never shows it to you"><input type="checkbox" data-k="hidden" ${f.hidden ? "checked" : ""}> narrator-only (hidden from the panel)</label>
           <input data-k="note" class="tnote" maxlength="200" placeholder="What it means / what changes it (helps the AI)" value="${esc(f.note || "")}"></div><div class="hint tmsg"></div></div>`;
       }).join("") + `<div class="actions" style="justify-content:flex-start"><button class="tadd">＋ Add a tracker</button></div>`;
     el.querySelectorAll(".trow").forEach((r, i) => {
@@ -241,7 +269,7 @@ function nowCardHtml() {
   const drawingNote = drawing && story.art.scene_where === "panel" ? '<div class="drawing">🎨 Drawing the scene…</div>' : "";
   const live = story.art.now_pic === "live" && n && n.image, picUrl = live ? n.image : p && p.url;
   const liveNote = story.art.now_pic === "live" && n && n.drawing ? '<div class="drawing">🎨 Drawing what they are doing…</div>' : "";
-  const who = p ? `${liveNote}<div class="nowbody${live ? " live" : ""}">${picUrl ? `<a href="${esc(picUrl)}" target="_blank"><img class="nowpic${live ? " live" : ""}${!live && isActionMood(n.mood || "") ? " upper" : ""}" src="${live ? esc(picUrl) : thumbUrl(picUrl, 360)}" alt="" title="${live ? esc(`${p.ch.name}: ${n.doing || ""}${n.wearing ? " · wearing " + n.wearing : ""}`) : ""}"></a>` : ""}<div class="nowtext"><b class="pname" data-slug="${esc(p.ch.slug)}">${esc(p.ch.name)}</b>
+  const who = p ? `${liveNote}<div class="nowbody${live ? " live" : ""}">${picUrl ? `<a href="${esc(picUrl)}" target="_blank"><img class="nowpic${live ? " live" : ""}${!live && cropsToUpper(n.mood || "") ? " upper" : ""}" src="${live ? esc(picUrl) : thumbUrl(picUrl, 360)}" alt="" title="${live ? esc(`${p.ch.name}: ${n.doing || ""}${n.wearing ? " · wearing " + n.wearing : ""}`) : ""}"></a>` : ""}<div class="nowtext"><b class="pname" data-slug="${esc(p.ch.slug)}">${esc(p.ch.name)}</b>
     ${n.mood ? `<div class="nowmood">${esc(n.mood)}</div>` : ""}${n.doing ? `<div class="nowdoing">${esc(n.doing)}</div>` : ""}${n.wearing ? `<div class="nowwear"><small>Wearing</small> ${esc(n.wearing)}</div>` : ""}</div></div>` : "";
   return `<div class="nowcard"><div class="nowhead"><small>Right now</small><button class="nowflip" title="Show my own avatar instead">me</button></div>${scene}${drawingNote}${who}</div>`;
 }

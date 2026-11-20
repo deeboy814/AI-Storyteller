@@ -16,7 +16,7 @@ MAX_NOW = 2                          # at most this many new beats go out in one
 
 
 def default() -> dict:
-    return {"on": True, "hold": 3, "lookahead": True, "extracted": False, "items": []}
+    return {"on": True, "hold": 3, "lookahead": True, "extracted": False, "items": [], "locks": []}
 
 
 def get(story: dict) -> dict:
@@ -44,7 +44,8 @@ def clean_item(raw: dict, old: dict | None = None) -> dict:
           "text": _clip(raw.get("text", old.get("text", "")), 1500), "field": field, "op": op, "value": value,
           "source": old.get("source") or ("player" if raw.get("source") == "player" else "prompt"),
           "off": bool(raw.get("off", old.get("off", False))), "fired": old.get("fired"), "why": _clip(raw.get("why", old.get("why", "")), 80),
-          "edited": bool(raw.get("edited", old.get("edited", False)))}
+          "edited": bool(raw.get("edited", old.get("edited", False))),
+          "after": re.sub(r"[^a-z0-9]", "", str(raw.get("after", old.get("after", "")) or "").lower())[:12]}    # chain: only once that event has started
     return it
 
 
@@ -68,6 +69,12 @@ def panel_value(story: dict, field: str):
 
 
 def is_due(story: dict, it: dict, move_no: int) -> bool:
+    if it.get("after"):          # a step in a chain: waits until the event it follows has gone out on an earlier move
+        prev = next((x for x in get(story)["items"] if x["id"] == it["after"]), None)
+        if not prev or prev.get("off") or prev.get("fired") is None or prev["fired"] >= move_no:
+            return False
+        if not it.get("field"):
+            return True          # chain only: the very next move after its predecessor
     f = it.get("field", "")
     if f == "next":
         return True
@@ -99,12 +106,18 @@ def status(it: dict, next_move: int, hold: int) -> str:
     fired = it.get("fired")
     if fired is not None and fired < next_move:         # a beat marked on a move that was since undone counts as not sent
         return "active" if next_move - fired < hold else "done"
-    return "notrigger" if not it.get("field") else "waiting"
+    return "notrigger" if not it.get("field") and not it.get("after") else "waiting"
 
 
 def label_of(story: dict, it: dict) -> str:
     """The trigger in words, for the list and for the narrator."""
     f, v = it.get("field", ""), it.get("value", "")
+    if it.get("after"):
+        prev = next((x for x in get(story)["items"] if x["id"] == it["after"]), None)
+        pre = f"after \u201c{prev['title']}\u201d" if prev else "after an earlier event"
+        if not f:
+            return pre
+        return pre + " and " + label_of(story, {**it, "after": ""})
     if f == "next":
         return "on the next move"
     if f == "turn":
@@ -148,6 +161,71 @@ def prepare(story: dict, move_no: int) -> str:
     return "\n".join(out)
 
 
+# ---------------- locks: rules the app holds while a condition is true ("during Selection the day never changes") ----------------
+MAX_LOCKS = 12
+
+
+def clean_lock(raw: dict, old: dict | None = None) -> dict | None:
+    old = old or {}
+    field = str(raw.get("field", old.get("field", "")) or "").strip()
+    if not re.match(r"^(scene|me)\.[a-z][a-z0-9_]{0,23}$", field):
+        return None
+    op = raw.get("op", old.get("op", "=")) if raw.get("op", old.get("op", "=")) in OPS else "="
+    value = str(raw.get("value", old.get("value", "")) or "").strip()[:60]
+    if not value:
+        return None
+    return {"id": old.get("id") or raw.get("id") or uuid.uuid4().hex[:8], "title": _clip(raw.get("title", old.get("title", "")), 60) or "Day lock",
+            "field": field, "op": op, "value": value, "off": bool(raw.get("off", old.get("off", False)))}
+
+
+def lock_active(story: dict, lk: dict) -> bool:
+    if lk.get("off"):
+        return False
+    return is_due(story, {"field": lk["field"], "op": lk["op"], "value": lk["value"]}, 10 ** 9)
+
+
+def active_locks(story: dict) -> list[dict]:
+    b = get(story)
+    return [lk for lk in b.get("locks", []) if b["on"] and lock_active(story, lk)]
+
+
+def lock_note(story: dict) -> str:
+    act = active_locks(story)
+    if not act:
+        return ""
+    names = "; ".join(f"{lk['title']} ({label_of(story, {**lk, 'after': ''})})" for lk in act)
+    return ("[DAY LOCK, enforced by the app: " + names + ". While this holds the in-world day does NOT change. Never skip time, never jump to the next day or morning, never "
+            "write a time-skip or a 'later that week'. Play the story moment by moment inside the current day; the app will undo any day change.]")
+
+
+def snapshot_day(story: dict) -> dict:
+    tr = story.get("tracker") or tracker.blank()
+    snap = {"_wd": dict(tr["_wd"]) if isinstance(tr.get("_wd"), dict) else None, "_clock": dict(tr["_clock"]) if isinstance(tr.get("_clock"), dict) else None, "fields": {}}
+    for f in tracker.active_fields(story):
+        if f["label"].strip().lower() == "day" and f["id"].split(".")[0] in ("scene", "me"):
+            sec, k = f["id"].split(".", 1)
+            snap["fields"][f["id"]] = tr[sec].get(k)
+    return snap
+
+
+def enforce_locks(story: dict, snap: dict | None, locked: bool) -> str:
+    """After a reply: when a day lock held for this reply and the day moved anyway, put the day (and the app's weekday and clock) back. Returns a note for the player ("" = nothing was undone)."""
+    if not locked or not snap:
+        return ""
+    tr = story.setdefault("tracker", tracker.blank())
+    undone = False
+    for fid, old in snap["fields"].items():
+        sec, k = fid.split(".", 1)
+        if old is not None and tr[sec].get(k) != old:
+            tr[sec][k] = old
+            undone = True
+    if undone:       # the weekday and clock go back only when the day value itself moved (a lock must not freeze the time of day within a day)
+        for key in ("_wd", "_clock"):
+            if snap.get(key) is not None and tr.get(key) != snap[key]:
+                tr[key] = snap[key]
+    return "The day lock held the day where it was: the story tried to move to another day, and the side panel was kept on the current day. You can Retry the reply for one that stays in the day." if undone else ""
+
+
 def prompt_context(story: dict) -> str:
     """The beats as plain lines, for the continuity check (so it can flag a story that has drifted from its plan)."""
     b = get(story)
@@ -162,7 +240,7 @@ def view(story: dict) -> dict:
     fields = [{"id": f["id"], "label": f["label"], "kind": f["kind"], "now": panel_value(story, f["id"])} for f in tracker.active_fields(story)
               if f["id"].split(".")[0] in ("scene", "me") and f["kind"] in ("text", "number", "slider", "status")]
     items = [{**it, "status": status(it, nm, b["hold"]), "when": label_of(story, it)} for it in sorted(b["items"], key=lambda i: order_key(story, i))]
-    return {"on": b["on"], "hold": b["hold"], "lookahead": b["lookahead"], "extracted": b["extracted"], "error": b.get("error", ""), "items": items, "fields": fields, "next_move": nm}
+    return {"locks": [{**lk, "active": lock_active(story, lk), "when": label_of(story, {**lk, "after": ""})} for lk in b.get("locks", [])], "on": b["on"], "hold": b["hold"], "lookahead": b["lookahead"], "extracted": b["extracted"], "error": b.get("error", ""), "items": items, "fields": fields, "next_move": nm}
 
 
 EXTRACT_SYSTEM = (

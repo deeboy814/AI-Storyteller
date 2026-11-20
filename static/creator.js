@@ -22,6 +22,7 @@ async function showStoryForm(s) {
     art: { direction: s && s.art ? s.art.direction || "" : (config.default_art_direction || ""), setting: s && s.art ? s.art.setting || "" : "" },
     use_state_block: !s || s.use_state_block !== false, auto_replies: !!(s && s.auto_replies), rule_check: !!(s && s.rule_check), narrator_acts: !!(s && s.narrator_acts), code_check: !s || s.code_check !== false, format_fix: !s || s.format_fix !== false, app_status: !!(s && s.app_status), clock: (s && s.clock) || { mode: "auto", start: "06:00", minutes: 30 }, nsfw: false,
     cast: [], cover: null, intro: [], backdrop: null, models: null,
+    sheets: { on: !!(s && s.statsheets && s.statsheets.on), auto: !s || !s.statsheets || s.statsheets.auto !== false },   // character sheets for NPCs
   };
   const tabs = isNew ? ["Basics", "Cast", "Story start", "Trackers & endings", "Media", "Options"] : ["Basics", "Story start", "Trackers & endings", "Options"];
   let tab = "Basics", picker = null, trk = null;
@@ -34,14 +35,14 @@ async function showStoryForm(s) {
   // ---- read the visible pane back into the draft
   const collect = () => {
     if (tab === "Basics") { D.title = val("fTitle"); D.subtitle = val("fSub"); D.description = val("fDesc"); D.base_prompt = val("fPrompt"); }
-    if (tab === "Cast") document.querySelectorAll(".ccard").forEach((el) => { const c = D.cast[+el.dataset.i]; for (const k of ["name", "appearance", "personality", "bio"]) c[k] = el.querySelector(`[data-k="${k}"]`).value; });
+    if (tab === "Cast") document.querySelectorAll(".ccard").forEach((el) => { const c = D.cast[+el.dataset.i]; for (const k of ["name", "appearance", "personality", "bio"]) c[k] = el.querySelector(`[data-k="${k}"]`).value; const st = el.querySelector('[data-k="sheetStats"]'); if (st) { c.sheetStats = st.value; c.sheetNotes = el.querySelector('[data-k="sheetNotes"]').value; } });
     if (tab === "Story start") { D.prologue = val("fPro"); D.opening = val("fOpening"); D.opening_in_context = $("fOpenCtx").checked; D.opening_name = val("fOpenName"); D.alt_openings = [...document.querySelectorAll(".altrow")].map((r) => ({ name: r.querySelector("[data-k=name]").value, text: r.querySelector("[data-k=text]").value })); D.opening_options = [...document.querySelectorAll(".optrow input")].map((i) => i.value).filter((x) => x.trim()); }
     if (tab === "Trackers & endings") {
       D.sidebar.mode = val("sfMode"); if (D.sidebar.mode === "player") { D.sidebar.fields = [...document.querySelectorAll("#sfFields input:checked")].map((i) => i.dataset.f); if (trk) D.sidebar.custom = trk.get(); }
       D.endings = [...document.querySelectorAll(".endrow")].map((r) => ({ title: r.querySelector("input").value, text: r.querySelector("textarea").value })).filter((e) => e.title.trim() || e.text.trim());
       D.art.direction = val("sfArtDir"); D.art.setting = val("sfArtSet");
     }
-    if (tab === "Options") { D.use_state_block = $("fState").checked; D.auto_replies = $("fAutoRep").checked; D.rule_check = $("fRuleChk").checked; D.narrator_acts = $("fActs").checked; D.code_check = $("fCode").checked; D.format_fix = $("fFix").checked; D.app_status = $("fAppSt").checked; D.clock = { mode: $("fClockMode").value, start: $("fClockStart").value || "06:00", minutes: +$("fClockMin").value || 30, weekdays: $("fWdMode").value, start_day: $("fWdStart").value }; if ($("fNsfw")) D.nsfw = $("fNsfw").checked; if ($("fCmds")) D.commands = cmdsFromText($("fCmds").value); if (picker) D.models = picker.get(); }
+    if (tab === "Options") { D.use_state_block = $("fState").checked; D.auto_replies = $("fAutoRep").checked; D.rule_check = $("fRuleChk").checked; D.narrator_acts = $("fActs").checked; D.code_check = $("fCode").checked; D.format_fix = $("fFix").checked; D.app_status = $("fAppSt").checked; D.clock = { mode: $("fClockMode").value, start: $("fClockStart").value || "06:00", minutes: +$("fClockMin").value || 30, weekdays: $("fWdMode").value, start_day: $("fWdStart").value }; if ($("fNsfw")) D.nsfw = $("fNsfw").checked; D.sheets = { on: $("fSheets").checked, auto: $("fSheetsAuto").checked }; if ($("fCmds")) D.commands = cmdsFromText($("fCmds").value); if (picker) D.models = picker.get(); }
   };
 
   // ---- panes
@@ -57,6 +58,7 @@ async function showStoryForm(s) {
           <div class="grid2" style="grid-template-columns:1fr 2fr"><div class="field"><label>Name</label><input data-k="name" value="${esc(c.name)}"></div><div class="field"><label>How they look <small class="muted">(for the artist)</small></label><input data-k="appearance" value="${esc(c.appearance)}"></div></div>
           <div class="field"><label>Personality</label><input data-k="personality" value="${esc(c.personality)}" placeholder="traits, how they speak, what they want"></div>
           <div class="field"><label>Bio / background</label><textarea class="short" data-k="bio" rows="2">${esc(c.bio)}</textarea></div>
+          ${D.sheets.on ? `<div class="field"><label>📋 Character sheet <small class="muted">(optional: stats separated by semicolons or one per line, e.g. Level: 3; HP: 40/40; Strength: 12)</small></label><textarea class="short" data-k="sheetStats" rows="2">${esc(c.sheetStats || "")}</textarea><input data-k="sheetNotes" value="${esc(c.sheetNotes || "")}" placeholder="Sheet notes: skills, gear, abilities"></div>` : ""}
           <div class="cfiles">${c.files.map((f, j) => `<figure class="mood"><img src="${f.url}" alt=""><figcaption>${esc(f.mood)} <button class="x cfdel" data-i="${i}" data-j="${j}" title="Remove">×</button></figcaption></figure>`).join("")}
             <label class="btnlike">＋ Pictures<input type="file" class="cfile" data-i="${i}" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></label></div>
           <div class="actions" style="justify-content:flex-start"><button class="danger crm" data-i="${i}">Remove character</button></div></div>`).join("") || '<p class="hint">No characters yet.</p>'}</div>
@@ -107,6 +109,8 @@ async function showStoryForm(s) {
       <label>Days of the week <small class="hint">(the app keeps Monday, Tuesday… and tells the narrator, moving on when a day ends: the Day number, or the clock passing midnight)</small></label>
       <div class="grid2" style="grid-template-columns:2fr 1fr"><select id="fWdMode"><option value="auto" ${(D.clock.weekdays || "auto") === "auto" ? "selected" : ""}>Let the story prompt decide (on when it names days of the week or has a Weekday value)</option><option value="on" ${D.clock.weekdays === "on" ? "selected" : ""}>On</option><option value="off" ${D.clock.weekdays === "off" ? "selected" : ""}>Off</option></select>
         <div><select id="fWdStart"><option value="">Day 1 is: what the prompt says (else Monday)</option>${["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d) => `<option value="${d}" ${D.clock.start_day === d ? "selected" : ""}>Day 1 is a ${d}</option>`).join("")}</select></div></div>
+      ${chk("fSheets", D.sheets.on, "Character sheets for NPCs", "Gives each non-player character a sheet (stats, notes and a picture of your own). The narrator is sent a character's sheet whenever they are in the scene." + (isNew ? " Switch it on and the Cast tab gets a sheet box for each premade character." : ""))}
+      ${chk("fSheetsAuto", D.sheets.auto, "Let the narrator keep the sheets up to date", "Only matters when character sheets are on: the narrator adds a hidden line when a stat changes.")}
       ${isNew ? chk("fNsfw", D.nsfw, "Adult (NSFW) content", "Allows explicit content between adult characters, in the text and in scene pictures. Off by default; change it later in Settings.") : ""}
       ${isNew ? '<h3>Which AI should run this story?</h3><div id="aiPick"></div><div class="hint">A one-time choice for this story. You can change it later in Settings.</div>' : ""}`,
   };
@@ -181,13 +185,13 @@ async function showStoryForm(s) {
     const prog = (t) => { const e = $("sfProg"); if (e) e.textContent = t; };
     $("mSave").disabled = true;
     const body = { commands: D.commands, title: D.title, subtitle: D.subtitle, base_prompt: D.base_prompt, description: D.description, prologue: D.prologue, opening: D.opening, opening_in_context: D.opening_in_context,
-      opening_options: D.opening_options, alt_openings: D.alt_openings, opening_name: D.opening_name, endings: D.endings, auto_replies: D.auto_replies, rule_check: D.rule_check, narrator_acts: D.narrator_acts, code_check: D.code_check, format_fix: D.format_fix, app_status: D.app_status, clock: D.clock, use_state_block: D.use_state_block, art: D.art,
+      opening_options: D.opening_options, alt_openings: D.alt_openings, opening_name: D.opening_name, endings: D.endings, statsheets: D.sheets, auto_replies: D.auto_replies, rule_check: D.rule_check, narrator_acts: D.narrator_acts, code_check: D.code_check, format_fix: D.format_fix, app_status: D.app_status, clock: D.clock, use_state_block: D.use_state_block, art: D.art,
       sidebar: D.sidebar.mode === "player" ? { mode: "player", fields: D.sidebar.fields, custom: D.sidebar.custom || [] } : D.sidebar.mode === "ai" ? { mode: "ai", schema: D.sidebar.schema } : { mode: "prompt" } };
     try {
       if (!isNew) { story = await api("/stories/" + s.id, { method: "PUT", body }); localStorage.setItem("story", story.id); closeModal(); renderAll(); applyTheme(config); return; }
       if (D.models && Object.keys(D.models).length) { body.models = D.models; await api("/default-models", { method: "PUT", body: body.models }); }
       body.nsfw = D.nsfw;
-      body.cast = D.cast.filter((c) => c.name.trim()).map((c) => ({ name: c.name, appearance: c.appearance, bio: c.bio, personality: c.personality }));
+      body.cast = D.cast.filter((c) => c.name.trim()).map((c) => ({ name: c.name, appearance: c.appearance, bio: c.bio, personality: c.personality, sheet: D.sheets.on && (c.sheetStats || c.sheetNotes) ? { stats: c.sheetStats || "", notes: c.sheetNotes || "" } : undefined }));
       prog("Creating the story…");
       story = await api("/stories", { method: "POST", body });
       const up = async (path, f) => { const r = await fetch(`/api${path}`, { method: "POST", headers: { "content-type": f.file.type }, body: f.file }); if (r.ok) story = await r.json(); };

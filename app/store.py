@@ -208,6 +208,7 @@ def new_story(title: str, subtitle: str, base_prompt: str, player_name: str = ""
 STORY_DEFAULTS = {
     "prologue": "", "opening_options": [], "endings": [], "target_ending": -1,
     "inventory": {"on": False, "items": []},
+    "statsheets": {"on": False, "auto": True, "items": {}},     # optional NPC character sheets (statsheet.py)
     "backdrop": {},
     "sidebar": tracker.default_sidebar(), "tracker": tracker.blank(),
     "avatar_id": "",
@@ -372,6 +373,7 @@ def list_stories() -> list[dict]:
                     "description": s.get("description", ""),
                     "player": (s.get("avatar") or {}).get("name") or s.get("player_name") or "",
                     "cast": len(s.get("cast") or []),
+                    "sheets": bool((s.get("statsheets") or {}).get("on")),      # character sheets switched on (the Library shows its Sheet tab only when some story has them)
                     "updated": s.get("updated", 0),
                 }
             )

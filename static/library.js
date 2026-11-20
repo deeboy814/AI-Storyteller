@@ -5,15 +5,16 @@ async function showLibrary(tab, opts = {}) {
   if (tab) libTab = tab;
   const inStory = !!(story && story.id);
   const castPick = inStory && opts.pick !== false && !!story.cast;
-  let avs = [], chars = [], sps = [];
-  try { [avs, chars, sps] = await Promise.all([api("/avatars"), api("/cast-library"), api("/species-library")]); } catch (e) { alert(e.message); return; }
+  let avs = [], chars = [], sps = [], allStories = [];
+  try { [avs, chars, sps, allStories] = await Promise.all([api("/avatars"), api("/cast-library"), api("/species-library"), inStory ? Promise.resolve([]) : api("/stories")]); } catch (e) { alert(e.message); return; }
+  const sheetsOk = inStory ? !!(story.statsheets || {}).on : allStories.some((x) => x.sheets);      // the sheet badge (like the Sheet tab) only where sheets are supported
   const thumb = (url, name) => url ? `<img loading="lazy" src="${esc(thumbUrl(url.split("?")[0], 360))}" alt="">` : `<span>${esc((name || "?").charAt(0).toUpperCase())}</span>`;
   const card = (kind, id, img, name, sub, extra, btn) => `<div class="charcard avcard libcard" data-kind="${kind}" data-id="${esc(id)}" tabindex="0" title="Open to edit"><div class="avthumb">${thumb(img, name)}</div>
     <div class="meta"><b>${esc(name)}</b><small>${esc(sub)}</small>${extra || ""}${btn ? `<div class="avbtns">${btn}</div>` : ""}</div></div>`;
   const grids = {
     Avatars: avs.map((a) => card("av", a.id, a.image, a.name, oneLine([a.sheet.gender, a.sheet.age, a.sheet.appearance].filter(Boolean).join(", "), 70) || "no details yet",
       story && story.avatar_id === a.id ? '<small class="evn">✓ used in this story</small>' : "", inStory ? `<button data-use="${esc(a.id)}">Use here</button>` : "")),
-    Characters: chars.map((c) => card("ch", c.id, c.image, c.name, oneLine(c.appearance || "", 70) || "no description yet", c.species ? `<small class="evn">${esc(c.species)}</small>` : "",
+    Characters: chars.map((c) => card("ch", c.id, c.image, c.name, oneLine(c.appearance || "", 70) || "no description yet", (c.species ? `<small class="evn">${esc(c.species)}</small>` : "") + (sheetsOk && c.sheet && ((c.sheet.stats || []).length || (c.sheet.notes || "").trim()) ? '<small class="evn" title="This character has a character sheet">📋 sheet</small>' : ""),
       castPick ? `<button class="primary" data-use="${esc(c.id)}">Add to story</button>` : "")),
     Species: sps.map((x) => card("sp", x.id, x.image, x.name, oneLine(x.description || "", 70) || "no description yet", x.lora ? `<small class="evn">LoRA @ ${esc(String(x.lora_strength ?? 1))}</small>` : "",
       inStory ? `<button class="primary" data-use="${esc(x.id)}">Add to story</button>` : "")),

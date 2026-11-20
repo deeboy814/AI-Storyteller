@@ -103,6 +103,8 @@ function renderQuick() {
       <button data-cmd="dice" title="Roll a d20 check against one of your stats and send your move with the result (the narrator must narrate the outcome)">🎲 Check…</button>
       <button data-cmd="fight" title="Continue the ongoing battle with dynamic, creative actions: enemies attack, dodge, counter and adapt">⚔️ Continue the fight</button>
       <label class="chk qact" title="Off: your character is left to you. On: the narrator may also choose fitting actions for your character in the fight."><input type="checkbox" id="fightAct" ${act ? "checked" : ""}> narrator may act for me</label></div>
+      <div class="qrow"><span class="qact">Writing mode:</span><button data-wm="improvise" class="${wmode === "improvise" ? "armed" : ""}" title="Improvise: the narrator also writes your character this move. Your text is only a direction (or leave it empty). Press again to switch off.">✍ Improvise</button><button data-wm="ooc" class="${wmode === "ooc" ? "armed" : ""}" title="Out of character: talk to the narrator as the author. The story does not move and nothing changes. Press again to switch off.">💬 OOC</button>
+      <label class="chk qact" title="Keep this mode on for every move until you turn it off"><input type="checkbox" id="wmodeKeep" ${wmodeKeep() ? "checked" : ""}> every move</label></div>
       ${adult ? `<div class="qrow"><button data-cmd="adult" class="${armed ? "armed" : ""}" title="A fuller adult-content instruction for narrator models that fade to black or skip intimate scenes. Press to attach it to your next move (press again to take it off).">🔞 Full adult scene</button>
       <label class="chk qact" title="Keep it attached to every move until you turn it off"><input type="checkbox" id="adultKeep" ${cmdKeep() ? "checked" : ""}> every move</label></div>` : ""}
     </div><div id="qDice" class="qdice hidden"></div><div class="qmoves" id="qMoves"></div><div class="qnotes">` + QUICK.map(([l, v]) => `<button data-v="${esc(v)}" title="Adds an OOC note to your message">${l}</button>`).join("") + "</div>";
@@ -112,6 +114,8 @@ function renderQuick() {
   bar.querySelector("[data-cmd='fight']").onclick = () => { if (!busy) sendCommand("fight", { act_for_me: $("fightAct").checked }); };
   $("fightAct").onchange = () => { try { localStorage.setItem("fightAct", $("fightAct").checked ? "1" : "0"); } catch (e) { /* not saved */ } };
   bar.querySelector("[data-cmd='dice']").onclick = () => diceForm();
+  bar.querySelectorAll("[data-wm]").forEach((b) => b.onclick = () => setWmode(wmode === b.dataset.wm ? "" : b.dataset.wm));
+  $("wmodeKeep").onchange = () => { try { localStorage.setItem("wmodeKeep", $("wmodeKeep").checked ? "1" : "0"); } catch (e) { /* not saved */ } };
   renderMoves();
   const ad = bar.querySelector("[data-cmd='adult']");
   if (ad) {
@@ -160,7 +164,7 @@ function pickVoice(name, lang = "en") {
 async function loadPiper() { try { const s = await api("/voice/status"); tts.piper = s.voices || []; return s; } catch { return null; } }
 // Plain speech text from a reply: no status blocks, pictures, links, hidden tags; then (per line) no markdown marks or emoji.
 function speechBlocks(text) {
-  return text.replace(/```[\s\S]*?```/g, "").replace(/<(state|scene|newchar|items)>[\s\S]*?(<\/\1>|$)/gi, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+  return text.replace(/```[\s\S]*?```/g, "").replace(/<(state|scene|newchar|items|sheet)>[\s\S]*?(<\/\1>|$)/gi, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "")
     .replace(/^\[\/\/\]:.*$/gm, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/https?:\/\/\S+/g, "");
 }
 function speechMarks(t) {
