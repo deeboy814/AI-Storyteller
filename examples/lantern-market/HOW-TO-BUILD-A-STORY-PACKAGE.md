@@ -189,7 +189,7 @@ Besides the parts above, a package can ship all of these (the Lantern Market use
 | **Generic characters** | 🧰 Cast → Cast tools → Generic characters… | Three throwaway characters shown as one card. |
 | **A character with no picture** | 🧰 Cast → click a character → Images | Pim, so you can try drawing a face (pick from 4). |
 | **Also-called names** | A character's page → Also called | "the Warden" for Ottilie. |
-| **Narration style** | 📝 Story → Narration | A mystery tone, vivid prose, a dry wit and occasional winks (the sarcasm and fourth-wall choices); the Preview buttons show how it reads. |
+| **Narration style** | 📝 Story → Narration (the standing instructions are under 🧰 → Avatar → User notes) | A mystery tone, vivid prose, a dry wit and occasional winks (the sarcasm and fourth-wall choices); the Preview buttons show how it reads. |
 | **Species options** | 🖼 Art → Species & makers… | Mothfolk and Human have a palette, clothing, combat clothing and words to keep out; the Wisplings are an all-unisex species. |
 | **Intro panels** | 🖼 Art → Intro panels | Three panels shown above the story's start. |
 

@@ -48,11 +48,18 @@ let drawingNew = null;             // "slug|mood" being drawn right now
 const EXPRESSION_MOODS = new Set(["default", "normal", "smile", "happy", "laugh", "laughing", "shy", "surprise", "surprised", "sulky", "fear", "scared", "sad", "angry", "scorn",
   "despair", "cute", "stern", "flustered", "unimpressed", "trusting", "determined", "worried", "confused", "bored", "disgusted", "embarrassed", "blush", "blushing",
   "cry", "crying", "smug", "curious", "proud", "nervous", "tired", "excited", "love", "flirty", "calm", "serious", "thinking", "pout", "annoyed", "suspicious",
-  "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie"]);
+  "relieved", "hopeful", "guilty", "jealous", "lonely", "grim", "cold", "zombie",
+  // the Extended Full Set
+  "grin", "sob", "moved", "awe", "contempt", "shame-rage", "ponder", "yawn", "asleep", "anxious", "joy", "cry-hug", "smile-hug", "shy-hug", "blank", "awkward", "letdown", "sulk", "very shy",
+  "shame", "shock", "panic", "tease", "kiss", "wedding dress", "suspicion", "fake smile", "woozy", "resign"]);
 // Batch generation: every image category is a set to draw ("Draw all of Moods / Actions / Positions…"); adult categories only in adult stories.
 function categorySetOptions(withPrefix) {
   return ((typeof config !== "undefined" && config && config.image_categories) || []).filter((c) => !c.nsfw || (story && story.nsfw)).map((c) => `<option value="cat:${esc(c.id)}">${withPrefix || ""}${esc(c.name)}${c.nsfw ? " (adult)" : ""}</option>`).join("");
 }
+// Body pictures (nude, positions, finishes...) are shown whole in the story: cropping them to the upper body leaves only a face. Only combat/dead-style action pictures are cropped.
+const BODY_MOODS = new Set(["nude", "undressing", "lingerie", "showering", "bathing", "afterglow", "climaxing", "riding cowgirl", "riding reverse cowgirl", "doggy-style", "blowjob", "missionary", "anal",
+  "creampie", "anal creampie", "face cum", "ass cum", "pussy cum", "swallow", "mouth cum"]);
+function cropsToUpper(m) { return isActionMood(m) && !BODY_MOODS.has(String(m || "").toLowerCase().replace(/\s*\d+$/, "").trim()); }
 function isActionMood(m) {
   if (!m) return false;
   const b = String(m).toLowerCase().replace(/\s*\d+$/, "").trim(), d = ((typeof config !== "undefined" && config && config.mood_defs) || {})[b];
@@ -63,12 +70,20 @@ function isActionMood(m) {
 function portraitInfo(spec) {
   const i = spec.lastIndexOf("/");
   const name = (i < 0 ? spec : spec.slice(0, i)).trim().toLowerCase();
-  const mood = (i < 0 ? "default" : spec.slice(i + 1)).trim().toLowerCase();
+  const rawMood = (i < 0 ? "default" : spec.slice(i + 1)).trim().toLowerCase();
+  const mood = rawMood.split("@")[0].trim() || "default", toks = rawMood.split("@").slice(1).map((x) => x.trim().replace(/\s+/g, " ")).filter(Boolean);   // [[Name/smile @swimsuit @pool]]
   const flat = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");   // "Tall Guard" = "TallGuard"
   const ch = ((story && story.cast) || []).find((c) => c.name.toLowerCase() === name || c.name.toLowerCase().split(" ")[0] === name || flat(c.name) === flat(name))
     || ((story && story.cast) || []).find((c) => (c.aka || []).some((a) => a.toLowerCase() === name || flat(a) === flat(name)));   // a nickname finds the character
   if (!ch) return null;
   const m = ch.moods || {};
+  // The narrator's @outfit and @place (or, without them, what the character is wearing now): that version of the picture where there is one, else the usual one.
+  const outfitOn = !!(story.art && story.art.outfits), pkey = (x) => (x || "").toLowerCase().split(/\s+/).join(" ");
+  const outfit = outfitOn ? (toks.find((x) => (ch.outfits || {})[x]) || ch.outfit || "") : "";
+  const place = toks.map((x) => (story.places || []).map((p) => pkey(p.name)).find((k) => k === x) || (story.places || []).map((p) => pkey(p.name)).find((k) => k.includes(x) || x.includes(k))).find(Boolean) || "";
+  const find = (set) => set && (set[mood] || (!m[mood] && set.default));
+  const v = (place && find((ch.place_pics || {})[place + (outfit ? "@" + outfit : "")])) || (outfit && find((ch.outfit_pics || {})[outfit])) || "";
+  if (v) return { ch, mood, url: v, exact: true };
   // A character's "default" is a picture named default, or else a neutral one (normal 1 / normal), or else any picture.
   const neutral = m["default"] || m["normal 1"] || m["normal"] || Object.values(m)[0] || "";
   return { ch, mood, url: m[mood] || neutral, exact: !!m[mood] || (mood === "default" && !!neutral) };
@@ -77,7 +92,7 @@ function portraitInfo(spec) {
 function portraitHtml(spec) {
   const p = portraitInfo(spec);
   if (!p) return "";
-  const crop = isActionMood(p.mood) && p.exact;     // action pictures (combat, dead, showering...): show the upper body here; a click opens the whole picture
+  const crop = cropsToUpper(p.mood) && p.exact;     // action pictures (combat, dead, showering...): show the upper body here; a click opens the whole picture
   const shown = Object.entries(p.ch.moods || {}).find(([, u]) => u === p.url), label = `${p.ch.name}${shown ? ` · ${shown[0]}` : ""}`;    // the name of the picture on screen, shown when it is opened full screen
   let h = p.url ? `<img class="npcpic${crop ? " upper" : ""}" loading="lazy" src="${thumbUrl(p.url, 640)}" alt="" data-name="${esc(label)}">` : "";
   const key = p.ch.slug + "|" + p.mood;
@@ -176,6 +191,7 @@ function showImportPortraits() {
     <label>Folder path on this computer</label><input id="ipPath" value="${esc(last)}" placeholder="/home/you/Pictures/My Story">
     <div class="actions" style="justify-content:flex-start"><button id="ipScan" class="primary">Preview</button></div>
     <div id="ipOut"></div>
+    <label class="chk"><input type="checkbox" id="ipLabel" checked> Afterwards, have the helper model name each picture's expression (smile, shy, angry…), so the mood tags can use them</label>
     <div class="actions"><button id="mClose">Cancel</button><button id="ipGo" class="primary hidden">Import these pictures</button></div>`);
   const path = () => document.getElementById("ipPath").value.trim();
   document.getElementById("mClose").onclick = () => showCast("Characters");
@@ -199,7 +215,11 @@ function showImportPortraits() {
       const r = await api(`/stories/${story.id}/cast/import-folder`, { method: "POST", body: { path: path(), apply: true } });
       story = r.story; try { localStorage.setItem("portraitFolder", path()); } catch (err) { /* optional */ }
       alert(`Imported ${r.added} pictures` + (r.duplicates ? ` (${r.duplicates} already imported, skipped)` : "") + (r.failed.length ? `. ${r.failed.length} could not be read: ${r.failed.slice(0, 3).join("; ")}` : "."));
-      renderAll(); showCast("Characters");
+      renderAll();
+      if (document.getElementById("ipLabel") && document.getElementById("ipLabel").checked) {
+        const slugs = (story.cast || []).filter((c) => (r.characters || []).some((x) => x.name.toLowerCase() === c.name.toLowerCase())).map((c) => c.slug);
+        labelMoodsDialog(slugs, () => showCast("Characters"));
+      } else showCast("Characters");
     } catch (err) { alert(err.message); e.target.disabled = false; e.target.textContent = "Import these pictures"; }
   };
 }
@@ -281,6 +301,7 @@ function artTabHtml() {
     <label class="chk"><input type="checkbox" id="artExtMoods" ${a.extended_moods ? "checked" : ""}> Use the extended set of mood pictures: new characters get the extended set by default (not just the basic one), and from the second turn on the narrator is reminded each turn to use the whole range of a character's moods instead of mostly normal and smile (off by default).</label>
     <label class="chk"><input type="checkbox" id="artSceneTpl" ${a.scene_template ? "checked" : ""}> Build scene picture prompts in the app (free): from the reply's portrait tags, the place and the most active sentence, instead of asking the AI. Simpler than the AI's, but costs no model call per picture (a scene frame the narrator wrote itself is always used first).</label>
     <label class="chk"><input type="checkbox" id="artAction" ${a.action_moods !== false ? "checked" : ""}> Action moods: in fights, chases and danger${story.nsfw ? " (and, because this story allows adult content, intimate scenes)" : ""} the narrator prefers the action pictures (strike, guard, dodge, charge, cast, wounded, victory… draw them from a character's page → Draw the set → Action set) over calm expressions. On by default; untick to keep the narrator to ordinary moods.</label>
+    <label class="chk"><input type="checkbox" id="artOutfits" ${a.outfits ? "checked" : ""}> Outfits: give a character several outfits, and each picture (expression or action) can have a version in each outfit. The narrator is told each character's outfits and picks the one that fits the scene (@outfit in the picture tag); the story shows that outfit's picture where one exists. You can also set what they wear now in their Images tab.</label>
     <label class="chk"><input type="checkbox" id="artExact" ${a.exact_moods ? "checked" : ""}> Ask for exact moods: the narrator names the real feeling (mischievous, worried, teasing, shocked…) and only uses a listed mood when it is an exact match, so you are offered a new picture for each new mood (more drawing offers; off by default)</label>
     </details>
     <details class="sub"><summary>Scene pictures</summary>
@@ -305,13 +326,13 @@ function artTabInit() { const a = (story && story.art) || {}; if ($("artSceneWhe
   $("artSettingGen").onclick = async (e) => { e.target.disabled = true; $("artSettingNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/art/setting`, { method: "POST" }); $("artSetting").value = r.art.setting; $("artSettingNote").textContent = "Done. Edit if you like, then Save."; } catch (err) { $("artSettingNote").textContent = err.message; } e.target.disabled = false; }; $("artSize").value = a.size || "portrait"; $("artSceneDisp").value = a.scene_display || "normal"; $("artSceneScale").value = a.scene_scale || "normal"; $("artPsize").value = a.portrait_size || "medium"; $("artPshape").value = a.portrait_shape || "landscape"; }
 async function artTabSave() {
   story = await api(`/stories/${story.id}/art`, { method: "PUT", body: {
-    direction: $("artDir").value, setting: $("artSetting").value, negative: $("artNeg").value, size: $("artSize").value, portrait_size: $("artPsize").value, portrait_shape: $("artPshape").value, auto: $("artAuto").checked, suggest: $("artSuggest").checked, newchar: $("artNewchar").checked, exact_moods: $("artExact").checked, action_moods: $("artAction").checked, scene_template: $("artSceneTpl").checked, extended_moods: $("artExtMoods").checked, scene_often: $("artOften").checked, scene_gap: Math.max(1, Math.min(20, +$("artSceneGap").value || 1)), scene_where: $("artSceneWhere").value, scene_display: $("artSceneDisp").value, scene_scale: $("artSceneScale").value, now_card: $("artNow").checked, now_free: $("artNowFree").checked, now_pic: $("artNowPic").value, portraits: $("artPort").checked } });
+    direction: $("artDir").value, setting: $("artSetting").value, negative: $("artNeg").value, size: $("artSize").value, portrait_size: $("artPsize").value, portrait_shape: $("artPshape").value, auto: $("artAuto").checked, suggest: $("artSuggest").checked, newchar: $("artNewchar").checked, exact_moods: $("artExact").checked, outfits: $("artOutfits").checked, action_moods: $("artAction").checked, scene_template: $("artSceneTpl").checked, extended_moods: $("artExtMoods").checked, scene_often: $("artOften").checked, scene_gap: Math.max(1, Math.min(20, +$("artSceneGap").value || 1)), scene_where: $("artSceneWhere").value, scene_display: $("artSceneDisp").value, scene_scale: $("artSceneScale").value, now_card: $("artNow").checked, now_free: $("artNowFree").checked, now_pic: $("artNowPic").value, portraits: $("artPort").checked } });
 }
 
 // ---------- Cast: character cards, and a character view with Bio / Key events / Images ----------
 const NEUTRAL_MOODS = ["default", "normal 1", "normal"];
 // The card picture is the character's neutral one: default, else "normal 1", else "normal", else any picture.
-function normalUrl(c) { const m = c.moods || {}; for (const k of NEUTRAL_MOODS) if (m[k]) return m[k]; return Object.values(m)[0] || ""; }
+function normalUrl(c) { const m = c.moods || {}; if (c.cover && m[c.cover]) return m[c.cover]; for (const k of NEUTRAL_MOODS) if (m[k]) return m[k]; return Object.values(m)[0] || ""; }
 const oneLine = (t, n) => { t = (t || "").replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
 
 // Characters that share a "group" (e.g. Generic Characters) show as one card whose picture is a mashup of up to four members' normal pictures.
@@ -406,10 +427,12 @@ function showCast(tab = "Characters") {
     : '<p class="hint">No pictures yet. Use the 🎨 button under the input box to illustrate the latest reply.</p>';
   const card = (c) => `<button class="charcard" data-slug="${esc(c.slug)}">
     ${normalUrl(c) ? `<img loading="lazy" src="${thumbUrl(normalUrl(c), 420)}" alt="">` : '<div class="noart">No art yet</div>'}
-    <div class="meta"><b>${esc(c.name)}</b>${charBadges(c)}<small>${esc(oneLine(c.bio || c.appearance, 60) || "no description yet")}</small>${(c.events || []).length ? `<small class="evn">📜 ${c.events.length} event${c.events.length > 1 ? "s" : ""}</small>` : ""}</div></button>`;
+    <div class="meta"><b>${esc(c.name)}</b>${charBadges(c)}<small>${esc(oneLine(c.bio || c.appearance, 60) || "no description yet")}</small>${(story.statsheets || {}).on && (((story.statsheets.items || {})[c.slug] || {}).stats || []).length ? '<small class="evn">📋 sheet</small>' : ""}${(c.events || []).length ? `<small class="evn">📜 ${c.events.length} event${c.events.length > 1 ? "s" : ""}</small>` : ""}</div></button>`;
   modal(`<h2>Cast &amp; gallery</h2>
     <div class="tabs"><button class="tab ctab" data-tab="Characters">Characters (${(story.cast || []).length})</button><button class="tab ctab" data-tab="Relationships">Relationships</button><button class="tab ctab" data-tab="Gallery">Gallery (${items.length})</button><button class="tab ctab" data-tab="Intro">Intro panels (${(story.intro_images || []).length})</button></div>
     <div id="cTabCharacters"><p class="hint">Click a character to see their bio, key events and all their pictures. The card shows their normal picture.</p>
+      ${(() => { const sb = story.statsheets || {}; return `<div class="sub" id="cSheetBox"><label class="chk top"><input type="checkbox" id="cSheetOn" ${sb.on ? "checked" : ""}><span><b>📋 Character sheets for NPCs</b><span class="hint">Optional. Each non-player character gets a Sheet tab with stats, notes and your own picture. The narrator is sent a character's sheet whenever they are in the scene, and can keep the numbers up to date as the story goes. Off by default; switching it off keeps what you wrote.</span></span></label>
+        <label class="chk ${sb.on ? "" : "hidden"}" id="cSheetAutoRow" style="margin-left:24px"><input type="checkbox" id="cSheetAuto" ${sb.auto === false ? "" : "checked"}><span>Let the narrator update the sheets (it adds a hidden line when a stat changes)</span></label></div>`; })()}
       <div class="cardgrid">${castCards(card)}<button class="charcard addcard" id="cAdd"><div class="noart">＋ Add character</div></button><button class="charcard addcard" id="cLib"><div class="noart">👥 From the library</div></button></div>
       <details class="fold"><summary>Cast tools</summary>
         <div class="tooltable">
@@ -452,6 +475,10 @@ function showCast(tab = "Characters") {
   $("cVoices").onclick = () => showVoices();
   $("cGroupOn").onchange = async (e) => { story = await api(`/stories/${story.id}/group-cast?on=${e.target.checked}`, { method: "PUT" }); showCast("Characters"); };
   $("cAdd").onclick = () => showCharacter(null);
+  $("cSheetOn").onchange = async () => {
+    try { story = await api(`/stories/${story.id}/statsheets`, { method: "PUT", body: { on: $("cSheetOn").checked } }); showCast("Characters"); } catch (e) { alert(e.message); }
+  };
+  $("cSheetAuto").onchange = async () => { try { story = await api(`/stories/${story.id}/statsheets`, { method: "PUT", body: { auto: $("cSheetAuto").checked } }); } catch (e) { alert(e.message); } };
   $("cLib").onclick = () => showCastLibrary();
   $("cImport").onclick = () => showImportPortraits();
   $("cFindArt").onclick = () => showArtDialog({});
@@ -517,20 +544,66 @@ function showCharacter(slug, tab = "Bio") {
   // ----- Images tab pieces
   const moodChips = () => {
     const cur = Object.entries(c.moods || {}).map(([m, u]) => [m,
-      `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 260)}" alt=""><figcaption>${esc(m)} <button class="x mregen" data-mood="${esc(m)}" title="Draw another version. The current one is kept as an earlier version.">↻</button><button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show and edit the exact prompt this picture was drawn from, and draw again from your change">📝</button><button class="x mren" data-mood="${esc(m)}" title="Rename this picture (the narrator picks pictures by name)">✎</button><button class="x mdel" data-mood="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`]);
+      `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 260)}" alt=""><figcaption>${esc(m)} <button class="x mcover${c.cover === m ? " on" : ""}" data-mood="${esc(m)}" title="${c.cover === m ? "This is the cover (click to go back to the automatic one)" : "Use this picture as the cover: the one on the character card"}">${c.cover === m ? "★" : "☆"}</button><button class="x mvid" data-url="${esc(u)}" title="Add or make a short video clip for this picture">🎞</button><button class="x mregen" data-mood="${esc(m)}" title="Draw another version. The current one is kept as an earlier version.">↻</button><button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show and edit the exact prompt this picture was drawn from, and draw again from your change">📝</button><button class="x mren" data-mood="${esc(m)}" title="Rename this picture (the narrator picks pictures by name)">✎</button><button class="x mdel" data-mood="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`]);
     const old = Object.entries(c.alts || {}).flatMap(([m, us]) => us.map((u) => ["__earlier",
       `<figure class="mood alt"><img loading="lazy" src="${thumbUrl(u, 200)}" alt=""><figcaption>${esc(m)} (earlier) <button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show the prompt this earlier picture was drawn from">📝</button><button class="x altuse" data-mood="${esc(m)}" data-url="${esc(u)}" title="Make this the active picture">use</button><button class="x altdel" data-url="${esc(u)}" title="Delete">×</button></figcaption></figure>`]));
     return groupByCategory([...cur, ...old]) || '<span class="hint">No pictures yet. Use “Draw options…” to pick a face, or upload your own.</span>';
   };
-  const eventRow = (e) => `<div class="evrow" data-id="${esc(e.id)}"><span class="evwhen">${esc(e.when || "·")}</span><span class="evtext">${esc(e.text)}</span>${e.digest ? '<span class="evauto" title="Several older events condensed by the helper AI">history</span>' : e.auto ? '<span class="evauto" title="Logged automatically">auto</span>' : ""}<button class="x evedit" title="Edit">✎</button><button class="x evdel" title="Delete">×</button></div>`;
+  // Outfits (only when switched on in the picture settings): each outfit has its own version of a picture for each mood.
+  const outfitPanel = () => {
+    const outs = Object.entries(c.outfits || {}), moodsHere = Object.keys(c.moods || {});
+    const fig = (o, m) => { const u = ((c.outfit_pics || {})[o] || {})[m];
+      return u ? `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 220)}" alt=""><figcaption>${esc(m)} <button class="x ofdraw" data-o="${esc(o)}" data-m="${esc(m)}" title="Draw this one again in this outfit">↻</button><button class="x ofdel" data-o="${esc(o)}" data-m="${esc(m)}" title="Remove this outfit version">×</button></figcaption></figure>`
+        : `<figure class="mood empty"><div class="noart">${esc(m)}</div><figcaption><button class="ofdraw" data-o="${esc(o)}" data-m="${esc(m)}" title="Draw ${esc(m)} in this outfit">＋ Draw</button> <label class="btnlike" title="Use your own picture"><input type="file" class="ofup" data-o="${esc(o)}" data-m="${esc(m)}" accept="image/png,image/jpeg,image/webp,image/gif" hidden>📁</label></figcaption></figure>`; };
+    return `<div class="sub" style="margin-top:10px"><b>👗 Outfits</b> <span class="hint">Each picture above can have a version in each outfit. The usual pictures stay as they are.</span>
+      <div class="actions" style="justify-content:flex-start;margin:6px 0"><label class="hint" style="margin:0 4px 0 0">Wearing now:</label><select id="ofWear"><option value="">Usual look</option>${outs.map(([o]) => `<option value="${esc(o)}" ${c.outfit === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></div>
+      ${outs.map(([o, d]) => `<details class="sub" ${c.outfit === o ? "open" : ""}><summary><b>${esc(o)}</b> <small class="muted">${esc(oneLine(d, 70))}</small></summary>
+        <label>What it looks like <small class="hint">(the artist is told this instead of their usual clothes)</small></label><input class="ofdesc" data-o="${esc(o)}" value="${esc(d)}">
+        <div class="actions" style="justify-content:flex-start;margin:4px 0"><button class="ofall" data-o="${esc(o)}" ${moodsHere.length ? "" : "disabled"} title="Draw a version of every picture above that does not have one in this outfit yet">Draw all missing</button><button class="ofrm" data-o="${esc(o)}">Remove outfit</button></div>
+        <div class="moods">${moodsHere.map((m) => fig(o, m)).join("") || '<span class="hint">Draw some usual pictures first.</span>'}</div></details>`).join("")}
+      <div class="actions" style="justify-content:flex-start;margin-top:6px"><input id="ofName" placeholder="Outfit name, e.g. swimsuit" size="18"><input id="ofNewDesc" placeholder="What it looks like" style="flex:1;min-width:160px"><button id="ofAdd">Add outfit</button></div>
+      <div class="aStatus hint" id="ofStatus"></div></div>`;
+  };
+  // Pictures of this character at the story's places: each place gets its own version of each picture, drawn with the place behind them. The narrator picks with @place.
+  let plOutfit = "";
+  const placePanel = () => {
+    const places = story.places || [], moodsHere = Object.keys(c.moods || {}), pk = (n) => n.toLowerCase().split(/\s+/).join(" ");
+    if (!places.length) return '<div class="sub" style="margin-top:10px"><b>📍 Pictures at places</b> <span class="hint">The story has no places yet. Add them (name and description) under the story\'s Places, then draw this character at them here.</span></div>';
+    const outs = Object.keys(c.outfits || {}), useOut = story.art && story.art.outfits && outs.includes(plOutfit) ? plOutfit : "";
+    const fig = (k, m) => { const u = ((c.place_pics || {})[k] || {})[m];
+      return u ? `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 220)}" alt=""><figcaption>${esc(m)} <button class="x pldraw" data-k="${esc(k)}" data-m="${esc(m)}" title="Draw this one again">↻</button><button class="x pldel" data-k="${esc(k)}" data-m="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`
+        : `<figure class="mood empty"><div class="noart">${esc(m)}</div><figcaption><button class="pldraw" data-k="${esc(k)}" data-m="${esc(m)}" title="Draw ${esc(m)} at this place">＋ Draw</button> <label class="btnlike" title="Use your own picture"><input type="file" class="plup" data-k="${esc(k)}" data-m="${esc(m)}" accept="image/png,image/jpeg,image/webp,image/gif" hidden>📁</label></figcaption></figure>`; };
+    return `<div class="sub" style="margin-top:10px"><b>📍 Pictures at places</b> <span class="hint">${esc(c.name)} drawn at a place from the story, with the place behind them. The narrator can pick one with @place in the picture tag. The usual pictures stay as they are.</span>
+      ${story.art && story.art.outfits && outs.length ? `<div class="actions" style="justify-content:flex-start;margin:6px 0"><label class="hint" style="margin:0 4px 0 0">In outfit:</label><select id="plOutfit"><option value="">Usual look</option>${outs.map((o) => `<option value="${esc(o)}" ${useOut === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></div>` : ""}
+      ${places.map((p) => { const k = pk(p.name) + (useOut ? "@" + useOut : ""), n = Object.keys((c.place_pics || {})[k] || {}).length;
+        return `<details class="sub" ${n ? "open" : ""}><summary><b>${esc(p.name)}</b> <small class="muted">${n ? n + " picture" + (n > 1 ? "s" : "") : esc(oneLine(p.description, 70))}</small></summary>
+          <div class="actions" style="justify-content:flex-start;margin:4px 0"><button class="plall" data-k="${esc(k)}" ${moodsHere.length ? "" : "disabled"} title="Draw a version of every picture above that does not have one here yet">Draw all missing</button></div>
+          <div class="moods">${moodsHere.map((m) => fig(k, m)).join("") || '<span class="hint">Draw some usual pictures first.</span>'}</div></details>`; }).join("")}
+      <div class="aStatus hint" id="plStatus"></div></div>`;
+  };
+  const eventRow = (e) => `<div class="evrow" data-id="${esc(e.id)}"><span class="evwhen">${esc(e.when || "·")}</span><span class="evtext">${esc(e.text)}${e.from ? ` <small class="muted">(as ${esc(e.from)})</small>` : ""}</span>${e.digest ? '<span class="evauto" title="Several older events condensed by the helper AI">history</span>' : e.auto ? '<span class="evauto" title="Logged automatically">auto</span>' : ""}<button class="x evedit" title="Edit">✎</button><button class="x evdel" title="Delete">×</button></div>`;
 
+  const sheetOn = !!(story.statsheets || {}).on && !isNew && !c.player;
+  const sh = ((story.statsheets || {}).items || {})[slug] || { stats: [], notes: "", image: "", turn: 0 };
+  const statRow = (x) => `<div class="shrow"><input class="shn" value="${esc(x.name)}" placeholder="Stat, e.g. Level" maxlength="30"><input class="shv" value="${esc(x.value)}" placeholder="Value, e.g. 12 or 40/40" maxlength="60"><button type="button" class="x shdel" title="Remove this stat">×</button></div>`;
+  const sheetPanel = () => !sheetOn ? "" : `<div id="chSheet" class="hidden">
+      <p class="hint">${esc(c.name)}'s sheet. The narrator is sent it whenever ${esc(c.name.split(" ")[0])} is in the recent story${(story.statsheets || {}).auto === false ? "" : ", and updates the numbers itself when something changes"}. The stats are free: use the ones your story's rules use.${sh.turn ? ` <small class="muted">Last changed by the story at reply ${Math.ceil(sh.turn / 2)}.</small>` : ""}</p>
+      <div id="shRows">${(sh.stats || []).map(statRow).join("")}</div>
+      <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button type="button" id="shAdd">＋ Add a stat</button><select id="shPreset" title="Add a ready-made set of stats (only the ones that are missing)"><option value="">Add a ready-made set…</option><option value="simple">Level, HP</option><option value="rpg">Level, HP, Strength, Agility, Intellect, Charisma</option><option value="dnd">Level, HP, AC, STR, DEX, CON, INT, WIS, CHA</option></select></div>
+      <label>Notes <small class="hint">(skills, gear, abilities, anything else; sent to the narrator with the stats)</small></label><textarea class="short" id="shNotes" rows="4" maxlength="1200">${esc(sh.notes || "")}</textarea>
+      <label>Your own picture <small class="hint">(a stat card or anything you like, for you only: it is not sent to the narrator)</small></label>
+      <div class="shimg">${sh.image ? `<a href="${esc(sh.image)}" target="_blank"><img src="${esc(sh.image)}" alt="" style="max-width:100%;max-height:360px;border-radius:8px"></a>` : '<span class="hint">No picture yet.</span>'}</div>
+      <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><label class="btnlike">${sh.image ? "Replace picture…" : "Upload a picture…"}<input type="file" id="shFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>${sh.image ? '<button type="button" id="shImgDel">Remove picture</button>' : ""}</div>
+      <div class="actions"><button type="button" class="danger" id="shClear">Clear the sheet</button><span style="flex:1"></span><span class="hint" id="shStatus"></span><button type="button" class="primary" id="shSave">Save sheet</button></div></div>`;
   modal(`<div class="charhead"><button id="chBack">← Cast</button><h2>${esc(c.name || "New character")}</h2></div>
-    <div class="tabs"><button class="tab chtab" data-tab="Bio">Bio</button><button class="tab chtab" data-tab="Events"${isNew ? " disabled" : ""}>Key events (${(c.events || []).length})</button><button class="tab chtab" data-tab="Images"${isNew ? " disabled" : ""}>Images (${Object.keys(c.moods || {}).length})</button></div>
+    <div class="tabs"><button class="tab chtab" data-tab="Bio">Bio</button><button class="tab chtab" data-tab="Events"${isNew ? " disabled" : ""}>Key events (${(c.events || []).length})</button><button class="tab chtab" data-tab="Images"${isNew ? " disabled" : ""}>Images (${Object.keys(c.moods || {}).length})</button>${sheetOn ? '<button class="tab chtab" data-tab="Sheet">📋 Sheet</button>' : ""}</div>
 
     <div id="chBio">
       <div class="bioTop">${normalUrl(c) ? `<img class="bioimg" src="${thumbUrl(normalUrl(c), 480)}" alt="">` : ""}<div style="flex:1">
         <label>Name</label><input id="chName" value="${esc(c.name)}" placeholder="Name">
         <label>Also called <small class="hint">(other names the story uses for them: first name, nickname, title; separate with commas)</small></label><input id="chAka" value="${esc((c.aka || []).join(", "))}" placeholder="e.g. a nickname or title">
+        ${c.generic && !isNew ? `<div class="aiBox"><b>Did you learn their name?</b> <small class="muted">This is a generic stand-in. Type the name they gave and its key events move to that person's card (the app also notices this by itself when a reply gives their name).</small>
+          <div class="actions" style="justify-content:flex-start;margin-top:6px"><input id="chNamedName" placeholder="Their name" style="max-width:220px"><button id="chNamedGo" type="button">Move their events</button><span class="hint" id="chNamedNote"></span></div></div>` : ""}
         <div class="grid2" style="grid-template-columns:1fr 2fr"><div><label>Species <small class="hint">(empty = human)</small></label><input id="chSpecies" list="speciesList" value="${esc(c.species || "")}" placeholder="human"><datalist id="speciesList">${Object.values(story.species || {}).map((x) => `<option value="${esc(x.name)}">`).join("")}</datalist></div>
           <div><label>Picture maker <small class="hint">(for this character; empty = their species' or the story's)</small></label><select id="chMaker"></select></div></div>
         ${(() => { const sp = c.species && (story.species || {})[c.species.toLowerCase()]; return sp && sp.reference_url
@@ -558,14 +631,17 @@ function showCharacter(slug, tab = "Bio") {
       <div class="evadd"><input id="evWhen" placeholder="When (e.g. Turn 42)" style="width:150px"><input id="evText" placeholder="What happened" style="flex:1"><button id="evAdd">Add</button></div>
       <div class="actions" style="justify-content:flex-start"><button id="evRebuild" title="Read the story so far and write this character's event log (your own entries are kept)">Rebuild from the story</button><button id="evCondense" title="Fold the older automatic events into a short history (one helper-AI call). This also happens by itself when the log gets long.">Condense older events</button><span class="hint" id="evStatus"></span></div></div>
 
+    ${sheetPanel()}
     <div id="chImages" class="hidden">
       <p class="hint">The card shows the <b>normal</b> picture. Other pictures are moods the narrator can pick above this character's lines. ↻ draws another version and keeps the old one as an earlier version; every picture helps keep their face consistent.</p>
       <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="imOpts">Draw options…</button>
-        <select id="imSet"><option value="basic">Basic set</option><option value="extended">Extended set</option>${categorySetOptions("All: ")}<option value="match">Images my other characters have</option></select><button id="imSetGo">Draw the set</button>${Object.keys(c.moods || {}).length ? '<button id="imDelAll" class="danger" title="Delete every picture of this character in this story, including earlier versions">Delete all their pictures</button>' : ""}</div>
+        <select id="imSet"><option value="basic">Basic set</option><option value="extended">Extended set</option><option value="full">Extended Full Set</option>${categorySetOptions("All: ")}<option value="match">Images my other characters have</option></select><button id="imSetGo">Draw the set</button><button id="imLabel" title="A helper model that can see pictures names the expression on each generically named picture (normal 2, normal 3…), so the narrator's mood tags can pick them">🏷 Name expressions</button>${Object.keys(c.moods || {}).length ? '<button id="imDelAll" class="danger" title="Delete every picture of this character in this story, including earlier versions">Delete all their pictures</button>' : ""}</div>
       <div class="castact" style="margin:6px 0"><label for="imMood" class="hint" style="margin:0 4px 0 0">Picture name:</label><input id="imMood" value="normal 1" size="12" title="What this picture is called (its mood): used when drawing and when you upload your own"><button id="imDraw">Draw this one with AI</button><input type="file" id="imFile" accept="image/png,image/jpeg,image/webp,image/gif"></div>
       <div class="aStatus hint" id="imStatus"></div>
       <div class="actions imcatBar" style="justify-content:flex-start;margin:0 0 4px"><button type="button" id="imMinAll" class="x">Minimize all</button><button type="button" id="imMaxAll" class="x">Expand all</button></div>
       <div id="imGrid">${moodChips()}</div>
+      ${story.art && story.art.outfits && !isNew ? '<div id="imOutfits">' + outfitPanel() + "</div>" : ""}
+      ${isNew ? "" : '<div id="imPlaces">' + placePanel() + "</div>"}
       ${isNew ? "" : `<details class="sub" id="imTagsBox"><summary>Picture tags (for tag-style picture models)</summary>
         <div class="hint">With a tag-style model such as Animagine, these tags describe this character's looks (hair, eyes, build, clothing) in every picture, so they stay the same. The helper model writes them once from the description; edit them here, or press Rebuild to have them written again. Leave your own tags empty to use the helper's.</div>
         <textarea class="short" id="imTags" rows="3" placeholder="Written automatically the first time a picture is drawn with a tag-style model."></textarea>
@@ -601,9 +677,33 @@ function showCharacter(slug, tab = "Bio") {
   }
   const show = (n) => {
     document.querySelectorAll(".chtab").forEach((b) => b.classList.toggle("on", b.dataset.tab === n));
-    for (const t of ["Bio", "Events", "Images"]) $("ch" + t).classList.toggle("hidden", t !== n);
+    for (const t of ["Bio", "Events", "Images", "Sheet"]) if ($("ch" + t)) $("ch" + t).classList.toggle("hidden", t !== n);
   };
   document.querySelectorAll(".chtab").forEach((b) => b.onclick = () => !b.disabled && show(b.dataset.tab));
+  if ($("chSheet")) {
+    const rows = () => [...document.querySelectorAll("#shRows .shrow")].map((r) => ({ name: r.querySelector(".shn").value.trim(), value: r.querySelector(".shv").value.trim() })).filter((x) => x.name);
+    const saveSheet = async () => { story = await api(`/stories/${story.id}/statsheets/${slug}`, { method: "PUT", body: { stats: rows(), notes: $("shNotes").value } }); };
+    $("shAdd").onclick = () => { $("shRows").insertAdjacentHTML("beforeend", statRow({ name: "", value: "" })); $("shRows").lastElementChild.querySelector(".shn").focus(); };
+    $("shRows").addEventListener("click", (e) => { if (e.target.classList.contains("shdel")) e.target.closest(".shrow").remove(); });
+    $("shPreset").onchange = (e) => {
+      const sets = { simple: ["Level", "HP"], rpg: ["Level", "HP", "Strength", "Agility", "Intellect", "Charisma"], dnd: ["Level", "HP", "AC", "STR", "DEX", "CON", "INT", "WIS", "CHA"] };
+      const have = new Set(rows().map((x) => x.name.toLowerCase()));
+      (sets[e.target.value] || []).filter((n) => !have.has(n.toLowerCase())).forEach((n) => $("shRows").insertAdjacentHTML("beforeend", statRow({ name: n, value: "" })));
+      e.target.value = "";
+    };
+    $("shSave").onclick = async () => { try { await saveSheet(); status("shStatus", "Saved ✔"); } catch (e) { status("shStatus", e.message); } };
+    $("shClear").onclick = async () => { if (!confirm(`Clear ${c.name}'s whole sheet (stats, notes and picture)?`)) return; try { story = await api(`/stories/${story.id}/statsheets/${slug}`, { method: "DELETE" }); refresh("Sheet"); } catch (e) { status("shStatus", e.message); } };
+    $("shFile").onchange = async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      try {
+        await saveSheet();
+        const r = await fetch(`/api/stories/${story.id}/statsheets/${slug}/image`, { method: "POST", headers: { "content-type": f.type }, body: f });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+        story = await r.json(); refresh("Sheet");
+      } catch (err) { status("shStatus", err.message); }
+    };
+    if ($("shImgDel")) $("shImgDel").onclick = async () => { try { await saveSheet(); story = await api(`/stories/${story.id}/statsheets/${slug}/image`, { method: "DELETE" }); refresh("Sheet"); } catch (e) { status("shStatus", e.message); } };
+  }
   show(isNew ? "Bio" : tab);
   $("chBack").onclick = () => showCast("Characters");
   $("mClose").onclick = () => { closeModal(); renderAll(); refreshArtSuggestions(); };
@@ -616,6 +716,11 @@ function showCharacter(slug, tab = "Bio") {
     box.innerHTML = `<p class="hint" style="margin-bottom:2px">What your story prompt says about them:</p>` + r.lines.map((l, i) => `<div class="pline"><span>${esc(oneLine(l, 260))}</span><button class="usebio" data-i="${i}">Use as bio</button></div>`).join("");
     box.querySelectorAll(".usebio").forEach((b) => b.onclick = () => { $("chBioText").value = r.lines[+b.dataset.i]; });
   }).catch(() => {});
+  if ($("chNamedGo")) $("chNamedGo").onclick = async () => {
+    const name = $("chNamedName").value.trim(); if (!name) { $("chNamedNote").textContent = "Type the name first."; return; }
+    try { const r = await api(`/stories/${story.id}/cast/${slug}/named`, { method: "POST", body: { name } }); story = r.story; renderAll(); showCast("Characters"); }
+    catch (err) { $("chNamedNote").textContent = err.message; }
+  };
   if ($("chFaceLora")) bindLoraSelect($("chFaceLora"), c.face_lora || "", () => ($("chMaker") ? $("chMaker").value : c.maker) || c.maker || "", $("chMaker"));
   if ($("chMaker")) { makerSelect($("chMaker"), [["", "Same as the story"]], c.maker || ""); makerChoices().then((ch) => { if ($("chMaker")) makerSelect($("chMaker"), ch, c.maker || ""); }); }
   $("chSave").onclick = async () => {
@@ -708,6 +813,7 @@ function showCharacter(slug, tab = "Bio") {
       refresh("Images");
     };
     if ((story.art || {}).extended_moods && $("imSet")) $("imSet").value = "extended";   // the story's default set (Art → Style & options)
+    $("imLabel").onclick = () => labelMoodsDialog([c.slug], () => refresh("Images"));
     $("imSetGo").onclick = async (e) => {
       e.target.disabled = true; status("imStatus", "Starting…");
       try {
@@ -735,9 +841,75 @@ function showCharacter(slug, tab = "Bio") {
     $("imMinAll").onclick = () => { saveMinimizedCats(new Set([...document.querySelectorAll("#imGrid .imcat")].map((x) => x.dataset.cat))); redrawGrid(); };
     $("imMaxAll").onclick = () => { saveMinimizedCats(new Set()); redrawGrid(); };
     api("/moods").then((r) => { for (const m of r.moods || []) moodCatCache[m.name] = m.category; if ($("imGrid")) redrawGrid(); }).catch(() => {});
+    if ($("imOutfits")) {
+      const box = $("imOutfits"), put = (outfits) => api(`/stories/${story.id}/cast/${slug}/outfits`, { method: "PUT", body: { outfits } });
+      const fresh = () => (story.cast || []).find((x) => x.slug === slug) || c, cur = () => ({ ...(fresh().outfits || {}) });
+      const drawOne = async (o, m) => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: m, outfit: o } }); };
+      box.addEventListener("change", async (e) => {
+        try {
+          if (e.target.id === "ofWear") { story = await api(`/stories/${story.id}/cast/${slug}/outfit`, { method: "POST", body: { outfit: e.target.value } }); renderAll(); showCharacter(slug, "Images"); }
+          else if (e.target.classList.contains("ofdesc")) { const o = cur(); o[e.target.dataset.o] = e.target.value; story = await put(o); }
+          else if (e.target.classList.contains("ofup") && e.target.files[0]) {
+            const f = e.target.files[0], r = await fetch(`/api/stories/${story.id}/cast/${slug}/outfit-pic/${encodeURIComponent(e.target.dataset.o)}/${encodeURIComponent(e.target.dataset.m)}`, { method: "POST", headers: { "content-type": f.type }, body: f });
+            if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+            story = await r.json(); refresh("Images");
+          }
+        } catch (err) { status("ofStatus", err.message); }
+      });
+      box.addEventListener("click", async (e) => {
+        const b = e.target.closest("button"); if (!b) return;
+        try {
+          if (b.id === "ofAdd") {
+            const n = $("ofName").value.trim(); if (!n) return status("ofStatus", "Give the outfit a name.");
+            const o = cur(); o[n.toLowerCase()] = $("ofNewDesc").value.trim(); story = await put(o); refresh("Images");
+          } else if (b.classList.contains("ofrm")) {
+            if (!confirm(`Remove the outfit “${b.dataset.o}” and all its pictures?`)) return;
+            const o = cur(); delete o[b.dataset.o]; story = await put(o); renderAll(); showCharacter(slug, "Images");
+          } else if (b.classList.contains("ofdel")) {
+            story = await api(`/stories/${story.id}/cast/${slug}/outfit-pic/${encodeURIComponent(b.dataset.o)}/${encodeURIComponent(b.dataset.m)}`, { method: "DELETE" }); refresh("Images");
+          } else if (b.classList.contains("ofdraw")) {
+            b.disabled = true; b.textContent = "…"; await drawOne(b.dataset.o, b.dataset.m); refresh("Images");
+          } else if (b.classList.contains("ofall")) {
+            const o = b.dataset.o, fc = fresh(), todo = Object.keys(fc.moods || {}).filter((m) => !((fc.outfit_pics || {})[o] || {})[m]);
+            b.disabled = true;
+            for (let i = 0; i < todo.length; i++) { status("ofStatus", `Drawing ${todo[i]} in ${o} (${i + 1} of ${todo.length})…`); try { await drawOne(o, todo[i]); } catch (err) { status("ofStatus", `${todo[i]}: ${err.message}`); break; } }
+            refresh("Images");
+          }
+        } catch (err) { status("ofStatus", err.message); }
+      });
+    }
+    if ($("imPlaces")) {
+      const box = $("imPlaces"), fresh = () => (story.cast || []).find((x) => x.slug === slug) || c;
+      const split = (k) => { const [pl, o] = k.split("@"); return { place: pl, outfit: o || "" }; };
+      const drawOne = async (k, m) => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: m, ...split(k) } }); };
+      box.addEventListener("change", async (e) => {
+        try {
+          if (e.target.id === "plOutfit") { plOutfit = e.target.value; box.innerHTML = placePanel(); }
+          else if (e.target.classList.contains("plup") && e.target.files[0]) {
+            const f = e.target.files[0], r = await fetch(`/api/stories/${story.id}/cast/${slug}/place-pic/${encodeURIComponent(e.target.dataset.k)}/${encodeURIComponent(e.target.dataset.m)}`, { method: "POST", headers: { "content-type": f.type }, body: f });
+            if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+            story = await r.json(); refresh("Images");
+          }
+        } catch (err) { status("plStatus", err.message); }
+      });
+      box.addEventListener("click", async (e) => {
+        const b = e.target.closest("button"); if (!b) return;
+        try {
+          if (b.classList.contains("pldel")) { story = await api(`/stories/${story.id}/cast/${slug}/place-pic/${encodeURIComponent(b.dataset.k)}/${encodeURIComponent(b.dataset.m)}`, { method: "DELETE" }); refresh("Images"); }
+          else if (b.classList.contains("pldraw")) { b.disabled = true; b.textContent = "…"; await drawOne(b.dataset.k, b.dataset.m); refresh("Images"); }
+          else if (b.classList.contains("plall")) {
+            const k = b.dataset.k, fc = fresh(), todo = Object.keys(fc.moods || {}).filter((m) => !((fc.place_pics || {})[k] || {})[m]);
+            b.disabled = true;
+            for (let i = 0; i < todo.length; i++) { status("plStatus", `Drawing ${todo[i]} (${i + 1} of ${todo.length})…`); try { await drawOne(k, todo[i]); } catch (err) { status("plStatus", `${todo[i]}: ${err.message}`); break; } }
+            refresh("Images");
+          }
+        } catch (err) { status("plStatus", err.message); }
+      });
+    }
     $("imGrid").addEventListener("click", async (e) => {
       const b = e.target.closest("button"); if (!b) return;
-      if (b.classList.contains("mregen")) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: b.dataset.mood } }); if (b.dataset.mood === "normal 1") await offerRedrawAll(story.cast.find((x) => x.slug === slug), (m) => status("imStatus", m)); });
+      if (b.classList.contains("mcover")) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/cover`, { method: "POST", body: { mood: c.cover === b.dataset.mood ? "" : b.dataset.mood } }); showCharacter(slug, "Images"); });
+      else if (b.classList.contains("mregen")) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: b.dataset.mood } }); if (b.dataset.mood === "normal 1") await offerRedrawAll(story.cast.find((x) => x.slug === slug), (m) => status("imStatus", m)); });
       else if (b.classList.contains("mprompt")) showPicturePrompt(slug, b.dataset.mood, b.dataset.url, () => showCharacter(slug, "Images"));
       else if (b.classList.contains("mren")) { const to = prompt(`Name for this picture (now “${b.dataset.mood}”).\nThe narrator picks pictures by name, e.g. smile, angry 2, normal 1:`, b.dataset.mood); if (to && to.trim() && to.trim().toLowerCase() !== b.dataset.mood) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/rename`, { method: "POST", body: { to: to.trim() } }); }); }
       else if (b.classList.contains("mdel")) { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}`, { method: "DELETE" }); refresh("Images"); }
@@ -748,6 +920,85 @@ function showCharacter(slug, tab = "Bio") {
 }
 
 // ---------- image provider settings (inside Settings) ----------
+// ---------- video settings (Picture makers → Video generation, and Adult (NSFW) videos): stored on the ComfyUI picture service ----------
+function comfyProv(cfg) { return (cfg.image_providers || []).find((x) => x.type === "comfyui"); }
+function videoSettingsHtml(cfg) {
+  const p = comfyProv(cfg);
+  if (!p) return "";
+  const adultOk = typeof story === "undefined" || !story || story.nsfw;
+  return `<h3>Video generation (🎬 Animate)</h3><div id="vidSecEvery">
+    <div class="hint">Turns one picture into a short looping clip with ComfyUI. App-wide. The model and LoRAs here are for everyday pictures; adult ones can have their own under <b>Adult (NSFW) videos</b>.</div>
+      <label>Video workflow (the 🎬 Animate button): turns one picture into a short clip. <b>Leave it empty to use the built-in one for the video model chosen below</b> (MiniMax H3 or Wan 2.2, fitted to the files ComfyUI has). Your own needs {{ref1}} in a LoadImage node and a SaveVideo node. Also {{prompt}} {{negative}} {{seed}} {{width}} {{height}}</label>
+      <textarea class="short" data-f="video_workflow" rows="5" placeholder="Empty = the built-in workflow for the chosen video model">${esc(p.video_workflow || "")}</textarea>
+      <button class="startervideo" type="button">Insert Wan 2.2 workflow</button> <button class="startervideoh3" type="button">Insert MiniMax H3 workflow</button> <label class="btnlike wfimp" title="Import a workflow saved from ComfyUI (Export API / Save (API Format)). The app puts its placeholders in for you.">📂 Import workflow file…<input type="file" class="wfimport" data-kind="video" accept=".json,application/json" hidden></label><span class="hint wfnote"></span>
+      <div class="grid2" style="grid-template-columns:2fr 1fr"><div><label>Video model <small class="hint">(a diffusion model in ComfyUI's models folder; empty = the one named in the workflow)</small></label>
+        <select data-f="video_model"><option value="">Use the one in the workflow</option>${p.video_model ? `<option value="${esc(p.video_model)}" selected>${esc(p.video_model)}</option>` : ""}</select></div><div class="vmnote hint" style="align-self:end"></div></div>
+      <label>Video LoRAs <small class="hint">(applied to every video; one per line: name @ strength)</small></label>
+      <textarea class="short" data-f="video_loras" rows="2" placeholder="none">${esc(p.video_loras || "")}</textarea>
+      <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin:2px 0 6px"><select class="vlorapick" style="max-width:320px"><option value="">(no LoRAs found in ComfyUI)</option></select><input class="vlorast" type="number" step="0.05" min="-2" max="2" value="1" style="width:80px" title="Strength: 0.6 to 1.0 is usual"><button class="vloraadd" type="button">Add</button></div>
+      <label>Motion strength: <b id="vmpctv">${esc(String(p.video_motion_pct || 70))}</b>% <small class="hint">(scales the motion LoRAs such as Motion Booster and VBVR; close-ups get a little less again. Lower it if faces drift or movement is too wild. The Animate box can override it per clip.)</small></label>
+      <input type="range" data-f="video_motion_pct" min="20" max="120" step="5" value="${esc(String(p.video_motion_pct || 70))}" oninput="document.getElementById('vmpctv').textContent=this.value">
+      <div class="hint">Use a model and LoRAs made for the same video model family (Wan 2.2, LTX…). With a two-stage Wan 2.2 workflow, picking a "high_noise" or "low_noise" file replaces only that stage. These apply app-wide to every 🎬 Animate.</div>
+    </div>
+    ${adultOk ? `<h3>Adult (NSFW) videos</h3><div id="vidSecAdult">
+      <div class="hint">Used instead of the everyday video settings when a story has adult content on and the picture being animated (or the motion you type) is explicit, judged the same way the adult picture maker does. The Animate button can also force it. Leave a box empty to keep the everyday one.</div>
+        <label>Adult video workflow <small class="hint">(its own drop-in ComfyUI workflow for adult clips; empty = the everyday workflow above, or the built-in one)</small></label>
+        <textarea class="short" data-f="video_nsfw_workflow" rows="5" placeholder="Empty = the everyday video workflow">${esc(p.video_nsfw_workflow || "")}</textarea>
+        <button class="startervideo" type="button">Insert Wan 2.2 workflow</button> <button class="startervideoh3" type="button">Insert MiniMax H3 workflow</button> <label class="btnlike wfimp" title="Import a workflow saved from ComfyUI (Export API / Save (API Format)). The app puts its placeholders in for you.">📂 Import workflow file…<input type="file" class="wfimport" data-kind="video" accept=".json,application/json" hidden></label><span class="hint wfnote"></span>
+        <label>Adult video model</label><select data-f="video_nsfw_model"><option value="">Same as the everyday one</option>${p.video_nsfw_model ? `<option value="${esc(p.video_nsfw_model)}" selected>${esc(p.video_nsfw_model)}</option>` : ""}</select>
+        <label>Adult video LoRAs <small class="hint">(replace the everyday video LoRAs; one per line: name @ strength)</small></label>
+        <textarea class="short" data-f="video_nsfw_loras" rows="2" placeholder="empty = the everyday ones">${esc(p.video_nsfw_loras || "")}</textarea>
+        <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin:2px 0 6px"><select class="vnlorapick" style="max-width:320px"><option value="">(no LoRAs found in ComfyUI)</option></select><input class="vnlorast" type="number" step="0.05" min="-2" max="2" value="1" style="width:80px"><button class="vnloraadd" type="button">Add</button></div>
+    </div>` : ""}`;
+}
+function bindVideoSettings(cfg) {
+  const p = comfyProv(cfg), root = document;
+  if (!p || !$("vidSecEvery")) return;
+  const ev = $("vidSecEvery"), ad = $("vidSecAdult");
+  const q = (sel, within) => (within || ev).querySelector(sel);
+  const bindImport = (box, field) => { if (!box) return; box.querySelectorAll(".wfimport").forEach((inp) => inp.addEventListener("change", async () => {
+    const f = inp.files[0]; if (!f) return;
+    const note = inp.closest("label").nextElementSibling;
+    note.textContent = "Reading…";
+    try {
+      const r = await api("/images/prepare-workflow", { method: "POST", body: { workflow: await f.text(), kind: "video" } });
+      q(`[data-f="${field}"]`, box).value = r.workflow;
+      note.textContent = `✔ Imported ${r.nodes} nodes. ` + (r.notes.length ? r.notes.join("; ") + "." : "Placeholders were already in place.") + " Click Save to keep it.";
+    } catch (err) { note.textContent = "Could not import: " + err.message; }
+    inp.value = "";
+  })); };
+  bindImport(ev, "video_workflow"); bindImport(ad, "video_nsfw_workflow");
+  (async () => {
+    let o; try { o = await api("/images/video-options"); } catch (e) { return; }
+    const sel = q('[data-f="video_model"]'), cur = p.video_model || "", pick = q(".vlorapick");
+    q(".vmnote").textContent = o.up ? "" : "ComfyUI isn't running, so its models can't be listed.";
+    const opt = (m, ok) => `<option value="${esc(m)}">${esc(m)}${ok ? "" : " (not found in ComfyUI)"}</option>`;
+    const vid = o.models || [], rest = (o.all_models || []).filter((m) => !vid.includes(m));
+    const modelOpts = (first, curv) => { const extra = curv && !vid.includes(curv) && !rest.includes(curv) ? [curv] : []; return `<option value="">${first}</option>` + (vid.length ? `<optgroup label="Video models">${vid.map((m) => opt(m, true)).join("")}</optgroup>` : "") + (rest.length ? `<optgroup label="Other models">${rest.map((m) => opt(m, true)).join("")}</optgroup>` : "") + extra.map((m) => opt(m, false)).join(""); };
+    sel.innerHTML = modelOpts("Built-in default (MiniMax H3 if installed) / the one in the workflow", cur); sel.value = cur;
+    const asel = ad && ad.querySelector('[data-f="video_nsfw_model"]'), acur = p.video_nsfw_model || "";
+    if (asel) { asel.innerHTML = modelOpts("Same as the everyday one", acur); asel.value = acur; }
+    const vl = o.video_loras || [], ol = (o.loras || []).filter((l) => !vl.includes(l)), lo = (l) => `<option value="${esc(l)}">${esc(l)}</option>`;
+    const loraHtml = (vl.length ? `<optgroup label="Video LoRAs">${vl.map(lo).join("")}</optgroup>` : "") + `<optgroup label="Other LoRAs">${ol.map(lo).join("")}</optgroup>`;
+    if ((o.loras || []).length) { pick.innerHTML = loraHtml; const vnp = ad && ad.querySelector(".vnlorapick"); if (vnp) vnp.innerHTML = loraHtml; }
+  })();
+  const vla = q(".vloraadd");
+  if (vla) vla.onclick = () => { const pick = q(".vlorapick").value, box = q('[data-f="video_loras"]'); if (!pick) return; if (!box.value.split("\n").some((l) => l.split("@")[0].trim() === pick)) box.value = (box.value.trim() ? box.value.trim() + "\n" : "") + `${pick} @ ${q(".vlorast").value || 1}`; box.dispatchEvent(new Event("input", { bubbles: true })); };
+  const vnla = ad && ad.querySelector(".vnloraadd");
+  if (vnla) vnla.onclick = () => { const pick = ad.querySelector(".vnlorapick").value, box = ad.querySelector('[data-f="video_nsfw_loras"]'); if (!pick) return; if (!box.value.split("\n").some((l) => l.split("@")[0].trim() === pick)) box.value = (box.value.trim() ? box.value.trim() + "\n" : "") + `${pick} @ ${ad.querySelector(".vnlorast").value || 1}`; box.dispatchEvent(new Event("input", { bubbles: true })); };
+  [[ev, "video_workflow"], [ad, "video_nsfw_workflow"]].forEach(([box, field]) => {
+    if (!box) return;
+    const sv = box.querySelector(".startervideo"), sh = box.querySelector(".startervideoh3");
+    if (sv) sv.onclick = async () => { q(`[data-f="${field}"]`, box).value = JSON.stringify(await api("/images/starter-workflow?kind=video"), null, 2); };
+    if (sh) sh.onclick = async () => { q(`[data-f="${field}"]`, box).value = JSON.stringify(await api("/images/starter-workflow?kind=videoh3"), null, 2); };
+  });
+}
+function collectVideoSettings(cfg) {
+  const p = comfyProv(cfg);
+  if (!p) return;
+  document.querySelectorAll("#vidSecEvery [data-f], #vidSecAdult [data-f]").forEach((inp) => { p[inp.dataset.f] = inp.type === "checkbox" ? inp.checked : inp.value; });
+}
+
 function imgProvCard(p, i) {
   const comfy = p.type === "comfyui", oa = p.type === "openai";
   const nice = { gemini: "Gemini", xai: "Grok (xAI)", openai: "OpenAI", comfyui: "Local (ComfyUI)" }[p.id] || p.name;
@@ -767,10 +1018,10 @@ function imgProvCard(p, i) {
             <label class="chk"><input type="checkbox" data-f="allow_refs" ${p.allow_refs !== false ? "checked" : ""}> Accepts reference pictures (keeps faces consistent)</label>` : ""}
     ${comfy ? `<label>Workflow: ComfyUI "Save (API Format)" JSON. Placeholders: {{prompt}} {{negative}} {{seed}} {{width}} {{height}} {{model}}</label>
       <textarea class="short" data-f="workflow" rows="5" placeholder="Empty = the built-in starter (SDXL text-to-image)">${esc(p.workflow || "")}</textarea>
-      <button class="starter" type="button">Insert starter workflow</button>
+      <button class="starter" type="button">Insert starter workflow</button> <label class="btnlike wfimp" title="Import a workflow saved from ComfyUI (Export API / Save (API Format)). The app puts its placeholders in for you.">📂 Import workflow file…<input type="file" class="wfimport" data-kind="image" accept=".json,application/json" hidden></label><span class="hint wfnote"></span>
       <label>Workflow used when reference pictures are available: matches faces to a character's portrait (needs {{ref1}} in a LoadImage node)</label>
       <textarea class="short" data-f="workflow_ref" rows="5">${esc(p.workflow_ref || "")}</textarea>
-      <button class="starterface" type="button">Insert face-matching (IPAdapter) workflow</button>
+      <button class="starterface" type="button">Insert face-matching (IPAdapter) workflow</button> <label class="btnlike wfimp" title="Import a workflow saved from ComfyUI (Export API / Save (API Format)). The app puts its placeholders in for you.">📂 Import workflow file…<input type="file" class="wfimport" data-kind="ref" accept=".json,application/json" hidden></label><span class="hint wfnote"></span>
       <details class="fold mtweak"><summary><b>Settings for this checkpoint only</b></summary>
         <div class="hint">Applies to the checkpoint chosen above and nothing else; leave a box empty to keep the workflow's own value. Each checkpoint keeps its own set, so switching the checkpoint shows that one's settings.</div>
         <div class="grid2" style="grid-template-columns:repeat(4,1fr)">
@@ -900,7 +1151,9 @@ function imageSettingsHtml(cfg) {
           <div class="field"><label>Picture shape</label><select data-n="shape"><option value="">Story's</option><option value="portrait">Portrait (tall)</option><option value="square">Square</option><option value="landscape">Landscape (wide)</option></select></div>
         </div>
         <label>Art style <small class="hint">(empty = match the story's art style; type a style to draw this model's explicit pictures in it instead; the face still follows Normal 1)</small></label><input data-n="style_override" placeholder="e.g. illustration, digital art, clean lines, soft shading">
-        <label>LoRAs <small class="hint">(from ComfyUI's loras folder, for this model's explicit pictures only: name @ strength; a second one after a semicolon. Empty = none)</small></label><input data-n="loras" placeholder="e.g. Realistic_People_V1.safetensors @ 0.35">
+        <label>LoRAs <small class="hint">(from ComfyUI's loras folder, for this model's explicit pictures only: one per line, name @ strength. Empty = none)</small></label><textarea class="short" data-n="loras" rows="2" placeholder="e.g. Realistic_People_V1.safetensors @ 0.35"></textarea>
+        <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin:2px 0 6px"><select id="imgNsLoraPick" style="max-width:320px"><option value="">(no LoRAs found in ComfyUI)</option></select><input id="imgNsLoraSt" type="number" step="0.05" min="-2" max="2" value="0.8" style="width:80px" title="Strength: 0.6 to 1.0 is usual"><button type="button" id="imgNsLoraAdd">Add</button></div>
+        <div class="hint">Sorted by the model chosen above: ★ tested here first, then ones made for the same kind of model.</div>
         <label>Extra words (style)</label><input data-n="extra_positive" placeholder="e.g. semi-realistic, painterly, soft shading">
         <label>Extra negative words</label><input data-n="extra_negative" placeholder="e.g. chibi, flat color, 3d">
         <div class="actions" style="justify-content:flex-start"><button type="button" id="imgNsTuneReset">Reset this model's explicit settings</button></div>
@@ -926,18 +1179,35 @@ function makerModelId(spec) {      // the model a species' or character's maker 
   const m = ((typeof story !== "undefined" && story && story.models) || {}).images || ((typeof config !== "undefined" && config && config.default_models) || {}).images || {};
   return m.model || "";
 }
+// LoRAs known to work on a model, from MODEL_REFERENCE.md (tested on this computer). [model-name pattern, [lora file-name fragments]]. Listed first in every LoRA picker, above the family grouping.
+const LORA_TESTED = [
+  [/cyberillustrious/i, ["asari", "h2a_alpha", "zabrak", "cardassian", "turian", "unggoy", "xenomorph", "unfazed", "mge_v7", "cyberware", "semi-realism_illustrious", "niji_semi", "monsters", "creature_design"]],
+  [/gor.?v6/i, ["asari", "h2a_alpha", "monsters", "niji_semi"]],
+  [/illustrious-?xl/i, ["monsters", "niji_semi_realism_f"]],
+  [/animagine/i, ["aniv3de", "niji_semi"]],
+  [/realvis/i, ["realistic_people", "zy_realism_enhancer", "monsters", "ip-adapter-faceid"]],
+  [/pony/i, ["relsm", "zy_realism_enhancer", "monsters"]],
+  [/nvjob|realistic_fantasy/i, ["creature_design"]],
+  [/uncanny/i, ["priya_raman_uncanny", "lenovo_ultrareal", "fineartphoto", "freckles", "realistic_chroma", "chroma_detail", "chroma_flash", "zy_dark_fantasy"]],
+  [/chroma/i, ["lenovo_ultrareal", "fineartphoto", "freckles", "realistic_chroma", "chroma_detail", "chroma_flash", "zy_dark_fantasy"]],
+  [/anima-turbo/i, ["monster_concept", "realmedieval", "niji_semi_realism_v5"]],
+  [/flux-?2-klein/i, ["highdetail", "amateur_selfie"]],
+  [/krea2|chimera/i, ["dc_cyberpunk", "v67eragenre", "krea2_fantasy_modern"]],
+];
+const loraTested = (modelId, name) => { const m = String(modelId || ""), n = String(name).toLowerCase(); const hit = LORA_TESTED.find(([re]) => re.test(m)); return !!hit && hit[1].some((f) => n.includes(f)); };
 function loraOptionsHtml(p, modelId, current, none = true) {
   const fams = (p && p.lora_families) || {}, labels = (p && p.lora_labels) || {}, have = (p && p.loras) || [];
   const names = [...new Set([...have, ...(current ? [current] : [])])];
   const m = ((p && p.models) || []).find((x) => x.id === modelId), mf = m ? m.family : "";
   const fam = (n) => fams[n] || "unknown", opt = (n) => `<option value="${esc(n)}">${esc(n)}${have.includes(n) ? "" : " (not found in ComfyUI)"}</option>`;
   const group = (label, list) => list.length ? `<optgroup label="${esc(label)}">${list.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })).map(opt).join("")}</optgroup>` : "";
-  const yes = names.filter((n) => loraFit(mf, fam(n)) === "yes"), partly = names.filter((n) => loraFit(mf, fam(n)) === "partly");
-  const rest = names.filter((n) => !yes.includes(n) && !partly.includes(n)), by = {};
+  const tested = names.filter((n) => loraTested(modelId, n));
+  const yes = names.filter((n) => !tested.includes(n) && loraFit(mf, fam(n)) === "yes"), partly = names.filter((n) => !tested.includes(n) && loraFit(mf, fam(n)) === "partly");
+  const rest = names.filter((n) => !tested.includes(n) && !yes.includes(n) && !partly.includes(n)), by = {};
   rest.forEach((n) => (by[fam(n)] ||= []).push(n));
   const order = ["sdxl", "chroma", "flux1", "flux2", "anima", "krea2", "qwen", "unknown"].filter((f) => by[f]);
   const modelName = (modelId || "").replace(/\.(safetensors|gguf)$/i, "");
-  return (none ? '<option value="">(none)</option>' : "") + (mf ? group(`✔ Works with ${modelName}`, yes) + group("≈ Partly works (FLUX.1-style LoRAs on Chroma)", partly) : "")
+  return (none ? '<option value="">(none)</option>' : "") + group(`★ Tested with ${modelName}`, tested) + (mf ? group(`✔ Works with ${modelName}`, yes) + group("≈ Partly works (FLUX.1-style LoRAs on Chroma)", partly) : "")
     + order.map((f) => group(`${mf ? "✖ For other models: " : ""}${labels[f] || f}`, by[f])).join("");
 }
 async function bindLoraSelect(sel, current, getSpec, makerSel) {      // fills a LoRA picker, grouped by what fits the chosen picture maker, and regroups when the maker changes
@@ -1025,7 +1295,12 @@ function bindImageSettings(cfg, picker) {
         else b.value = has ? mine[b.dataset.n] : (b.dataset.n === "ref_crop" ? "face" : "");
       });
       $("imgNsTune").querySelector("summary b").textContent = `Settings for ${nsModel} (explicit pictures only)`;
+      fillNsLoras();
     };
+    let nsProv = null;
+    const fillNsLoras = () => { const pk = $("imgNsLoraPick"); if (!pk) return; pk.innerHTML = nsProv && (nsProv.loras || []).length ? loraOptionsHtml(nsProv, nsModel, "", false) : '<option value="">(no LoRAs found in ComfyUI)</option>'; };
+    api("/model-options").then((o) => { nsProv = (o.images || []).find((x) => (x.loras || []).length) || null; fillNsLoras(); }).catch(() => {});
+    $("imgNsLoraAdd").onclick = () => { const pick = $("imgNsLoraPick").value, box = document.querySelector('#imgNsTune [data-n="loras"]'); if (!pick) return; if (!box.value.split(/[\n;]/).some((l) => l.split("@")[0].trim() === pick)) { box.value = (box.value.trim() ? box.value.trim() + "\n" : "") + `${pick} @ ${$("imgNsLoraSt").value || 1}`; box.dispatchEvent(new Event("input", { bubbles: true })); } };
     $("imgNsTuneReset").onclick = () => { if (!nsModel) return; delete nsT[nsModel]; nsModel = ""; fillTune(); };
     const oldMakerChange = $("imgNsMaker").onchange;
     $("imgNsMaker").onchange = () => { if (oldMakerChange) oldMakerChange(); fillTune(); };
@@ -1098,6 +1373,18 @@ function bindImageSettings(cfg, picker) {
     card.addEventListener("change", (e) => { if (e.target.matches && e.target.matches("[data-f=model]")) loadTweaks(card, p, e.target.value); });
     const la = card.querySelector(".loraadd");
     if (la) la.onclick = () => { const pick = card.querySelector(".lorapick").value, box = card.querySelector('[data-t="loras"]'); if (!pick) return; const line = `${pick} @ ${card.querySelector(".lorast").value || 1}`; if (!box.value.split("\n").some((l) => l.split("@")[0].trim() === pick)) box.value = (box.value.trim() ? box.value.trim() + "\n" : "") + line; };
+    card.querySelectorAll(".wfimport").forEach((inp) => inp.addEventListener("change", async () => {
+      const f = inp.files[0]; if (!f) return;
+      const note = inp.closest("label").nextElementSibling, kind = inp.dataset.kind;
+      const target = card.querySelector(`[data-f="${kind === "image" ? "workflow" : kind === "ref" ? "workflow_ref" : "video_workflow"}"]`);
+      note.textContent = "Reading…";
+      try {
+        const r = await api("/images/prepare-workflow", { method: "POST", body: { workflow: await f.text(), kind } });
+        target.value = r.workflow;
+        note.textContent = `✔ Imported ${r.nodes} nodes. ` + (r.notes.length ? r.notes.join("; ") + "." : "Placeholders were already in place.") + " Click Save to keep it.";
+      } catch (err) { note.textContent = "Could not import: " + err.message; }
+      inp.value = "";
+    }));
     const st = card.querySelector(".starter");
     const sf = card.querySelector(".starterface");
     if (sf) sf.onclick = async () => { card.querySelector('[data-f="workflow_ref"]').value = JSON.stringify(await api("/images/starter-workflow?kind=face"), null, 2); };
@@ -1112,6 +1399,7 @@ function bindImageSettings(cfg, picker) {
       btn.disabled = false;
     };
   });
+  bindVideoSettings(cfg);
   return sync;
 }
 function collectImageSettings(cfg) {
@@ -1135,6 +1423,7 @@ function collectImageSettings(cfg) {
     p.prompt_style_model = p.model || "";      // the service-wide style above was set for this model
     flushTweaks(card, p);   // (does nothing if the boxes were never filled, so saved settings are kept)
   });
+  collectVideoSettings(cfg);
 }
 
 // ---------- offer art for named characters that have none ----------
@@ -1160,13 +1449,28 @@ async function refreshArtSuggestions() {
   document.getElementById("abLater").onclick = () => { items.forEach((c) => snoozed.add(c.name.toLowerCase())); refreshArtSuggestions(); };
 }
 
+// A floating "Stop pictures" button shows while any drawing job is being watched: drops everything queued and interrupts the local draw.
+let _watching = 0;
+function stopPicsButton(on) {
+  let b = document.getElementById("stopPics");
+  if (!on) { if (b) b.remove(); return; }
+  if (b) return;
+  b = document.createElement("button");
+  b.id = "stopPics"; b.className = "danger"; b.textContent = "⏹ Stop pictures";
+  b.title = "Cancel every queued picture and stop the one being drawn (an online service's picture already sent will still finish, but is thrown away)";
+  b.onclick = async () => { b.disabled = true; b.textContent = "Stopping…"; try { await api("/images/stop", { method: "POST" }); } catch (e) { alert(e.message); } };
+  document.body.appendChild(b);
+}
 async function watchJob(id, onUpdate) {
-  for (;;) {
-    const j = await api(`/jobs/${id}`);
-    if (onUpdate) onUpdate(j);
-    if (j.status !== "running") return j;
-    await new Promise((r) => setTimeout(r, 1500));
-  }
+  _watching++; stopPicsButton(true);
+  try {
+    for (;;) {
+      const j = await api(`/jobs/${id}`);
+      if (onUpdate) onUpdate(j);
+      if (j.status !== "running") return j;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  } finally { if (--_watching <= 0) { _watching = 0; stopPicsButton(false); } }
 }
 
 async function showArtDialog(opts = {}) {
@@ -1213,7 +1517,7 @@ async function showArtDialog(opts = {}) {
   const showCandidates = (el, name) => {
     const urls = cands[name] || [];
     el.querySelector(".aResult").innerHTML = urls.length ? `<div class="gallery">${urls.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="aUse primary" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div>
-      <label>After you pick one, also draw</label><select class="aSet"><option value="none">No more pictures (just this one)</option><option value="basic" ${(story.art || {}).extended_moods ? "" : "selected"}>The basic set</option><option value="extended" ${(story.art || {}).extended_moods ? "selected" : ""}>The extended set</option>${categorySetOptions("All: ")}<option value="match">The images my other characters have</option></select>
+      <label>After you pick one, also draw</label><select class="aSet"><option value="none">No more pictures (just this one)</option><option value="basic" ${(story.art || {}).extended_moods ? "" : "selected"}>The basic set</option><option value="extended" ${(story.art || {}).extended_moods ? "selected" : ""}>The extended set</option><option value="full">The Extended Full Set</option>${categorySetOptions("All: ")}<option value="match">The images my other characters have</option></select>
       <div class="actions" style="justify-content:flex-start"><button class="aMore">Draw 4 more options</button></div>` : "";
   };
 
@@ -1428,4 +1732,37 @@ async function sheetFill(slug, back) {
       } catch (err) { $("sfMsg2").textContent = err.message; e2.target.disabled = false; }
     };
   };
+}
+
+
+// ---------- name the expression on each picture (smile, shy, angry…) with a helper model that can see pictures ----------
+// slugs = the characters to read ([] = the whole cast). Shows what it found, lets you change any label, then renames the pictures you keep ticked.
+async function labelMoodsDialog(slugs, done) {
+  const back = () => (done ? done() : closeModal());
+  modal(`<h2>🏷 Name expressions</h2><p class="hint">Reading each picture with the story's helper model (Settings → AI &amp; story → Recaps &amp; helpers; it must be able to see pictures: Claude, Gemini, ChatGPT or Grok). Only pictures with a generic name (normal 2, default…) are read; each character's first <b>normal</b> picture, adult pictures and action shots are left alone.</p>
+    <div id="lbOut" class="hint">Starting…</div><div class="actions"><button id="lbCancel">Close</button><span style="flex:1"></span><button id="lbAll" class="hidden" title="Read every ordinary picture of these characters, not only the generically named ones">Read all pictures instead</button></div>`);
+  $("lbCancel").onclick = back;
+  const run = async (everything) => {
+    const out = $("lbOut"); out.textContent = "Starting…";
+    try {
+      const r = await api(`/stories/${story.id}/cast/label-moods`, { method: "POST", body: { slugs, everything } });
+      if (!r.pictures) { out.textContent = everything ? "Nothing to read." : "No pictures with a generic name were found. (Every picture already has a name, or only the first normal picture exists.)"; $("lbAll").classList.toggle("hidden", everything); return; }
+      const j = await watchJob(r.job, (x) => { if ($("lbOut")) out.textContent = `Reading expressions… ${x.done} of ${x.total}`; });
+      if (j.status === "error") { out.textContent = j.error; return; }
+      const items = j.result.items, names = j.result.names;
+      out.className = ""; $("lbAll").classList.toggle("hidden", everything);
+      out.innerHTML = `<div style="max-height:52vh;overflow:auto">${items.map((it, i) => `<div class="lbrow" data-i="${i}" style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" class="lbOn" ${it.label && it.label !== "normal" ? "checked" : ""}>
+        <img src="${thumbUrl(it.url, 96)}" style="width:48px;height:48px;object-fit:cover;border-radius:6px" alt=""><span style="flex:1;min-width:0"><b>${esc(it.name)}</b> <small class="hint">${esc(it.mood)}</small></span>
+        <select class="lbSel"><option value="">(keep the name)</option>${names.map((n) => `<option value="${esc(n)}" ${n === it.label ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>`).join("")}</div>
+        <div class="actions"><span style="flex:1"></span><button class="primary" id="lbApply">Rename the ticked pictures</button></div><div class="hint" id="lbMsg"></div>`;
+      $("lbApply").onclick = async (e) => {
+        const renames = [...out.querySelectorAll(".lbrow")].filter((r) => r.querySelector(".lbOn").checked && r.querySelector(".lbSel").value).map((r) => { const it = items[+r.dataset.i]; return { slug: it.slug, mood: it.mood, to: r.querySelector(".lbSel").value }; });
+        e.target.disabled = true;
+        try { const a = await api(`/stories/${story.id}/cast/label-moods/apply`, { method: "POST", body: { renames } }); story = a.story; renderAll(); $("lbMsg").textContent = `Renamed ${a.renamed} picture${a.renamed === 1 ? "" : "s"}.`; setTimeout(back, 900); }
+        catch (err) { $("lbMsg").textContent = err.message; e.target.disabled = false; }
+      };
+    } catch (err) { out.textContent = err.message; }
+  };
+  $("lbAll").onclick = () => run(true);
+  run(false);
 }

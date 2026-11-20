@@ -285,14 +285,38 @@ def face_region(data: bytes, tight: "bool | str" = False) -> bytes:
         return data
 
 
+import contextvars
+import time as _time
+STOP = {"at": 0.0, "bases": set()}      # "Stop pictures": anything started before this moment is abandoned
+JOB_STARTED = contextvars.ContextVar("job_started", default=None)   # a background job's start time, so every picture of a queued job stops, not just the one drawing
+
+
+def _stopped(t0) -> bool:
+    return bool(t0) and STOP["at"] > t0
+
+
+async def stop_all() -> None:
+    """Abandon queued and running pictures. Local ComfyUI is told to interrupt and clear its queue; an online service's request already in flight can't be recalled (it just finishes and is thrown away)."""
+    STOP["at"] = _time.time()
+    for base in list(STOP["bases"]):
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post(base + "/queue", json={"clear": True})
+                await c.post(base + "/interrupt")
+        except Exception:
+            pass
+
+
 async def _comfyui(p, prompt, negative, shape, refs, seed):
     base = (p.get("base_url") or "http://127.0.0.1:8188").rstrip("/")
+    STOP["bases"].add(base)
+    t0 = _time.time()
     text = p.get("workflow_ref") if (refs and p.get("workflow_ref")) else p.get("workflow")
     try:
         wf = json.loads(text) if text else copy.deepcopy(STARTER_WORKFLOW)
     except ValueError as e:
         raise ImageError(f"The ComfyUI workflow in Settings is not valid JSON: {e}")
-    w, h = SHAPES[shape]
+    w, h = p["_size"] if p.get("_size") else SHAPES[shape]      # "_size": the animate (video) button picks its own, smaller canvas
     if p.get("_scale"):       # "Larger scene pictures" (story art options): a bigger canvas, rounded to what the model likes (multiples of 64)
         w, h = (int(round(v * float(p["_scale"]) / 64)) * 64 for v in (w, h))
     if p.get("ref_megapixels"):   # a species reference is shown at a tiny size, so only its broad look (colours, crests, ears, build) carries over, not the individual's face
@@ -341,11 +365,21 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
                 raise ImageError(f"ComfyUI rejected the workflow ({sub.status_code}): {sub.text[:600]}")
             pid = sub.json()["prompt_id"]
             for _ in range(int(p.get("timeout_s", 300))):
+                if _stopped(JOB_STARTED.get() or t0):
+                    raise ImageError("Stopped.")
                 hist = (await c.get(f"{base}/history/{pid}")).json()
                 if pid in hist:
                     entry = hist[pid]
                     if (entry.get("status") or {}).get("status_str") == "error":
                         raise ImageError("ComfyUI reported an error while running the workflow (check its console).")
+                    if p.get("_video"):       # animate: the workflow's SaveVideo / SaveWEBM / VHS node writes an .mp4 or .webm (listed under images, videos or gifs)
+                        for out in (entry.get("outputs") or {}).values():
+                            for img in [*out.get("videos", []), *out.get("gifs", []), *out.get("images", [])]:
+                                if str(img.get("filename", "")).lower().endswith((".mp4", ".webm")) and img.get("type", "output") == "output":
+                                    v = await c.get(f"{base}/view", params={"filename": img["filename"], "subfolder": img.get("subfolder", ""), "type": "output"})
+                                    _fail(v, "ComfyUI video fetch")
+                                    return v.content
+                        raise ImageError("The workflow finished but saved no video. It needs a SaveVideo (or SaveWEBM) node ending in an .mp4 or .webm.")
                     for out in (entry.get("outputs") or {}).values():
                         for img in out.get("images", []):
                             if img.get("type", "output") == "output":
@@ -359,6 +393,165 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
     raise ImageError("ComfyUI took too long to finish.")
 
 
+def sniff_video(data: bytes) -> tuple[str, str]:
+    if data[4:8] == b"ftyp":
+        return "mp4", "video/mp4"
+    if data[:4] == b"\x1aE\xdf\xa3":
+        return "webm", "video/webm"
+    raise ImageError("That is not an MP4 or WebM video.")
+
+
+# ---------------- imported workflows and the video model / LoRAs ----------------
+_TEXT_HOPS = ("positive", "negative", "conditioning", "conditioning_1", "cond", "prompt")
+
+
+def _text_node(wf: dict, link, want: str, depth: int = 0):
+    """The node holding the prompt text that a sampler's positive / negative input comes from (through conditioning nodes that only pass it on)."""
+    if depth > 8 or not isinstance(link, list) or not link:
+        return None
+    n = wf.get(str(link[0]))
+    inp = n.get("inputs") if isinstance(n, dict) else None
+    if not isinstance(inp, dict):
+        return None
+    if isinstance(inp.get("text"), str):
+        return n
+    for key in ((want,) if want in inp else ()) + tuple(k for k in _TEXT_HOPS if k in inp and k not in ("positive", "negative")):
+        r = _text_node(wf, inp.get(key), want, depth + 1)
+        if r:
+            return r
+    return None
+
+
+def prepare_workflow(wf: dict, kind: str = "image") -> tuple[dict, list[str]]:
+    """Take a workflow exported from ComfyUI ("Save (API Format)") and put the app's placeholders in the right places, so it can be used as it is:
+    {{prompt}} / {{negative}} on the text the sampler reads, {{seed}} on the sampler's seed, {{width}} / {{height}} on the canvas size, and {{ref1}} on the first
+    LoadImage (kind "ref" = a face-matching picture workflow, "video" = the picture that gets animated). Places that already hold a placeholder, or that
+    cannot be found, are left alone. Returns (workflow, plain-language notes)."""
+    notes, done = [], set()
+    nodes = {k: n for k, n in wf.items() if isinstance(n, dict) and isinstance(n.get("inputs"), dict)}
+    samplers = [n for n in nodes.values() if "positive" in n["inputs"] and "negative" in n["inputs"]] or [n for n in nodes.values() if str(n.get("class_type", "")).startswith("KSampler")]
+    for sm in samplers:
+        for want, ph in (("positive", "{{prompt}}"), ("negative", "{{negative}}")):
+            if ph in done:
+                continue
+            tn = _text_node(wf, sm["inputs"].get(want), want)
+            if tn and "{{" not in str(tn["inputs"].get("text", "")):
+                tn["inputs"]["text"] = ph
+                done.add(ph)
+                notes.append(f"the {want} prompt text now reads {ph}")
+            elif tn:
+                done.add(ph)
+        for key in ("seed", "noise_seed"):
+            if "{{seed}}" not in done and isinstance(sm["inputs"].get(key), (int, float)) and not isinstance(sm["inputs"].get(key), bool):
+                sm["inputs"][key] = "{{seed}}"
+                done.add("{{seed}}")
+                notes.append("the sampler's seed now reads {{seed}}")
+    for n in nodes.values():
+        i = n["inputs"]
+        if "{{width}}" not in done and isinstance(i.get("width"), (int, float)) and isinstance(i.get("height"), (int, float)) and not isinstance(i.get("width"), bool) \
+                and re.search(r"latent|ImageToVideo|Video", str(n.get("class_type", "")), re.IGNORECASE):
+            i["width"], i["height"] = "{{width}}", "{{height}}"
+            done.add("{{width}}")
+            notes.append("the canvas size now reads {{width}} and {{height}}")
+    if kind in ("ref", "video"):
+        li = next((n for n in nodes.values() if n.get("class_type") == "LoadImage"), None)
+        if li and "{{ref1}}" not in str(li["inputs"].get("image", "")):
+            li["inputs"]["image"] = "{{ref1}}"
+            notes.append("the first Load Image node now reads {{ref1}} (the picture the app hands over)")
+        elif not li:
+            notes.append("WARNING: there is no Load Image node, so no picture can be handed to this workflow" + (" (a text-to-video workflow cannot animate a picture)" if kind == "video" else ""))
+    classes = {str(n.get("class_type", "")) for n in nodes.values()}
+    if kind == "video":
+        if not any(re.search(r"SaveVideo|SaveWEBM|VideoCombine|SaveAnimated", c) for c in classes):
+            notes.append("WARNING: there is no Save Video node (SaveVideo, SaveWEBM or Video Combine), so the finished clip cannot be found")
+    elif not any(c.startswith("SaveImage") or c == "PreviewImage" for c in classes):
+        notes.append("WARNING: there is no Save Image node")
+    if "{{prompt}}" not in done and "{{prompt}}" not in json.dumps(wf):
+        notes.append("WARNING: no prompt text was found to fill in, so every picture would use the prompt typed in the file")
+    return wf, notes
+
+
+_VIDEO_LOADERS = ("UNETLoader", "UnetLoaderGGUF", "DiffusionModelLoader", "CheckpointLoaderSimple")
+
+
+def _noise_tag(name: str) -> str:
+    n = str(name).lower()
+    return "high" if "high" in n else "low" if "low" in n else ""
+
+
+_MOTION_LORA = re.compile(r"motion|vbvr|boost", re.IGNORECASE)
+
+
+def scale_motion_loras(wf: dict, factor: float) -> dict:
+    """Turn the motion-adding LoRAs (Motion Booster, VBVR...) up or down by a factor. Repair/turbo/style LoRAs are left alone."""
+    if abs(factor - 1.0) < 0.01:
+        return wf
+    for n in wf.values():
+        if isinstance(n, dict) and str(n.get("class_type", "")).startswith("LoraLoader"):
+            name = str(n.get("inputs", {}).get("lora_name", ""))
+            if _MOTION_LORA.search(name) and not re.search(r"repair", name, re.IGNORECASE):
+                for key in ("strength_model", "strength_clip"):
+                    if isinstance(n["inputs"].get(key), (int, float)):
+                        n["inputs"][key] = round(n["inputs"][key] * factor, 3)
+    return wf
+
+
+def apply_video_settings(wf: dict, model: str, loras: list[tuple[str, float]]) -> dict:
+    """The app-wide video model and LoRAs over the video workflow. A workflow with one model loader gets the chosen model; one with a high-noise and a low-noise
+    loader (Wan 2.2) gets it in the loader of the same kind (or in both when the file name says neither). LoRAs are added to every model loader (model only)."""
+    loaders = [k for k, n in wf.items() if isinstance(n, dict) and n.get("class_type") in _VIDEO_LOADERS and isinstance(n.get("inputs"), dict)]
+    field = lambda k: "ckpt_name" if wf[k]["class_type"].startswith("Checkpoint") else "unet_name"
+    if model:
+        tag = _noise_tag(model)
+        for k in loaders:
+            if len(loaders) == 1 or not tag or _noise_tag(wf[k]["inputs"].get(field(k), "")) == tag:
+                wf[k]["inputs"][field(k)] = model
+    for k in loaders:
+        if wf[k]["class_type"].startswith("Checkpoint"):
+            continue
+        prev = [k, 0]
+        made = []
+        for i, (name, st) in enumerate(loras):
+            nid = f"vlora{k}_{i + 1}"
+            wf[nid] = {"class_type": "LoraLoaderModelOnly", "inputs": {"lora_name": name, "strength_model": st, "model": prev}}
+            made.append(nid)
+            prev = [nid, 0]
+        if made:
+            for k2, n in wf.items():
+                if k2 in made or not isinstance(n, dict) or not isinstance(n.get("inputs"), dict):
+                    continue
+                for key, v in n["inputs"].items():
+                    if v == [k, 0]:
+                        n["inputs"][key] = prev
+    return wf
+
+
+async def animate(provider: dict, still: bytes, prompt: str, size: tuple[int, int], negative: str | None = None, motion_scale: float = 1.0) -> tuple[bytes, str]:
+    """Turn one still picture into a short looping clip with the ComfyUI video workflow (Settings -> Pictures -> Local -> Video workflow).
+    The workflow gets {{ref1}} (the picture), {{prompt}}, {{negative}}, {{seed}}, {{width}}, {{height}}."""
+    wf = (provider.get("video_workflow") or "").strip()
+    if provider.get("type") != "comfyui" or not wf:
+        raise ImageError("Animating needs a ComfyUI picture maker with a Video workflow filled in (Settings → Pictures → Local).")
+    vm, vl = (provider.get("video_model") or "").strip(), parse_loras(provider.get("video_loras"))
+    if vm or vl:       # the app-wide video model and LoRAs (Settings -> Picture makers -> Local)
+        try:
+            wf = json.dumps(apply_video_settings(json.loads(wf), vm, vl))
+        except ValueError:
+            pass
+    if abs(motion_scale - 1.0) >= 0.01:
+        try:
+            wf = json.dumps(scale_motion_loras(json.loads(wf), motion_scale))
+        except ValueError:
+            pass
+    p = {**provider, "workflow": wf, "workflow_ref": wf, "_video": True, "_size": size, "model": "", "timeout_s": 1800, "model_tweaks": {}}
+    await localrt.before_image(provider)
+    with localrt.hold():
+        data = await _comfyui(p, prompt, negative if negative is not None else "static, still image, blurry, distorted, text, watermark", "portrait", [(still, sniff(still)[1])], None)
+    if _stopped(JOB_STARTED.get()):
+        raise ImageError("Stopped.")
+    return data, sniff_video(data)[0]
+
+
 GENERATORS = {"gemini": _gemini, "openai": _openai, "comfyui": _comfyui}
 
 
@@ -367,6 +560,9 @@ async def generate(provider: dict, prompt: str, negative: str = "", shape: str =
     if not fn:
         raise ImageError(f"Unknown image provider type: {provider.get('type')}")
     shape = shape if shape in SHAPES else "portrait"
+    t0 = JOB_STARTED.get() or _time.time()
+    if _stopped(t0):
+        raise ImageError("Stopped.")
     local = provider.get("type") == "comfyui"
     if local:
         await localrt.before_image(provider)     # starts ComfyUI / makes room if the player turned that on (Settings -> Local models)
@@ -378,6 +574,8 @@ async def generate(provider: dict, prompt: str, negative: str = "", shape: str =
     finally:
         if held:
             held.__exit__(None, None, None)
+    if _stopped(t0):
+        raise ImageError("Stopped.")
     try:
         usage.record({"purpose": "pictures", "kind": "image", "provider": provider.get("id", ""), "model": provider.get("model", ""), "images": 1})
     except Exception:
@@ -412,6 +610,9 @@ STYLE_PRESETS = [   # id, label, art direction (added to every picture prompt of
     {"id": "comic", "family": "any", "label": "Western comic book", "direction": "western comic book art, bold inks, dynamic shading, saturated colors, halftone texture"},
     {"id": "watercolor", "family": "any", "label": "Watercolor storybook", "direction": "soft watercolor illustration, gentle washes, visible paper texture, warm storybook palette"},
     {"id": "painterly", "family": "any", "label": "Painterly fantasy (oil)", "direction": "painterly fantasy oil painting, rich colors, dramatic lighting, visible brush strokes"},
+    {"id": "scifi", "family": "any", "label": "Futuristic sci-fi concept art (cinematic, painterly)",
+     "direction": "unified cinematic science-fiction concept art, hand-painted digital illustration, grounded industrial design, colossal scale, intricate but readable mechanical detail, atmospheric depth, dramatic rim lighting, muted gunmetal and deep navy with restrained amber highlights, subtle film grain, cohesive color grading, painterly realism, consistent materials and proportions, layered depth, strong focal point, readable action",
+     "negative": "anime, cartoon styling, glossy toy-like surfaces, excessive neon, cluttered composition, inconsistent lighting, illegible details, text, watermark"},
     {"id": "chibi", "family": "anime", "label": "Cute chibi", "direction": "cute chibi illustration, big heads, simple shapes, bright colors, clean outlines"},
 ]
 STYLE_MATCH = "Draw in exactly the same art style as the reference pictures (their style, line work and colors take priority over any style words above)."

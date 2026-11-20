@@ -4,7 +4,7 @@ import json
 import re
 
 from . import appstatus, characters, localfix, moods, store, tracker
-from . import inventory
+from . import inventory, statsheet
 
 ENGINE_CORE = """\
 === ENGINE RULES (added by the app; always follow) ===
@@ -93,7 +93,7 @@ def _is_begin(story: dict, turn: dict) -> bool:
 
 # Compact portrait tag: the narrator writes [[Name/mood]] (fewer tokens than ![](portrait:Name/mood)); the app stores and shows the long form, accepts both,
 # and turns the long form back into the short one when it sends the history to the narrator again.
-_COMPACT_TAG = re.compile(r"\[\[([^\]/\n|]{1,40})/([^\]\n|]{1,40})\]\]")
+_COMPACT_TAG = re.compile(r"\[\[([^\]/\n|]{1,40})/([^\]\n|]{1,90})\]\]")
 _LONG_TAG = re.compile(r"!\[\]\(portrait:([^)/\n]+)/([^)\n]+)\)")
 
 
@@ -117,6 +117,30 @@ def portrait_lines(story: dict) -> list[str]:
         else:
             groups.setdefault(tuple(sorted(c["moods"])), []).append(c["name"])
     return [f"{', '.join(names)}: {', '.join(moods)}" for moods, names in sorted(groups.items(), key=lambda kv: kv[1][0])] + avail
+
+
+def variants_note(story: dict) -> str:
+    """Outfits (when switched on) and place pictures a character has, with the tag rule. The narrator picks what fits the scene: [[Name/smile @swimsuit @pool]]."""
+    outfits_on = bool((story.get("art") or {}).get("outfits"))
+    pnames = {" ".join(p["name"].lower().split()): p["name"] for p in story.get("places") or []}
+    rows = []
+    for c in story.get("cast") or []:
+        if not c.get("moods") or c.get("generic"):
+            continue
+        bits = []
+        if outfits_on and c.get("outfits"):
+            bits.append("outfits: " + "; ".join(f"{o} ({d})" + (" [wearing now]" if c.get("outfit") == o else "") if d else o + (" [wearing now]" if c.get("outfit") == o else "") for o, d in c["outfits"].items()))
+        pl = sorted({pnames.get(k.split("@")[0], k.split("@")[0]) for k, v in (c.get("place_pics") or {}).items() if v})
+        if pl:
+            bits.append("pictures at: " + ", ".join(pl))
+        if bits:
+            rows.append(f"{c['name']} - " + " | ".join(bits))
+    if not rows:
+        return ""
+    return ("Outfits and places per character:\n" + "\n".join(rows) + "\n"
+            "Add @outfit and/or @place after the mood to show them that way: [[Name/smile @swimsuit @pool]]. Pick the outfit that matches what they are wearing in the scene "
+            "(if the story does not change it, keep the one marked wearing now; write their clothes in the text to match) and a place only when the scene is really there. "
+            "Without @ the usual picture is used.")
 
 
 def generic_lines(story: dict) -> list[str]:
@@ -149,6 +173,8 @@ def pictures_available(story: dict) -> str:
     rows = _place_rows(story)
     if rows:
         out.append("Places (fixed pictures):\n" + "\n".join(rows))
+    if (vn := variants_note(story)) and art.get("portraits", True):
+        out.append(vn)
     if out and extended_moods_on(story):
         out.append("(Extended mood set: prefer the most specific fitting mood over normal or smile.)")
     return ("[PICTURES AVAILABLE NOW, for the narrator only]\n" + "\n".join(out)) if out else ""
@@ -576,6 +602,8 @@ def build(story: dict, beats_note: str = "", local: bool = False) -> Built:
     rules = core_rules + ("\n" + ENGINE_STATE if use_state else "")
     if inventory.is_on(story):
         rules += "\n\n" + inventory.RULE
+    if statsheet.is_on(story):
+        rules += "\n\n" + statsheet.RULE + (statsheet.RULE_AUTO if statsheet.get(story)["auto"] else "")
     drawn = appstatus.last_block(story) if story.get("app_status") else None     # the app writes the status line, so the narrator leaves it out
     if drawn:
         rules += "\n\n" + appstatus.RULE
@@ -636,6 +664,8 @@ def split_state(full: str) -> tuple[str, dict]:
     """Return (narration without the state block, parsed state dict)."""
     item_ops = inventory.parse_ops(full)        # the hidden <items> line (stories with the app's inventory on)
     full = inventory.strip(full)
+    sheet_ops = statsheet.parse(full)           # the hidden <sheet> lines (stories with character sheets on)
+    full = statsheet.strip(full)
     matches = list(STATE_RE.finditer(full))
     update: dict = {}
     if matches:
@@ -666,6 +696,8 @@ def split_state(full: str) -> tuple[str, dict]:
     update = update if isinstance(update, dict) else {}
     if item_ops:
         update["_items"] = item_ops
+    if sheet_ops:
+        update["_sheets"] = sheet_ops
     return text, update
 
 
@@ -688,13 +720,15 @@ def apply_state(story: dict, upd: dict) -> None:
         st["inventory"] = [str(x) for x in upd["inventory"]]
     if inventory.is_on(story):
         inventory.apply(story, upd.get("_items") or [], len(story.get("turns") or []))
+    if statsheet.is_on(story) and upd.get("_sheets"):
+        statsheet.apply(story, upd["_sheets"], len(story.get("turns") or []))
     sug = upd.get("suggestions")
     story["suggestions"] = [str(s) for s in sug][:4] if isinstance(sug, list) else []
 
 
 def snapshot(story: dict) -> dict:
     return copy.deepcopy({"state": story.get("state", {}), "suggestions": story.get("suggestions", []), "tracker": story.get("tracker") or tracker.blank(),
-                          "inventory": story.get("inventory") or inventory.blank()})
+                          "inventory": story.get("inventory") or inventory.blank(), "statsheets": story.get("statsheets") or statsheet.blank()})
 
 
 def restore(story: dict, snap: dict) -> None:
@@ -703,6 +737,8 @@ def restore(story: dict, snap: dict) -> None:
     story["suggestions"] = snap.get("suggestions", [])
     if "inventory" in snap:            # older turns were saved before the inventory existed: leave it as it is
         story["inventory"] = copy.deepcopy(snap["inventory"])
+    if "statsheets" in snap:            # (the on/off choice is the player's, not the turn's: only the sheets go back)
+        story.setdefault("statsheets", statsheet.blank())["items"] = copy.deepcopy(snap["statsheets"].get("items") or {})
 
 
 SUMMARY_SYSTEM = (

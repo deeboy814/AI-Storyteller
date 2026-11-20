@@ -634,6 +634,12 @@ button.icon.lbl { width: auto; padding: 0 12px; gap: 6px; font-size: 14px; } but
 #leftbar .lbnav.lbtools { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; } #leftbar .lbnav.lbtools button, #leftbar .lbnav.bottom button, #modalCard .lbnav.lbtools button { display: flex; align-items: center; justify-content: flex-start; gap: 10px; text-align: left; padding: 10px 12px; font-size: 14px; }
 #leftbar .lbnav.lbtools button small { margin-left: auto; color: var(--muted); } #modalCard .lbnav.lbtools { display: flex; flex-direction: column; gap: 8px; }
 #leftbar .lbspacer { flex: 1; }
+.lbsechead { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.lbsechead b { font-weight: 600; } .lbsechead.tools { margin-top: 12px; }
+.lbnewbtn { font-size: 12px; padding: 2px 9px; } .lbmore { width: 100%; margin-top: 4px; font-size: 12.5px; background: none; border: 1px dashed var(--line); color: var(--muted); }
+.lbmore:hover { color: var(--text); border-color: var(--accent); }
+.lblist.short { flex: none; max-height: 40vh; overflow-y: auto; }
+#modalCard .lbstories { margin-bottom: 6px; } #modalCard .lbnav.bottom { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
 #leftbar .lbnav.bottom { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
 
 /* wide screens: when the stories panel is closed, a small tab on the left edge brings it back (the 📚 button does too) */
@@ -727,3 +733,46 @@ button.icon.lbl { width: auto; padding: 0 12px; gap: 6px; font-size: 14px; } but
 .imcatGrid figure.mood.alt img { opacity: .8; }
 @media (max-width: 900px) { .imcatGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 520px) { .imcatGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+#stopPics { position: fixed; right: 16px; bottom: 16px; z-index: 9000; padding: 10px 16px; border-radius: 22px; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+
+/* phone: the bottom controls are compact and can be folded away with the arrow on top of them (the arrow stays at the bottom to bring them back) */
+.foottoggle { display: none; }
+@media (max-width: 760px) {
+  .foottoggle { display: flex; align-items: center; justify-content: center; width: 100%; height: 22px; margin: -4px 0 4px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; }
+  footer .cachenote { display: none; }
+  footer #chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-bottom: 6px; gap: 6px; }
+  footer #chips::-webkit-scrollbar { display: none; }
+  footer #chips .chip { flex: none; white-space: nowrap; font-size: 12.5px; padding: 4px 11px; }
+  footer .quickbar, footer .replyopts { max-height: 28vh; overflow-y: auto; }
+  footer .replyopts button, footer .quickbar button { font-size: 13px; padding: 5px 11px; }
+  footer .genstatus { padding: 4px 10px; margin-bottom: 6px; font-size: 12.5px; }
+  body.footfold footer > *:not(.foottoggle) { display: none !important; }
+  body.footfold footer { padding-top: 2px; padding-bottom: calc(2px + env(safe-area-inset-bottom)); }
+  body.footfold .foottoggle { margin: 0; height: 26px; }
+}
+@media (max-width: 760px) {
+  footer .artbanner, footer .budgetnote, footer .cmdbar { max-height: 56px; overflow-y: auto; font-size: 12.5px; padding: 4px 10px; margin-bottom: 6px; }
+  footer .artbanner button, footer .budgetnote button, footer .cmdbar button { padding: 3px 9px; font-size: 12.5px; }
+}
+
+.pairrow.mutual { color: var(--teal, #4cc9b0); }
+.pairrow.oneside { opacity: .85; }
+.vidbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
+
+/* phones: every dialog gets a close bar pinned to the top, so you never have to scroll to the bottom to leave */
+.mobclose { display: none; }
+@media (max-width: 760px) {
+  .mobclose { display: flex; justify-content: flex-end; position: sticky; top: -16px; z-index: 6; margin: -16px -14px 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); flex-shrink: 0; }
+  .mobclose button { padding: 8px 16px; font-size: 15px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2, var(--panel)); color: var(--text); cursor: pointer; }
+}
+
+/* character sheets for NPCs */
+.shrow { display: flex; gap: 6px; margin: 4px 0; align-items: center; }
+.shrow .shn { flex: 1 1 40%; min-width: 0; }
+.shrow .shv { flex: 1 1 45%; min-width: 0; }
+.shimg { margin: 6px 0; }
+.pcsheet { margin: 4px 0 2px; }
+.pcsheet summary { cursor: pointer; font-size: 12px; opacity: .85; }
+.pcsheet .sheetimg { display: block; max-width: 100%; max-height: 180px; border-radius: 6px; margin: 4px 0; }
+.pcsheet .sheetnotes { white-space: pre-wrap; }

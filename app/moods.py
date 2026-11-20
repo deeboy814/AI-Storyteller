@@ -156,7 +156,7 @@ def draw_names(cfg: dict | None, cid: str, nsfw_story: bool) -> list[str]:
     """What a batch ("All: <category>") draws: the picture names as the draw sets write them (smile 1, smile 2, combat 1...), then every other picture in the category."""
     sets = (cfg or {}).get("mood_sets") or characters.DEFAULT_SETS
     out = []
-    for key in [k for k in ("basic", "extended", "action", "action_adult") if k in sets] + [k for k in sets if k not in ("basic", "extended", "action", "action_adult")]:
+    for key in [k for k in ("basic", "extended", "action", "action_adult") if k in sets] + [k for k in sets if k not in ("basic", "extended", "action", "action_adult", "full")]:      # (the Extended Full Set is its own batch: it does not widen "All: Expressions")
         for m in sets.get(key, []):
             m = str(m).strip().lower()
             if m and m not in out and category_of(cfg, m) == cid and (nsfw_story or not is_nsfw(cfg, m)):

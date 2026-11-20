@@ -24,8 +24,16 @@ async function showBeats() {
     <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button id="bRead" title="Ask the AI to read the story prompt again for scheduled events. New ones are added; ones you edited and ones you made are never touched.">🔍 Read the story prompt</button><button id="bAll">${beatAll ? "🙈 Hide all" : "👁 Show all (spoilers)"}</button><button id="bAdd">＋ Add an event</button><button id="bLore" title="World facts sent to the narrator only when their trigger words come up">📚 Lore…</button><span class="hint" id="bMsg">${v.running ? "Reading the story prompt…" : ""}</span></div>
     ${v.error ? `<p class="hint" style="color:var(--bad,#e66)">Could not read the prompt: ${esc(v.error)}</p>` : ""}
     <div id="bList">${v.items.map(card).join("") || `<p class="hint">${v.running ? "Reading the story prompt for key events…" : v.extracted ? "No scheduled events were found in the story prompt. Add your own with ＋." : "Not read yet. Press 🔍 to read the story prompt."}</p>`}</div>
+    <h3 style="margin:14px 0 4px">🔒 Day locks</h3>
+    <p class="hint">A fixed schedule the story must keep: while the condition holds (for example <b>Phase</b> is <b>Selection</b>) the narrator is told not to skip time, and if the day changes anyway the app puts it back.</p>
+    <div id="bLocks">${(v.locks || []).map((lk) => `<div class="beat ${lk.active ? "s-active" : "s-waiting"}" data-lk="${esc(lk.id)}"><div class="bhead"><span class="bwhen">${esc(lk.title)} · ${esc(lk.when)}</span><span class="bstat">${lk.off ? "Off" : lk.active ? "Holding now" : "Not holding"}</span><span style="flex:1"></span><button class="mini" data-l="off">${lk.off ? "Switch on" : "Switch off"}</button><button class="mini" data-l="del">🗑️</button></div></div>`).join("") || `<p class="hint">No locks yet.</p>`}</div>
+    <div class="actions" style="justify-content:flex-start"><button id="bAddLock">＋ Add a day lock</button></div>
     <div class="actions"><span style="flex:1"></span><button class="primary" id="bClose">Close</button></div>`);
   $("bClose").onclick = closeModal;
+  const saveLocks = async (list) => { try { await api(`/stories/${sid}/beats/locks`, { method: "PUT", body: list.map((l) => ({ id: l.id, title: l.title, field: l.field, op: l.op, value: l.value, off: !!l.off })) }); showBeats(); } catch (e) { alert(e.message); } };
+  $("bAddLock").onclick = () => lockForm(v, saveLocks);
+  $("bLocks").onclick = (e) => { const b = e.target.closest("[data-l]"), c = e.target.closest("[data-lk]"); if (!b || !c) return; const lk = v.locks.find((x) => x.id === c.dataset.lk);
+    saveLocks(b.dataset.l === "del" ? v.locks.filter((x) => x !== lk) : v.locks.map((x) => (x === lk ? { ...x, off: !x.off } : x))); };
   if (v.running) beatPoll = setInterval(() => { if (!$("bList")) return clearInterval(beatPoll); api(`/stories/${sid}/beats`).then((x) => { if (!x.running) { clearInterval(beatPoll); showBeats(); } }).catch(() => clearInterval(beatPoll)); }, 2500);
   const save = async (body) => { try { await api(`/stories/${sid}/beats`, { method: "PUT", body }); story.beats = undefined; } catch (e) { alert(e.message); } };
   $("bOn").onchange = () => save({ on: $("bOn").checked });
@@ -65,17 +73,35 @@ function beatForm(v, it) {
     <div id="eField" class="grid2"><div><label>Side-panel value</label><select id="eF">${v.fields.map((x) => `<option value="${esc(x.id)}" ${x.id === (kind === "field" ? f : first) ? "selected" : ""}>${esc(x.label)}${x.now != null && x.now !== "" ? " (now: " + esc(x.now) + ")" : ""}</option>`).join("") || '<option value="">(this story has no usable side-panel values)</option>'}</select></div>
       <div><label>Comparison</label><select id="eO"><option value=">=" ${it && it.op !== "=" || !it ? "selected" : ""}>reaches or passes (number)</option><option value="=" ${it && it.op === "=" ? "selected" : ""}>is / contains (text)</option></select></div>
       <div><label>Value</label><input id="eV" value="${esc(it && kind !== "next" ? it.value : "")}" placeholder="e.g. 7"></div></div>
+    <label title="Chain steps in order: this event only goes out on a later move than the one it follows. With 'No trigger yet' above, it simply follows the previous step on the next move.">Only after this event has started (optional)</label>
+    <select id="eAfter"><option value="">No: use the trigger above only</option>${v.items.filter((x) => !it || x.id !== it.id).map((x) => `<option value="${esc(x.id)}" ${it && it.after === x.id ? "selected" : ""}>${esc(x.title)}</option>`).join("")}</select>
     <div id="eTurn" class="hidden"><label>Move number (the Nth move you send)</label><input id="eN" type="number" min="1" value="${esc(it && kind === "turn" ? it.value : v.next_move + 1)}"></div>
     <div class="actions"><button id="eCancel">Cancel</button><span style="flex:1"></span><button class="primary" id="eSave">Save</button></div><div class="hint" id="eMsg"></div>`);
   const sync = () => { const k = $("eK").value; $("eField").classList.toggle("hidden", k !== "field"); $("eTurn").classList.toggle("hidden", k !== "turn"); };
   $("eK").onchange = sync; sync();
   $("eCancel").onclick = () => showBeats();
   $("eSave").onclick = async () => {
-    const k = $("eK").value, body = { title: $("eT").value, text: $("eX").value };
+    const k = $("eK").value, body = { title: $("eT").value, text: $("eX").value, after: $("eAfter").value };
     if (k === "field") Object.assign(body, { field: $("eF").value, op: $("eO").value, value: $("eV").value });
     else if (k === "turn") Object.assign(body, { field: "turn", value: $("eN").value });
     else Object.assign(body, { field: k === "next" ? "next" : "", value: "" });
     if (k === "field" && (!body.field || !String(body.value).trim())) { $("eMsg").textContent = "Pick a side-panel value and say where it triggers."; return; }
     try { await api(`/stories/${sid}/beats/items${it ? "/" + it.id : ""}`, { method: it ? "PUT" : "POST", body }); showBeats(); } catch (e) { $("eMsg").textContent = e.message; }
   };
+}
+
+
+function lockForm(v, save) {
+  const fl = v.fields.filter((f) => ["status", "text", "number", "slider"].includes(f.kind));
+  if (!fl.length) return alert("This story has no side-panel value to base a lock on yet. Add a tracker (for example a Phase status) first.");
+  modal(`<h2>Add a day lock</h2>
+    <label>Name</label><input id="lT" maxlength="60" value="Selection never skips a day">
+    <label>Hold the day while…</label>
+    <div class="grid2"><div><label>Side-panel value</label><select id="lF">${fl.map((x) => `<option value="${esc(x.id)}">${esc(x.label)}${x.now != null && x.now !== "" ? " (now: " + esc(String(x.now)) + ")" : ""}</option>`).join("")}</select></div>
+      <div><label>Comparison</label><select id="lO"><option value="=">is / contains (text)</option><option value=">=">reaches or passes (number)</option></select></div>
+      <div><label>Value</label><input id="lV" placeholder="e.g. Selection"></div></div>
+    <p class="hint">Needs a tracker called <b>Day</b> to hold. The in-world weekday and clock kept by the app are held too.</p>
+    <div class="actions"><button id="lCancel">Cancel</button><span style="flex:1"></span><button class="primary" id="lSave">Save</button></div>`);
+  $("lCancel").onclick = () => showBeats();
+  $("lSave").onclick = () => { if (!$("lV").value.trim()) return alert("Say which value turns the lock on."); save([...(v.locks || []), { title: $("lT").value, field: $("lF").value, op: $("lO").value, value: $("lV").value }]); };
 }

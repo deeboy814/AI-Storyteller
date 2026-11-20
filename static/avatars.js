@@ -15,7 +15,7 @@ async function showAvatarEditor(id) {
   const stories = await api("/stories");
   modal(`<h2>${a.id ? "Edit avatar" : "New avatar"}</h2>
     <div class="avrow"><div id="lvPreview">${a.image ? `<img class="avatar" src="${esc(a.image)}" alt="">` : '<div class="avatar noimg">No image</div>'}</div>
-      <div><input type="file" id="lvFile" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:4px">
+      <div><input type="file" id="lvFile" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:4px">${a.image ? videoBar(a.image) : ""}
         <div class="actions" style="justify-content:flex-start;margin-top:8px"><button id="lvGen">✨ Draw 4 options from the info below</button></div>
         <div class="field"><label>Style it for the world of</label><select id="lvStory"><option value="">No particular story (plain)</option>${stories.map((s) => `<option value="${esc(s.id)}" ${story && story.id === s.id ? "selected" : ""}>${esc(s.title)}</option>`).join("")}</select></div>
         <div id="lvNote" class="hint">Uploads apply immediately. Generating uses that story's picture maker and setting, so the avatar fits its world; pick another story later to make a different version.</div></div></div>

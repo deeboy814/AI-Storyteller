@@ -12,9 +12,9 @@ from . import store
 
 FORMAT = "storyteller-backup-1"
 DIRS = ("stories", "portraits", "images")
-FILES = ("avatars.json", "usage.jsonl", "config.json")
-NO_COMPRESS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-ALLOWED = re.compile(r"^(stories|portraits|images)/.+|^(avatars\.json|usage\.jsonl|config\.json|backup-info\.json)$")
+FILES = ("avatars.json", "usage.jsonl", "config.json", "videos.json")
+NO_COMPRESS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
+ALLOWED = re.compile(r"^(stories|portraits|images)/.+|^(avatars\.json|videos\.json|usage\.jsonl|config\.json|backup-info\.json)$")
 
 
 def default_dir() -> Path:

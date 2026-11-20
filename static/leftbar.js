@@ -1,4 +1,4 @@
-// Left panel: your stories (switch with one click, search, recent / all), a New story button and shortcuts to the app-wide tools.
+// Left panel: your stories (switch with one click, New story, All stories…) and the story tools.
 // It is a column beside the story on a wide screen and a slide-over from the left edge on a phone. Open or closed is remembered.
 let leftList = [], leftLoaded = 0, leftFilter = (() => { try { return localStorage.getItem("leftFilter") || "recent"; } catch (e) { return "recent"; } })(), leftQuery = "";
 let leftOpen = (() => { try { const v = localStorage.getItem("leftOpen"); return v === null ? innerWidth >= 1250 : v === "1"; } catch (e) { return false; } })();
@@ -26,17 +26,41 @@ function runTool(go) {
 }
 function toolButtons() { return toolList().map(([go, icon, label, n, off]) => `<button data-go="${go}" ${off ? "disabled" : ""}>${icon} <span>${label}</span>${n ? `<small>${n}</small>` : ""}</button>`).join(""); }
 
+// The stories (switch with one click, start a new one) are the top of the same panel: a short list of the most recent ones, and "All stories…" for the rest.
+function storyRows(max = 6) {
+  const cur = story && story.id, rows = leftList.slice(0, max);
+  return rows.map((s) => `<button class="lbitem${s.id === cur ? " on" : ""}" data-id="${esc(s.id)}" title="${esc(s.subtitle || s.title)}">
+      <span class="lbthumb" style="${s.cover ? "" : `background:${gradientFor(s.title)}`}">${s.cover ? `<img loading="lazy" src="${thumbUrl(s.cover, 96)}" alt="">` : esc((s.title || "?").trim().charAt(0).toUpperCase())}</span>
+      <span class="lbtxt"><b>${esc(s.title)}</b><small>${s.turns} turn${s.turns === 1 ? "" : "s"} · ${leftAgo(s.updated)}</small></span></button>`).join("") || '<div class="side-empty">No stories yet.</div>';
+}
+function storiesBlock(max = 6) {
+  return `<div class="lbstories"><div class="lbsechead"><b>Stories</b><span style="flex:1"></span><button class="lbnewbtn" data-lb="new" title="Start a new story">＋ New</button></div>
+    <div class="lblist short">${storyRows(max)}</div>
+    <button class="lbmore" data-lb="all">All stories…</button></div>`;
+}
+function bindStories(root, after) {
+  root.querySelectorAll(".lbitem").forEach((b) => b.onclick = async () => {
+    if (busy) { alert("A reply is still being written. Wait for it to finish before switching stories."); return; }
+    if (after) after();
+    if (story && story.id === b.dataset.id && $("home").classList.contains("hidden")) return;
+    await openStory(b.dataset.id);
+  });
+  root.querySelectorAll("[data-lb]").forEach((b) => b.onclick = () => { if (after) after(); if (b.dataset.lb === "new") editStory(null); else showStoriesModal(); });
+}
 function renderLeft(force = false) {
   const el = $("leftbar"); if (!el) return;
   el.classList.toggle("hidden", !leftOpen);
   document.body.classList.toggle("leftopen", leftOpen);
-  const lt = $("leftTab"); if (lt) { lt.textContent = leftOpen ? "‹" : "›"; lt.title = leftOpen ? "Close the tools panel" : "Open the story tools"; }
+  const lt = $("leftTab"); if (lt) { lt.textContent = leftOpen ? "‹" : "›"; lt.title = leftOpen ? "Close the panel" : "Open your stories and story tools"; }
   if (!leftOpen) return;
-  el.innerHTML = `<div class="lbhead"><b>${story ? esc(story.title) : "Story tools"}</b><span style="flex:1"></span><button class="lbclose" title="Hide this panel">«</button></div>
+  el.innerHTML = `<div class="lbhead"><b>${story ? esc(story.title) : "AI Storyteller"}</b><span style="flex:1"></span><button class="lbclose" title="Hide this panel">«</button></div>
+    ${storiesBlock()}
+    <div class="lbsechead tools"><b>Story tools</b></div>
     <div class="lbnav lbtools">${toolButtons()}</div>
     <div class="lbspacer"></div>
     <div class="lbnav bottom"><button data-go="home">🏠 <span>Home</span></button><button data-go="settings">⚙ <span>Settings</span></button></div>`;
   el.querySelector(".lbclose").onclick = () => setLeft(false);
+  bindStories(el, () => { if (innerWidth <= 760) setLeft(false); });
   el.querySelectorAll(".lbnav button").forEach((b) => b.onclick = () => { if (innerWidth <= 760) setLeft(false); runTool(b.dataset.go); });
 }
 
@@ -67,13 +91,15 @@ function showStoriesModal(query = "") {
     closeModal(); if (!(story && story.id === b.dataset.id)) await openStory(b.dataset.id);
   });
 }
-// 📚 always opens the stories window (switch story, search, New story); 🧰 (or the little tab on the left edge) shows or hides the tools panel. On a phone the tools open in a window.
+// 🧰 (or the little tab on the left edge) shows or hides the panel with the stories and the story tools. On a phone the same list opens in a window.
 function showToolsModal() {
-  modal(`<h2>${story ? esc(story.title) : "Story tools"}</h2><div class="lbnav lbtools">${toolButtons()}</div><div class="actions"><button id="mClose">Close</button></div>`);
+  loadLeftList(true);
+  modal(`<h2>${story ? esc(story.title) : "AI Storyteller"}</h2>${storiesBlock(5)}<div class="lbsechead tools"><b>Story tools</b></div><div class="lbnav lbtools">${toolButtons()}</div><div class="lbnav bottom"><button data-go="home">🏠 <span>Home</span></button><button data-go="settings">⚙ <span>Settings</span></button></div><div class="actions"><button id="mClose">Close</button></div>`);
   $("mClose").onclick = closeModal;
+  bindStories($("modalCard"), closeModal);
   document.querySelectorAll("#modalCard .lbnav button").forEach((b) => b.onclick = () => { closeModal(); runTool(b.dataset.go); });
 }
-$("btnLeft").onclick = () => showStoriesModal();
 $("btnTools").onclick = () => { if (isPhone()) showToolsModal(); else setLeft(!leftOpen); };
+$("btnCast").onclick = () => { if (story) showCast(); };
 $("leftTab").onclick = () => setLeft(!leftOpen);
 setTimeout(() => loadLeftList(true), 400);

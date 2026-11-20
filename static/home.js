@@ -84,7 +84,7 @@ function showCardEditor(s, nav = {}) {   // nav.back: where to go when closed in
     <label>Title</label><input id="cvTitle" maxlength="120" value="${esc(s.title)}">
     <label>Cover art</label>
     <div class="hcover small" id="cvPrev" style="${s.cover ? "" : `background:${gradientFor(s.title)}`}">${s.cover ? `<img src="${esc(s.cover)}" alt="">` : ""}</div>
-    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><label class="btnlike">Upload…<input type="file" id="cvUp" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>${s.cover ? '<button id="cvDel">Remove</button>' : ""}</div>
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><label class="btnlike">Upload…<input type="file" id="cvUp" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>${s.cover ? '<button id="cvDel">Remove</button>' : ""}</div>${s.cover ? videoBar(s.cover) : ""}
     <label>Picture description (what the artist is told: edit it freely)</label>
     <textarea class="short" id="cvPrompt" rows="3" placeholder="Leave empty and the text model writes one from the story prompt when you draw. Your art style is added automatically."></textarea>
     <label>Picture maker for the cover <small class="hint">(try different ones: each draw uses the one chosen here)</small></label>

@@ -62,7 +62,8 @@ def custom_fields(story: dict) -> list[dict]:
 
 
 # ---------------- the player's own trackers ----------------
-KINDS = ("text", "number", "slider", "status", "quests")
+KINDS = ("text", "number", "slider", "status", "quests", "history", "pair")
+# history: the app keeps the last few values of another tracker (e.g. the last 3 "Forecasts"); pair: a character's chosen partner, cross-checked so a pair only counts when both agree
 DONE_STATES = ("completed", "failed")
 SCOPES = ("scene", "me", "chars")
 
@@ -172,6 +173,10 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
         kind = f.get("kind") if f.get("kind") in KINDS else "text"
         if kind == "quests":
             scope = "me"
+        if kind == "pair":
+            scope = "chars"
+        if kind == "history" and scope == "chars":
+            scope = "me"
         fid = f.get("id") if isinstance(f.get("id"), str) and f["id"] in keep and keep[f["id"]]["label"] == label and f["id"].startswith(scope + ".") else None
         if not fid:
             slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:20] or "tracker"
@@ -185,6 +190,13 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
         d = {"id": fid, "label": label, "kind": kind, "custom": True}
         if f.get("note"):
             d["note"] = str(f["note"]).strip()[:200]
+        if f.get("hidden") in (True, "true", "1", 1, "on"):
+            d["hidden"] = True          # narrator-only: the narrator reads and updates it, the side panel never shows it
+        if kind == "history":
+            kp = _num(f.get("keep"))
+            d["keep"] = int(min(10, max(1, kp))) if kp else 3
+            if str(f.get("of") or "").strip():
+                d["of"] = str(f["of"]).strip()[:30]
         if f.get("start") not in (None, "") and kind in ("slider", "number", "status", "text"):
             d["start"] = str(f["start"]).strip()[:40]        # the value it has before anything is written (an author's starting number or label)
         if kind == "slider":
@@ -222,6 +234,8 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
                     d["spend_cap"] = int(cap)
             if str(f.get("counts") or "").strip():      # counts the narrator's replies since another tracker (e.g. Day) last changed; the app works it out, the narrator never does
                 d["counts"] = str(f["counts"]).strip()[:30]
+                if f.get("counts_unit") == "days":      # ...or the in-world days since it last changed ("three days alone and unreassured")
+                    d["counts_unit"] = "days"
         seen.add(fid)
         out.append(d)
     by_label = {d["label"].lower(): d["id"] for d in out}
@@ -238,10 +252,18 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
         if d.get("counts"):
             c = d["counts"]
             c = c if c in {x["id"] for x in out} or c in {x["id"] for x in DEFAULT_FIELDS} else by_label.get(c.lower(), "")
-            if c and c != d["id"] and c.split(".")[0] in ("scene", "me"):
+            if c and c != d["id"] and (c.split(".")[0] in ("scene", "me", "chars")):
                 d["counts"] = c
             else:
-                d.pop("counts")
+                d.pop("counts", None); d.pop("counts_unit", None)
+    for d in out:        # "of" (history) names the tracker whose values are remembered
+        if d["kind"] == "history":
+            c = d.get("of", "")
+            c = c if c in {x["id"] for x in out} or c in {x["id"] for x in DEFAULT_FIELDS} else by_label.get(c.lower(), "")
+            if c and c != d["id"] and c.split(".")[0] in ("scene", "me"):
+                d["of"] = c
+            else:
+                d["kind"] = "text"; d.pop("of", None); d.pop("keep", None)
     return out[:24]
 
 
@@ -384,6 +406,7 @@ def _apply(story: dict, new: dict, turn: int) -> list[dict]:
     tr["changes"], tr["turn"] = changes, turn
     changes += derive_levels(story)
     changes += derive_counters(story, turn)
+    changes += derive_history(story, turn)
     changes += enforce_spent(story)
     from . import clock
     changes += clock.advance(story, turn)
@@ -431,40 +454,198 @@ def derive_levels(story: dict) -> list[dict]:
 
 def derive_counters(story: dict, turn: int) -> list[dict]:
     """A number tracker that "counts replies since [another tracker] last changed" (for example the turn of the day): the app keeps the count, so the narrator's own counting
-    never matters. The first reply under a new value is 1. A second pass over the same reply (the AI's patch after the status line) never counts twice."""
+    never matters. The first reply under a new value is 1. A second pass over the same reply (the AI's patch after the status line) never counts twice.
+    A counter that lives on each character counts per person (the other tracker may be that character's own, e.g. "reassured", or a scene/you value); and with
+    counts_unit = days it counts in-world days since the change instead (0 on the day it changed)."""
     tr, out = story.setdefault("tracker", blank()), []
     cnt = tr.setdefault("_cnt", {})
+    day = _current_day(story)
     for f in active_fields(story):
         src = f.get("counts")
         if f.get("kind") != "number" or not src or "." not in f["id"] or "." not in src:
             continue
         sec, k = f["id"].split(".", 1)
         ssec, sk = src.split(".", 1)
+        if sec not in ("scene", "me", "chars") or ssec not in ("scene", "me", "chars"):
+            continue
+        for name in (list(tr["chars"]) if sec == "chars" else [None]):
+            if ssec == "chars":
+                if name is None:
+                    continue
+                w = str((tr["chars"].get(name) or {}).get(sk))
+            else:
+                w = str(tr[ssec].get(sk))
+            dest = tr["chars"][name] if name else tr[sec]
+            key = f["id"] if name is None else f"{f['id']}|{name}"
+            st = cnt.get(key)
+            if st and st.get("t") == turn:
+                if st["w"] != w:
+                    st = {"w": w, "n": 1, "t": turn, "d": day}
+            elif st is None or st["w"] != w:
+                st = {"w": w, "n": 1, "t": turn, "d": day}
+            else:
+                st = {"w": w, "n": st["n"] + 1, "t": turn, "d": st.get("d", day)}
+            cnt[key] = st
+            n = st["n"]
+            if f.get("counts_unit") == "days" and day is not None and st.get("d") is not None:
+                n = max(0, int(day - st["d"]))
+            if dest.get(k) != n:
+                out.append({"s": sec, "n": name, "k": k, "b": dest.get(k), "a": n})
+                dest[k] = n
+    return out
+
+
+def derive_history(story: dict, turn: int) -> list[dict]:
+    """A "history" tracker keeps the last few values another tracker has had (newest first), so a rule like "the previous Breaker cannot repeat" can be checked."""
+    tr, out = story.setdefault("tracker", blank()), []
+    hist = tr.setdefault("_hist", {})
+    for f in active_fields(story):
+        if f.get("kind") != "history" or not f.get("of") or "." not in f["id"] or "." not in f["of"]:
+            continue
+        sec, k = f["id"].split(".", 1)
+        ssec, sk = f["of"].split(".", 1)
         if sec not in ("scene", "me") or ssec not in ("scene", "me"):
             continue
-        w, st = str(tr[ssec].get(sk)), cnt.get(f["id"])
-        if st and st.get("t") == turn:
-            if st["w"] != w:
-                st = {"w": w, "n": 1, "t": turn}
-        elif st is None or st["w"] != w:
-            st = {"w": w, "n": 1, "t": turn}
-        else:
-            st = {"w": w, "n": st["n"] + 1, "t": turn}
-        cnt[f["id"]] = st
-        if tr[sec].get(k) != st["n"]:
-            out.append({"s": sec, "n": None, "k": k, "b": tr[sec].get(k), "a": st["n"]})
-            tr[sec][k] = st["n"]
+        cur = tr[ssec].get(sk)
+        if cur in (None, ""):
+            continue
+        cur = str(cur).strip()
+        lst = hist.setdefault(f["id"], [])
+        if not lst or lst[0].lower() != cur.lower():
+            lst.insert(0, cur)
+        del lst[int(f.get("keep") or 3):]
+        val = " | ".join(lst)
+        if tr[sec].get(k) != val:
+            out.append({"s": sec, "n": None, "k": k, "b": tr[sec].get(k), "a": val})
+            tr[sec][k] = val
     return out
+
+
+def derived(f: dict) -> bool:
+    """Fields the app works out itself (the AI is never asked for them)."""
+    return bool(f.get("counts")) and f.get("kind") == "number" or f.get("kind") == "history"
+
+
+def askable(fields: list[dict]) -> list[dict]:
+    return [f for f in fields if not derived(f)]
+
+
+def pairs(story: dict) -> list[dict]:
+    """Every pair the characters have named, with whether BOTH sides name each other: [{"a", "b", "mutual", "field"}] (each pair once)."""
+    tr, out, seen = story.get("tracker") or blank(), [], set()
+    for f in active_fields(story):
+        if f.get("kind") != "pair" or not f["id"].startswith("chars."):
+            continue
+        k = f["id"].split(".", 1)[1]
+        low = {n.lower(): n for n in tr["chars"]}
+        for name, flds in tr["chars"].items():
+            raw = str(flds.get(k) or "").strip()
+            if not raw or raw.lower() in ("none", "nobody", "no one", "n/a", "-", "?"):
+                continue
+            partner = low.get(resolve_alias(story, raw).lower()) or low.get(raw.lower()) or raw
+            back = str((tr["chars"].get(partner) or {}).get(k) or "").strip()
+            back = low.get(resolve_alias(story, back).lower()) or back
+            mutual = back.lower() == name.lower()
+            key = (f["id"], frozenset((name.lower(), partner.lower()))) if mutual else (f["id"], name.lower(), partner.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"a": name, "b": partner, "mutual": mutual, "field": f["label"]})
+    return out
+
+
+def _pair_note(story: dict) -> str:
+    ps = pairs(story)
+    if not ps:
+        return ""
+    m = [f"{p['a']} and {p['b']}" for p in ps if p["mutual"]]
+    one = [f"{p['a']} chose {p['b']} but {p['b']} has not chosen {p['a']}" for p in ps if not p["mutual"]]
+    return "[PAIRS (cross-checked by the app): " + ("mutual: " + "; ".join(m) + ". " if m else "") + ("NOT mutual yet (not a pair until both choose each other): " + "; ".join(one) + "." if one else "") + "]"
+
+
+def _history_note(story: dict) -> str:
+    tr, notes = story.get("tracker") or blank(), []
+    for f in active_fields(story):
+        if f.get("kind") == "history" and f["id"].split(".")[0] in ("scene", "me"):
+            sec, k = f["id"].split(".")
+            if tr[sec].get(k):
+                src = next((g["label"] for g in active_fields(story) if g["id"] == f.get("of")), "its tracker")
+                notes.append(f"{f['label']} (the last {f.get('keep', 3)} values of {src}, newest first): {tr[sec][k]}")
+    return ("[HISTORY (kept by the app): " + "; ".join(notes) + ". Use it for any rule about not repeating or remembering earlier ones.]") if notes else ""
+
+
+def hidden_fields(story: dict) -> list[dict]:
+    return [f for f in active_fields(story) if f.get("hidden")]
+
+
+def _hidden_note(story: dict) -> str:
+    hf = hidden_fields(story)
+    if not hf:
+        return ""
+    lines = []
+    for f in hf:
+        where = {"scene": "scene", "me": "player", "chars": "each character"}[f["id"].split(".")[0]]
+        lines.append(f"- {f['label']} ({where}, {f['kind']})" + (f": {f['note']}" if f.get("note") else ""))
+    return ("[NARRATOR-ONLY TRACKERS: state the story keeps for you that the player must never see. The current values are in the side-panel JSON above under their ids. "
+            "Never print, quote, hint at or confirm these values in the story text or a status line. When one changes, end your reply with ONE hidden line "
+            "<hidden>{\"scene\": {\"Label\": value}, \"me\": {\"Label\": value}, \"chars\": {\"Name\": {\"Label\": value}}}</hidden> listing only the changed ones (use the labels below as keys; leave out empty groups). "
+            "The app removes that line before the player sees the reply.\n" + "\n".join(lines) + "]")
+
+
+HIDDEN_RE = re.compile(r"<hidden>(.*?)(?:</hidden>|\Z)", re.DOTALL | re.IGNORECASE)
+
+
+def split_hidden(story: dict, text: str) -> tuple[str, dict]:
+    """Take the narrator's hidden update line out of the reply. Returns (the text without it, a patch for apply_patch). Only narrator-only trackers are accepted."""
+    found = HIDDEN_RE.findall(text or "")
+    if not found:
+        return text, {}
+    clean = HIDDEN_RE.sub("", text).rstrip()
+    by = {}
+    for f in hidden_fields(story):
+        sec, k = f["id"].split(".", 1)
+        by[f["label"].lower()] = (sec, k)
+        by[f["id"].lower()] = (sec, k)
+        by[k.lower()] = (sec, k)
+    patch: dict = {"scene": {}, "me": {}, "chars": {}}
+    for raw in found:
+        try:
+            d = json.loads(raw.strip())
+        except ValueError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        for sec in ("scene", "me"):
+            for lab, v in (d.get(sec) or {}).items() if isinstance(d.get(sec), dict) else []:
+                hit = by.get(str(lab).lower())
+                if hit and hit[0] == sec:
+                    patch[sec][hit[1]] = v
+        for name, flds in (d.get("chars") or {}).items() if isinstance(d.get("chars"), dict) else []:
+            if isinstance(flds, dict):
+                for lab, v in flds.items():
+                    hit = by.get(str(lab).lower())
+                    if hit and hit[0] == "chars":
+                        patch["chars"].setdefault(str(name).strip(), {})[hit[1]] = v
+    return clean, patch
 
 
 def _counter_note(story: dict) -> str:
     tr, notes = story.get("tracker") or blank(), []
+    day = _current_day(story)
     for f in active_fields(story):
-        if f.get("kind") == "number" and f.get("counts") and f["id"].split(".")[0] in ("scene", "me"):
+        if f.get("kind") == "number" and f.get("counts") and f["id"].split(".")[0] in ("scene", "me", "chars"):
             sec, k = f["id"].split(".")
             src = next((g["label"] for g in active_fields(story) if g["id"] == f["counts"]), "its tracker")
-            if tr[sec].get(k) is not None:
-                notes.append(f"{f['label']} = {tr[sec][k]} (replies so far since {src} last changed; the reply you write now is number {int(tr[sec][k]) + 1} under the current {src})")
+            days = f.get("counts_unit") == "days" and day is not None
+            if sec == "chars":
+                vals = [f"{n} = {c[k]}" for n, c in tr["chars"].items() if c.get(k) is not None]
+                if vals:
+                    notes.append(f"{f['label']} per person ({'in-world days' if days else 'replies'} since their {src} last changed): " + ", ".join(vals))
+            elif tr[sec].get(k) is not None:
+                if days:
+                    notes.append(f"{f['label']} = {tr[sec][k]} (in-world days since {src} last changed)")
+                else:
+                    notes.append(f"{f['label']} = {tr[sec][k]} (replies so far since {src} last changed; the reply you write now is number {int(tr[sec][k]) + 1} under the current {src})")
     return ("[COUNTERS (kept by the app; use these numbers and do not print them): " + "; ".join(notes) + ".]") if notes else ""
 
 
@@ -896,7 +1077,7 @@ def _level_note(story: dict) -> str:
 
 
 def tail_text(story: dict) -> str:
-    v, note = visible(story), "\n\n".join(x for x in (_quest_note(story), _level_note(story), _counter_note(story), _deadline_note(story), _clock_note(story)) if x)
+    v, note = visible(story), "\n\n".join(x for x in (_quest_note(story), _level_note(story), _counter_note(story), _history_note(story), _pair_note(story), _hidden_note(story), _deadline_note(story), _clock_note(story)) if x)
     if not v:
         return note
     return ("[SIDE PANEL: the tracked state of the story as the player sees it. Keep it consistent: a value changes only when events in the story cause it, "

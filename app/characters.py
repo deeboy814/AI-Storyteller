@@ -12,7 +12,9 @@ from collections import Counter
 
 # Moods the app knows how to draw for ONE character (see main.MOOD_LOOKS). Moods outside this list (hug, kissing, ...) need
 # other people in the frame or romantic content, so automatic sets never draw them; they can still be uploaded by hand.
-DRAWABLE = {"normal", "smile", "shy", "surprise", "sulky", "fear", "sad", "angry", "scorn", "despair", "combat", "cute", "dead", "zombie",
+DRAWABLE = {"normal", "laugh", "grin", "cry", "sob", "moved", "awe", "contempt", "flustered", "shame-rage", "ponder", "annoyed", "yawn", "asleep", "scared", "anxious", "joy",
+            "cry-hug", "smile-hug", "shy-hug", "blank", "awkward", "letdown", "proud", "sulk", "worried", "very shy", "stern", "shame", "shock", "panic", "tease", "happy", "kiss",
+            "wedding dress", "suspicion", "fake smile", "woozy", "resign", "smile", "shy", "surprise", "sulky", "fear", "sad", "angry", "scorn", "despair", "combat", "cute", "dead", "zombie",
             # action moods (one character in motion; see ACTION_MOODS)
             "strike", "guard", "dodge", "charge", "leap", "aim", "cast", "draw weapon", "wounded", "knocked down", "defeated", "exhausted", "flee", "sneak", "battle cry", "victory"}
 
@@ -46,10 +48,16 @@ DEFAULT_CATEGORIES = [
 BUILTIN_ACTIONS_ADULT = ["aroused", "seductive", "undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow"]
 BUILTIN_CLOTHED = {"aroused", "seductive"}     # adult pictures that keep the character's usual outfit (the others show the body: no everyday clothes in the look)
 
+# The Extended Full Set: every face and feeling the app can draw for one character (a set in the Draw menus, next to Basic and Extended). The looks and tags are in main.py.
+FULL_SET = ["laugh", "smile", "grin", "sad", "cry", "sob", "moved", "surprise", "awe", "contempt", "flustered", "shame-rage", "shy", "ponder", "annoyed", "angry", "yawn", "asleep",
+            "scared", "anxious", "joy", "cry-hug", "smile-hug", "shy-hug", "blank", "awkward", "letdown", "proud", "sulk", "worried", "very shy", "stern", "shame", "shock", "panic",
+            "tease", "happy", "kiss", "wedding dress", "suspicion", "fake smile", "woozy", "resign"]
+
 DEFAULT_SETS = {
     "basic": ["normal 2", "smile 1", "smile 2", "surprise", "fear", "sad", "angry 1", "scorn 1", "shy"],
     "extended": ["normal 2", "smile 1", "smile 2", "surprise", "sulky", "fear", "sad", "angry 1", "angry 2", "scorn 1", "scorn 2",
                  "despair", "shy", "cute 1", "cute 2", "combat 1", "combat 2", "dead"],
+    "full": list(FULL_SET),
     "action": list(ACTION_MOODS),
     "action_adult": list(ADULT_ACTION_MOODS),
 }
@@ -181,7 +189,7 @@ def _tokens(name: str) -> list[str]:
 def find_duplicates(story: dict) -> list[dict]:
     """Pairs of cast entries that are probably one person: the same name apart from a title, a short form of a fuller name ("Ann" and "Ann Marsh"), or names spelled almost
     alike. Free (no AI). Each result names which entry to fold into which (the shorter name into the fuller one). A short name that fits several fuller names is left alone."""
-    cast = [c for c in story.get("cast") or [] if c.get("name")]
+    cast = [c for c in story.get("cast") or [] if c.get("name") and not c.get("generic") and c.get("group") != GENERIC_GROUP]    # generic characters (Guard, Old Man, Passerby Woman...) are different people by design: never offered for merging
     toks = {c["slug"]: _tokens(c["name"]) for c in cast}
     out, seen = [], set()
     for i, a in enumerate(cast):
