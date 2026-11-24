@@ -16,7 +16,7 @@ async function maybeFirstRun() {
     <div class="hint">Online AI services charge by use. The app shows an estimate in 💲 Usage and can warn you when a limit is near. Leave it at 0 for no limit.</div>
     <div class="grid2" style="grid-template-columns:1fr 1fr"><div><label>Warn me at this much per month ($)</label><input id="frBud" type="number" min="0" step="1" value="${config.budget_monthly || 0}"></div><div></div></div>
     <h3>3. Where to start</h3>
-    <div class="hint">On the Home screen, <b>📦 Import a story</b> adds a ready-made story package (.zip), or press <b>Create a story</b> to write your own. Stories with stats and levels will ask once how you want dice rolls handled.</div>
+    <div class="hint">On the Home screen, <b>📦 Open a story package</b> adds a ready-made story (.zip), or press <b>＋ New story</b> to write your own. Stories with stats and levels will ask once how you want dice rolls handled.</div>
     <div class="actions"><button id="frSkip">Skip for now</button><button class="primary" id="frSave">Save and start</button></div>`);
   const picker = mountAIChooser($("frPick"), { initial: config.default_models || {}, roles: ["story", "recaps", "images"] });
   $("frSkip").onclick = async () => { closeModal(); try { await done(); } catch (e) { /* asked again next time */ } };

@@ -56,7 +56,7 @@ def cost_of(cfg: dict, e: dict):
         return None
     rd = p.get("cache_read", p["input"] * 0.1)
     wr = p["input"] * (2.0 if e.get("ttl") == "1h" else 1.25)
-    return (e.get("input", 0) * p["input"] + e.get("cache_read", 0) * rd + e.get("cache_write", 0) * wr + e.get("output", 0) * p["output"]) / 1e6
+    return (e.get("input", 0) * p["input"] + e.get("cache_read", 0) * rd + e.get("cache_write", 0) * wr + e.get("output", 0) * p["output"]) / 1e6 * (0.5 if e.get("batch") else 1)   # Message Batches cost half
 
 
 def entries(since: float = 0, story: str | None = None) -> list[dict]:

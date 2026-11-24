@@ -76,7 +76,7 @@
     if (!u) return "";
     const has = !!window.VIDEOS[u], off = !!(window.VIDEO_EXTRA.hidden || {})[u], earlier = (window.VIDEO_EXTRA.earlier || []).includes(u);
     return `<div class="vidbar" data-url="${u.replace(/"/g, "&quot;")}"><label class="btnlike" title="Use a short looping clip (MP4 or WebM, up to 80 MB) wherever this picture is shown">🎞 ${has || off ? "Replace video…" : "Add video…"}<input type="file" class="vidfile" accept="video/mp4,video/webm" hidden></label>`
-      + (animate ? `<button type="button" class="vidanimate" title="Make a short clip from this picture with your ComfyUI video workflow (Settings → Pictures → Local → Video workflow)">🎬 Animate</button>` : "")
+      + (animate ? `<button type="button" class="vidanimate" title="Make a short clip from this picture with your ComfyUI video workflow (🖼 Art → Picture makers → Video generation)">🎬 Animate</button>` : "")
       + (has ? `<button type="button" class="vidshow" data-show="0" title="Show the still picture instead. The video stays saved.">🖼 Show the picture</button>` : "")
       + (off ? `<button type="button" class="vidshow" data-show="1" title="Show the video again in place of the picture">▶ Show the video</button>` : "")
       + (earlier ? `<button type="button" class="vidswap2" title="See the videos that were replaced and use one again">↺ Earlier videos</button>` : "")
@@ -172,6 +172,90 @@
     }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
     refreshVideos();
   });
+})();
+
+// 🎬 Animate all: make a clip for every picture of one character (slug) or of the whole story (slug ""), one after another, in a single background job.
+// note: an element that shows progress. Pressing the button opens a small chooser under it: tick which groups of pictures to animate (each picture category,
+// outfit pictures, backgrounds, scene pictures…; all ticked = everything). Pictures that already have a video are skipped unless every chosen one has, then the player can choose to remake them.
+async function animateAll(slug, btn, note) {
+  if (!story) return;
+  const old = note.parentNode.querySelector(".animpick");
+  if (old) { old.remove(); return; }
+  const who = slug ? "of this character" : "in this story";
+  const count = async (kinds) => api(`/stories/${story.id}/animate-all?slug=${encodeURIComponent(slug || "")}&kinds=${encodeURIComponent((kinds || []).join(","))}`);
+  let c;
+  try { c = await count([]); } catch (e) { note.textContent = e.message; return; }
+  if (!c.total) { note.textContent = `There are no pictures ${who} to animate yet.`; return; }
+  const box = document.createElement("div");
+  box.className = "animpick";
+  box.style.cssText = "margin:8px 0;padding:8px 10px;border:1px solid var(--line, #8884);border-radius:8px";
+  box.innerHTML = `<div><b>Which pictures should get a video?</b></div>
+    <div class="animgroups" style="display:flex;flex-wrap:wrap;gap:4px 16px;margin:6px 0">${c.groups.map((g) => `<label class="chk"><input type="checkbox" data-k="${esc(g.id)}" checked> ${esc(g.label)} <small class="muted">(${g.total}${g.with_video ? `, ${g.with_video} done` : ""})</small></label>`).join("")}</div>
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;align-items:center;gap:8px">
+      <button type="button" class="aAll">All</button><button type="button" class="aNone">None</button>
+      <span class="hint aSum"></span><button type="button" class="primary aGo">🎬 Animate</button><button type="button" class="aCancel">Cancel</button></div>
+    <div class="hint">Each video takes a few minutes on your computer, so this can run a long time. You can keep playing; new pictures are drawn first. ⏹ Stop pictures cancels it. Pictures that already have a video are skipped.</div>`;
+  note.parentNode.insertBefore(box, note);
+  const boxes = () => [...box.querySelectorAll("input[data-k]")];
+  const chosen = () => boxes().filter((i) => i.checked).map((i) => i.dataset.k);
+  let cur = c, tick = 0;
+  const refresh = async () => {
+    const my = ++tick, kinds = chosen();
+    box.querySelector(".aGo").disabled = !kinds.length;
+    if (!kinds.length) { box.querySelector(".aSum").textContent = "Tick at least one group."; return; }
+    try { const r = await count(boxes().every((i) => i.checked) ? [] : kinds); if (my !== tick) return; cur = r;
+      box.querySelector(".aSum").textContent = r.without_video ? `${r.without_video} picture${r.without_video === 1 ? "" : "s"} to animate${r.with_video ? ` (${r.with_video} already have one)` : ""}` : `All ${r.total} already have a video`;
+    } catch (e) { box.querySelector(".aSum").textContent = e.message; }
+  };
+  boxes().forEach((i) => i.onchange = refresh);
+  box.querySelector(".aAll").onclick = () => { boxes().forEach((i) => i.checked = true); refresh(); };
+  box.querySelector(".aNone").onclick = () => { boxes().forEach((i) => i.checked = false); refresh(); };
+  box.querySelector(".aCancel").onclick = () => box.remove();
+  box.querySelector(".aGo").onclick = async () => {
+    const kinds = boxes().every((i) => i.checked) ? [] : chosen();
+    let redo = false;
+    if (!cur.without_video) {
+      if (!confirm(`All ${cur.total} chosen pictures ${who} already have a video. Make new videos for all of them? (The current videos are kept under ↺ Earlier videos.)`)) return;
+      redo = true;
+    }
+    box.remove();
+    btn.disabled = true;
+    let shown = 0;
+    try {
+      const r = await api(`/stories/${story.id}/animate-all`, { method: "POST", body: { slug, redo, kinds } });
+      if (!r.job) { note.textContent = "Nothing to animate."; return; }
+      const j = await watchJob(r.job, async (j) => {
+        note.textContent = `${j.current || "Waiting for the picture maker…"} ${j.done ? `(${j.done} done)` : ""}`;
+        if (j.done > shown) { shown = j.done; await refreshVideos(); }
+      });
+      await refreshVideos();
+      const made = (j.result || {}).made || 0, failed = ((j.result || {}).failed || []);
+      if (j.status === "error") note.textContent = `${made ? `✔ ${made} video${made === 1 ? "" : "s"} made, then it stopped: ` : ""}${j.error}`;
+      else note.textContent = `✔ ${made} video${made === 1 ? "" : "s"} made.` + (failed.length ? ` ${failed.length} could not be made: ${failed.join("; ")}` : "");
+    } catch (e) { note.textContent = "Could not start: " + e.message; }
+    finally { btn.disabled = false; }
+  };
+  refresh();
+}
+
+// Auto-animate (Picture makers → Video generation → "Animate every new picture"): the server makes the clips in the background.
+// This checks now and then, so each new clip appears without reloading, and shows the Stop button while videos are being made.
+(function () {
+  let lastMade = -1, autoShown = false;
+  async function poll() {
+    let next = 20000;
+    try {
+      const st = await fetch("/api/videos/auto-status").then((r) => r.json());
+      if (lastMade >= 0 && st.made !== lastMade && window.refreshVideos) refreshVideos();
+      lastMade = st.made;
+      const working = st.busy || st.waiting > 0;
+      if (working && !autoShown && typeof stopPicsButton === "function") { _watching++; stopPicsButton(true); autoShown = true; }
+      if (!working && autoShown) { autoShown = false; if (--_watching <= 0) { _watching = 0; stopPicsButton(false); } }
+      next = working ? 8000 : st.on ? 15000 : 30000;
+    } catch (e) {}
+    setTimeout(poll, next);
+  }
+  document.addEventListener("DOMContentLoaded", () => setTimeout(poll, 3000));
 })();
 
 // 🎞 on a cast picture opens the video controls right under it

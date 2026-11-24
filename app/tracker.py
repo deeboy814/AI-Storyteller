@@ -264,7 +264,7 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
                 d["of"] = c
             else:
                 d["kind"] = "text"; d.pop("of", None); d.pop("keep", None)
-    return out[:24]
+    return out[:40]
 
 
 # ---------------- reading the narrator's own status panel ----------------
@@ -351,6 +351,88 @@ def from_state(story: dict) -> dict:
     return out
 
 
+# ---------------- the player's hand edits (Edit the side panel) must stick ----------------
+# The narrator still sees its own earlier status lines (or the AI re-reads them) and keeps printing the old value, which would undo the edit on the next reply. So an edit is
+# remembered as a guard {"v": new value, "old": [the values it replaced], "turn": n}: a later reading that is just one of the old values is ignored, and the narrator is told
+# about the correction. Any other value (the story really changed it) is accepted and ends the guard, as does the narrator printing the new value, or 10 turns passing.
+EDIT_TURNS = 10
+
+
+def _norm(v) -> str:
+    n = _num(v)
+    return (str(int(n)) if float(n).is_integer() else str(n)) if n is not None else " ".join(str(v if v is not None else "").split()).lower()
+
+
+def edit_key(sec: str, k: str, name: str | None = None) -> str:
+    return f"chars.{k}@{name}" if sec == "chars" else f"{sec}.{k}"
+
+
+def note_edit(story: dict, key: str, old, new) -> None:
+    """Remember that the player set this value by hand (old = what it was, new = what it is now; None / "" = empty)."""
+    if _norm(old) == _norm(new):
+        return
+    tr = story.setdefault("tracker", blank())
+    g = (tr.setdefault("_edits", {})).get(key)
+    olds = list(g["old"]) if g else []
+    for x in ([g["v"]] if g else []) + [old]:          # an earlier edit's value is stale too once edited again
+        if x not in olds and _norm(x) != _norm(new):
+            olds.append(x)
+    tr["_edits"][key] = {"v": new, "old": [o for o in olds if _norm(o)][-6:], "turn": len(story.get("turns") or []) // 2}
+
+
+def _guarded(story: dict, key: str, incoming, turn: int) -> bool:
+    """True when `incoming` is only a stale copy of a value the player edited away (so it must be ignored). Ends the guard when the reading agrees or really differs."""
+    tr = story.get("tracker") or {}
+    g = (tr.get("_edits") or {}).get(key)
+    if not g:
+        return False
+    if turn - g.get("turn", 0) > EDIT_TURNS or _norm(incoming) == _norm(g["v"]) or not any(_norm(incoming) == _norm(o) for o in g["old"]):
+        tr["_edits"].pop(key, None)
+        return False
+    return True
+
+
+def _edit_note(story: dict) -> str:
+    tr = story.get("tracker") or {}
+    ed = tr.get("_edits") or {}
+    if not ed:
+        return ""
+    turn = len(story.get("turns") or []) // 2
+    labels = {f["id"]: f["label"] for f in active_fields(story)}
+    bits = []
+    for key, g in ed.items():
+        if turn - g.get("turn", 0) > EDIT_TURNS:
+            continue
+        name = key.split("@", 1)[1] if "@" in key else ""
+        fid = key.split("@", 1)[0]
+        bits.append(f"{(name + ' ') if name else ''}{labels.get(fid, fid)} is now {g['v'] if _norm(g['v']) else '(empty)'} (was {', '.join(map(str, g['old'])) or 'empty'})")
+    if not bits:
+        return ""
+    return ("[PLAYER CORRECTIONS to the side panel, made by hand: " + "; ".join(bits) + ". These values are true now and already applied. Do not go back to the old values from your earlier "
+            "status lines: print the new ones, and change them only if events in the story cause it.]")
+
+
+def enforce_edits_text(story: dict, text: str) -> str:
+    """A reply that still prints a value the player edited away ("Gold: 50" after they set it to 80) gets the corrected value in its printed status line, so the next reply does not
+    copy the stale number. Only the last matching "Label: value" (the status line is at the end) of the scene and player fields."""
+    ed = (story.get("tracker") or {}).get("_edits") or {}
+    if not ed or not text:
+        return text
+    turn = len(story.get("turns") or []) // 2
+    labels = {f["id"]: f["label"] for f in active_fields(story)}
+    for key, g in ed.items():
+        if "@" in key or turn - g.get("turn", 0) > EDIT_TURNS or key not in labels or not _norm(g["v"]):
+            continue
+        for o in g["old"]:
+            pat = re.compile(r"(?<![A-Za-z])(" + re.escape(labels[key]) + r")(\s*[:=]\s*\**\s*)(" + re.escape(str(o)) + r")(?![\w.])", re.IGNORECASE)
+            ms = list(pat.finditer(text))
+            if ms:
+                m = ms[-1]
+                text = text[:m.start(3)] + str(g["v"]) + text[m.end(3):]
+                break
+    return text
+
+
 # ---------------- applying updates, remembering what changed ----------------
 def _has_art(story: dict, name: str) -> bool:
     c = next((x for x in story.get("cast") or [] if x["name"].lower() == name.lower()), None)
@@ -386,6 +468,8 @@ def _apply(story: dict, new: dict, turn: int) -> list[dict]:
     changes = []
     for sec in ("scene", "me"):
         for k, v in (new.get(sec) or {}).items():
+            if v not in (None, "") and _guarded(story, edit_key(sec, k), v, turn):
+                continue
             if v in (None, "") or tr[sec].get(k) == v:
                 continue
             changes.append({"s": sec, "n": None, "k": k, "b": tr[sec].get(k), "a": v})
@@ -399,6 +483,8 @@ def _apply(story: dict, new: dict, turn: int) -> list[dict]:
             tr["chars"][name] = cur = {}
             changes.append({"s": "chars", "n": name, "k": "*", "b": None, "a": "new character"})
         for k, v in fields.items():
+            if v not in (None, "") and _guarded(story, edit_key("chars", k, name), v, turn):
+                continue
             if v in (None, "") or cur.get(k) == v:
                 continue
             changes.append({"s": "chars", "n": name, "k": k, "b": cur.get(k), "a": v})
@@ -1077,7 +1163,7 @@ def _level_note(story: dict) -> str:
 
 
 def tail_text(story: dict) -> str:
-    v, note = visible(story), "\n\n".join(x for x in (_quest_note(story), _level_note(story), _counter_note(story), _history_note(story), _pair_note(story), _hidden_note(story), _deadline_note(story), _clock_note(story)) if x)
+    v, note = visible(story), "\n\n".join(x for x in (_quest_note(story), _level_note(story), _counter_note(story), _history_note(story), _pair_note(story), _hidden_note(story), _deadline_note(story), _clock_note(story), _edit_note(story)) if x)
     if not v:
         return note
     return ("[SIDE PANEL: the tracked state of the story as the player sees it. Keep it consistent: a value changes only when events in the story cause it, "
@@ -1114,6 +1200,11 @@ Reply with ONLY a JSON patch: {"scene": {key: value}, "me": {key: value}, "chars
 Rules: use only the tracked fields (the part of each id after the dot is the key); never repeat unchanged values; never invent anything the reply does not support; slider and number fields are plain numbers (no units or words); status fields use one of the listed options when options are given; keep values short. A field's "meaning" note says what it is for: follow it.
 If nothing changed, reply {}.
 """ + READ_RULES
+
+DISCOVER_SYSTEM = """You look at the status panel (or the status shown in the last story text) of a story that was just imported from another app, and find the tracked values that the app does not track yet.
+You are given the ALREADY TRACKED fields and the TEXT. Reply with ONLY a JSON list of NEW fields to add (at most 10), [] if everything shown is already tracked:
+[{"scope": "scene|me|chars", "label": "Affection", "kind": "text|number|slider|status", "min": 0, "max": 100, "options": ["a","b"], "note": "what it means, one short sentence"}]
+Rules: scope "scene" = the current scene (day, time, place, weather), "me" = the player's own values (health, money, level, items), "chars" = a value every character has (affection, mood, relationship, location). kind slider = a number with a range (give min and max), number = a plain count, status = one of a few labels (give options), text otherwise. Only values the text actually shows; never invent; skip anything the already tracked fields cover (same meaning, even if named differently); skip pure decoration and the story's prose."""
 
 BUILD_SYSTEM = """You build the side panel for an interactive story from what the story has established so far. Reply with ONLY JSON in the shape
 {"scene": {key: value}, "me": {key: value}, "chars": {"Character Name": {key: value}}} giving the CURRENT value of every tracked field the story states or clearly implies (omit anything unknown; never invent).

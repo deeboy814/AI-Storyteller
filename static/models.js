@@ -3,7 +3,8 @@
 const AI_ROLES = [
   { key: "story", title: "Story narrator", kind: "text", help: "Writes the story each turn. This is the one that matters most for quality." },
   { key: "recaps", title: "Recaps & helpers", kind: "text", help: "Memory summaries, key events, bios and picture prompts. Small jobs that run often, so a cheaper model is fine." },
-  { key: "small", title: "Small helpers (optional)", kind: "text", optional: true, help: "A second, cheaper (or local) model for the small jobs that run after every reply: key events log, new characters, side panel, background place and suggested replies. Leave on “same as Recaps & helpers” to use one helper for everything." },
+  { key: "small", title: "Small helpers (optional)", kind: "text", optional: true, help: "A second, cheaper (or local) model for the small jobs that run after every reply: key events log, new characters, side panel and background place. Leave on “same as Recaps & helpers” to use one helper for everything." },
+  { key: "replies", title: "Suggested replies (optional)", kind: "text", optional: true, same: "Same as Small helpers", help: "Writes the 3 suggested moves under the story. A stronger model here makes the suggestions noticeably better, and it only runs when you ask for suggestions. Leave on “same as Small helpers” to use the helper." },
   { key: "images", title: "Pictures", kind: "image", help: "Draws character portraits and scene illustrations." },
 ];
 const FIT_LABEL = { fits: "fits in video memory", partial: "slower: spills into RAM", cpu: "CPU only: slow", too_big: "too big for this computer" };
@@ -37,7 +38,7 @@ function mountAIChooser(el, { initial = {}, onChange = null, roles = null } = {}
     const c = st.choice[r.key], p = c && prov(r.kind, c.provider), rec = st.opts.recommended[r.key];
     if (r.optional && !c) {   // not chosen: one dropdown to turn it on
       return `<div class="aiRole" data-role="${r.key}"><div class="aiHead"><b>${r.title}</b> <small>${esc(r.help)}</small></div>
-        <div class="grid2" style="grid-template-columns:1fr 2fr"><div><select data-sel="prov"><option value="">Same as Recaps &amp; helpers</option>${list(r.kind).map((q) => `<option value="${esc(q.id)}">${esc(label(q))}</option>`).join("")}</select></div><div></div></div></div>`;
+        <div class="grid2" style="grid-template-columns:1fr 2fr"><div><select data-sel="prov"><option value="">${r.same || "Same as Recaps &amp; helpers"}</option>${list(r.kind).map((q) => `<option value="${esc(q.id)}">${esc(label(q))}</option>`).join("")}</select></div><div></div></div></div>`;
     }
     const provs = list(r.kind);
     const isRec = rec && c && rec.provider === c.provider && rec.model === c.model;
@@ -45,7 +46,7 @@ function mountAIChooser(el, { initial = {}, onChange = null, roles = null } = {}
     return `<div class="aiRole" data-role="${r.key}">
       <div class="aiHead"><b>${r.title}</b> <small>${esc(r.help)}</small></div>
       <div class="grid2" style="grid-template-columns:1fr 2fr">
-        <div><select data-sel="prov">${r.optional ? '<option value="">Same as Recaps &amp; helpers</option>' : ""}${provs.map((q) => `<option value="${esc(q.id)}" ${c && q.id === c.provider ? "selected" : ""}>${esc(label(q))}</option>`).join("")}</select></div>
+        <div><select data-sel="prov">${r.optional ? `<option value="">${r.same || "Same as Recaps &amp; helpers"}</option>` : ""}${provs.map((q) => `<option value="${esc(q.id)}" ${c && q.id === c.provider ? "selected" : ""}>${esc(label(q))}</option>`).join("")}</select></div>
         <div><select data-sel="model" ${p && p.models.length ? "" : "disabled"}>${p && p.models.length ? modelOptions(p, c && c.model) : `<option>${needsKey ? "add a key to see models" : "no models found"}</option>`}</select></div>
       </div>
       ${needsKey && p.hint ? `<div class="hint">${esc(p.hint)}</div>` : ""}
@@ -92,7 +93,7 @@ function mountAIChooser(el, { initial = {}, onChange = null, roles = null } = {}
   const ready = load(false);
   return {
     ready,
-    get: () => ({ ...Object.fromEntries(Object.entries(st.choice).filter(([, v]) => v)), ...(ROLES.some((r) => r.key === "small") && !st.choice.small ? { small: {} } : {}) }),   // small: {} = "same as Recaps & helpers" (clears an earlier choice)
+    get: () => ({ ...Object.fromEntries(Object.entries(st.choice).filter(([, v]) => v)), ...(ROLES.some((r) => r.key === "small") && !st.choice.small ? { small: {} } : {}), ...(ROLES.some((r) => r.key === "replies") && !st.choice.replies ? { replies: {} } : {}) }),   // small: {} = "same as Recaps & helpers" (clears an earlier choice)
     opts: () => st.opts,
     choice: (role) => st.choice[role] || null,
     // another part of the window changed a model: keep the chooser in step (only if that provider is the chosen one)

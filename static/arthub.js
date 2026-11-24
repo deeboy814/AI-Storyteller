@@ -31,6 +31,9 @@ function showArtHub(tab = "Overview") {
       ${card("📖", "Cover", story.cover ? "Has a cover on the Home card" : "No cover yet", `<button id="hCover">Cover art…</button>`)}
       ${card("🖼", "Intro panels", `${intro} picture${intro === 1 ? "" : "s"} shown at the start of the story`, `<button id="hIntro">Intro panels…</button>`)}
       ${card("🎬", "Scene pictures", `Auto-illustrate: ${onoff(a.auto)} · a picture most turns: ${onoff(a.scene_often)}${(a.scene_gap || 1) > 1 ? " · one every " + a.scene_gap + " turns" : ""} · shown ${({ panel: "in the side panel", banner_top: "as a banner above the narration", banner_bottom: "as a banner below the narration" })[a.scene_where] || "under the reply"}`, `<button id="hIllus" ${busy ? "disabled" : ""}>Illustrate the latest reply</button><button id="hStyle1">Options…</button>`)}
+      ${(() => { const cp = comfyProv(config || {});
+        return card("🎞", "Videos", cp ? `Animate every new picture: <b>${onoff(cp.video_auto)}</b> (all stories) · <span id="hVidCount">counting…</span>` : "Videos are made with a local ComfyUI picture maker (Picture makers → Picture services → Local).",
+          cp ? `<button id="hAnimAll" title="Make a short video of every picture in this story (characters, outfits, places, scene pictures, the cover), one after another. Pictures that already have a video are skipped.">🎬 Animate all pictures in this story</button><button id="hVidSet">Video settings…</button><span class="hint" id="hAnimNote" role="status"></span>` : `<button id="hVidSet">Picture makers…</button>`); })()}
     </div>
     <div id="hubStyle" class="hidden"><div id="hubArtStyle"></div><div id="hubArtStylePick" class="hidden"></div>${artTabHtml().replace('id="tabArt" class="hidden"', 'id="tabArt"').replace(/<div class="field"><label>Art style[\s\S]*?class="stylepick"[\s\S]*?<\/select><\/div>/, "")}
       <div class="actions sticky"><span class="hint" id="hubStyleNote"></span><span style="flex:1"></span><button class="primary" id="hubStyleSave">Save</button></div></div>
@@ -77,6 +80,14 @@ function showArtHub(tab = "Overview") {
   $("hBg").onclick = () => show("Backgrounds");
   $("hCover").onclick = via(() => showCardEditor({ id: story.id, title: story.title, cover: story.cover || "", description: story.description || "" }, { back: async () => { try { story = await api(`/stories/${story.id}`); } catch (e) { /* keep */ } renderAll(); back(); } }));
   $("hIllus").onclick = () => { closeModal(); illustrate(); };
+  if ($("hVidCount")) api(`/stories/${story.id}/animate-all`).then((c) => { if ($("hVidCount")) $("hVidCount").textContent = `${c.with_video} of ${c.total} picture${c.total === 1 ? "" : "s"} have a video`; }).catch(() => { if ($("hVidCount")) $("hVidCount").textContent = ""; });
+  if ($("hAnimAll")) $("hAnimAll").onclick = (e) => animateAll("", e.target, $("hAnimNote"));
+  $("hVidSet").onclick = async () => {      // open Picture makers at the Video generation section
+    show("Makers");
+    for (let i = 0; i < 50 && !$("vidSecEvery"); i++) await new Promise((r) => setTimeout(r, 100));
+    const d = $("vidSecEvery") && $("vidSecEvery").closest("details");
+    if (d) { d.open = true; d.scrollIntoView({ block: "start", behavior: "smooth" }); }
+  };
   $("hStyle1").onclick = () => show("Style");
 
   // ----- Style & options: the story's art direction and every picture switch
@@ -126,7 +137,7 @@ function showArtHub(tab = "Overview") {
 }
 
 // Picture makers: which AI draws the pictures, the picture services (Gemini, Grok, OpenAI, ComfyUI), per-checkpoint settings, the mood sets and the
-// separate backgrounds maker. This used to be Settings → Pictures. Without an open story it only changes the app-wide choices (Home screen).
+// separate backgrounds maker. (Formerly Settings → Pictures.) Without an open story it only changes the app-wide choices (Home screen).
 async function mountMakers(box) {
   if (box.dataset.ready) return;
   box.dataset.ready = "1";
@@ -190,15 +201,27 @@ function collapsify(pane, openFirst = true) {
   }
 }
 
-// Species: what is true of a whole species (written into every member's picture prompt), the picture maker it uses by default, and its reference picture. The first
-// picture drawn of a new species becomes its reference by itself; later characters of the species keep its look but are drawn as their own person.
+// The reference pictures a species card offers, by the species' gender: a species of one sex has just that one (its main picture); a mixed one has a general look plus a
+// male and a female picture; every species can also have a daily-clothing and a combat-clothing picture. (The main picture is `reference_url`, the rest are `refs`.)
+function speciesSlots(gender) {
+  const sex = gender === "female" ? [["main", "Female", "Every member of this species is female."]]
+    : gender === "male" ? [["main", "Male", "Every member of this species is male."]]
+    : gender ? [["main", "Typical member", "What a member of this species looks like."]]
+    : [["main", "General look", "Either sex: used when a character's sex is not known."], ["male", "Male", "Used for male characters."], ["female", "Female", "Used for female characters."]];
+  return [...sex, ["daily", "Daily clothing", "What they wear every day."], ["combat", "Combat clothing", "Fighting gear: used for fight and action pictures."]];
+}
+const speciesRefUrl = (sp, slot) => (slot === "main" ? sp.reference_url : (sp.refs || {})[slot]) || "";
+
+// Species: what is true of a whole species (written into every member's picture prompt), the picture maker it uses by default, and its reference pictures. The first
+// picture drawn of a new species becomes its main reference by itself; later characters of the species keep its look but are drawn as their own person.
 async function showSpecies(nav = {}) {
   const list = Object.entries(story.species || {}), cast = story.cast || [], choices = await makerChoices();
   const members = (name) => cast.filter((c) => ((c.species || "human").trim().toLowerCase() || "human") === name.toLowerCase());
   const card = ([key, sp]) => {
     const m = members(sp.name), withPic = m.filter((c) => Object.keys(c.moods || {}).length);
     return `<div class="aiBox spcard" data-key="${esc(key)}"><b>${esc(sp.name)}</b> <small class="muted">${m.length} character${m.length === 1 ? "" : "s"}: ${esc(m.map((c) => c.name).join(", ") || "none yet")}</small>
-      <div class="bioTop spTop">${sp.reference_url ? `<img class="bioimg" src="${thumbUrl(sp.reference_url, 360)}" alt="reference">` : '<div class="noart" style="width:110px;height:140px">No reference yet</div>'}
+      <div class="spRefs"></div>
+      <div class="bioTop spTop">
       <div style="flex:1"><label>What is true of the whole species <small class="hint">(skin or covering, eyes, crests, build, clothing: added to every member's picture prompt)</small></label><textarea class="short spDesc" rows="3">${esc(sp.description || "")}</textarea>
         <label>Story traits <small class="hint">(abilities, weaknesses, senses, customs: given to the narrator so it stays consistent)</small></label><textarea class="short spTraits" rows="3">${esc(sp.traits || "")}</textarea>
         <label>Colour palette <small class="hint">(the colours this species is drawn in: skin, hair, eyes, clothing. Added to every member's picture prompt)</small></label><textarea class="short spPalette" rows="2" placeholder="e.g. muted greys and deep teal, bronze trim, pale ash skin">${esc(sp.palette || "")}</textarea>
@@ -210,36 +233,65 @@ async function showSpecies(nav = {}) {
         <div class="actions" style="justify-content:flex-start;margin:2px 0 6px"><button class="spWrite" title="The helper model fills the description, story traits, palette, clothing, combat clothing, negative words and gender from the story prompt and this species' members. Boxes it has nothing for are left as they are. Nothing is saved until you press Save.">✨ Fill everything from the story</button></div>
         <label>Picture maker for this species <small class="hint">(a character can still choose their own)</small></label><select class="spMaker"></select>
         <label>LoRA for this species <small class="hint">(used for the reference picture and every character of this species; ComfyUI only)</small></label>
-        <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin:2px 0 6px"><select class="spLora" style="max-width:320px"><option value="">(none)</option></select><input class="spLoraSt" type="number" step="0.05" min="-2" max="2" value="${esc(String(sp.lora_strength ?? 1))}" style="width:80px" title="Strength: 0.6 to 1.0 is usual"><input class="spLoraTrig" value="${esc(sp.lora_trigger || "")}" placeholder="trigger word (if it has one)" style="max-width:220px"></div>
-        <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><select class="spPick">${withPic.map((c) => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join("") || "<option value=''>(no pictures yet)</option>"}</select>
-          <button class="spUse" ${withPic.length ? "" : "disabled"}>Use their picture as the reference</button></div>
-          <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><button class="spLib" title="Keeps this species, with its reference picture, in your library, so other stories can add it.">📚 Save to library</button><span class="hint spLibMsg" role="status"></span><button class="spRedraw" title="Draws 4 new reference pictures of a typical member from the description above, then you pick one, with the picture maker chosen above (even if not saved yet).">🎨 Redraw the reference (pick from 4)</button>${sp.reference_url ? '<button class="spClear">Clear the reference</button>' : ""}</div><div class="spCands"></div></div></div></div>`;
+        <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin:2px 0 6px"><select class="spLora" style="max-width:320px"><option value="">(none)</option></select><input class="spLoraSt" type="number" step="0.05" min="-2" max="2" value="${esc(String(sp.lora_strength ?? 1))}" style="width:80px" title="Strength: 0.6 to 1.0 is usual"><input class="spLoraTrig" value="${esc(sp.lora_trigger || "")}" placeholder="trigger words (filled in from the LoRA)" style="max-width:220px"></div>
+          <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:6px"><button class="spLib" title="Keeps this species, with its reference pictures, in your library, so other stories can add it.">📚 Save to library</button><span class="hint spLibMsg" role="status"></span></div></div></div></div>`;
   };
-  modal(`<h2>🧬 Species</h2><p class="hint">Every character has a species (empty means human). The <b>first picture drawn</b> for a species becomes its reference: the next character of that species is drawn from a tiny version of it, so they share its look but have their own face. After a character has pictures of their own, those are used instead.</p>
+  modal(`<h2>🧬 Species</h2><p class="hint">Every character has a species (empty means human). Each species can have several <b>reference pictures</b>: a general look, a male and a female one (only the one sex for a species of one sex), and its daily and combat clothing. The <b>first picture drawn</b> for a species becomes its general look by itself. A new character of the species is drawn from tiny versions of the picture of their sex and of the clothing, so they share the look but have their own face. After a character has pictures of their own, those are used instead (a fight picture also gets the combat clothing picture).</p>
     <div id="spList">${list.map(card).join("") || '<p class="hint">No species yet. Give a character a species (character page → Species) or add one below.</p>'}</div>
     <div class="actions" style="justify-content:flex-start"><input id="spNew" placeholder="Add a species, e.g. Elf" style="max-width:220px"><button id="spAdd">Add</button><button id="spFromLib" title="Add a species you kept in the library, with its reference picture">📚 Add from library…</button><span style="flex:1"></span><span class="hint" id="spNote"></span><button class="primary" id="spSave">Save</button></div>
     <div class="actions" style="margin-top:8px"><button id="mClose">Close</button></div>`);
   $("mClose").onclick = () => { closeModal(); renderAll(); };
+  // The reference pictures of one card: a tile per picture, each with Upload, "use a character's picture", Draw (pick from 4) and Clear. Only this block is redrawn, so
+  // text typed in the other boxes is kept.
+  const renderRefs = (el) => {
+    const key = el.dataset.key, sp = story.species[key] || {}, box = el.querySelector(".spRefs"), slots = speciesSlots(el.querySelector(".spGender").value);
+    const withPic = members(sp.name).filter((c) => Object.keys(c.moods || {}).length);
+    box.innerHTML = `<div class="sprefhead"><b>Reference pictures</b> <small class="muted">for the ${esc(sp.name)}</small>
+        <span class="spchar"><small class="hint">Characters' pictures:</small> <select class="spPick">${withPic.map((c) => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join("") || "<option value=''>(no pictures yet)</option>"}</select></span></div>
+      <div class="spslots">${slots.map(([slot, label, hint]) => { const u = speciesRefUrl(sp, slot);
+        return `<figure class="spslot" data-slot="${slot}"><div class="spslotimg">${u ? `<img src="${thumbUrl(u, 300)}" alt="${esc(label)}" loading="lazy">` : '<div class="noart">Empty</div>'}</div>
+          <figcaption><b>${esc(label)}</b><div class="hint">${esc(hint)}</div>
+            <div class="spsbtns"><label class="btnlike" title="Use a picture file from your computer">⬆ Upload<input type="file" class="spsFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>
+              <button type="button" class="spsChar" ${withPic.length ? "" : "disabled"} title="Copy the picture of the character chosen above">Use a character</button>
+              <button type="button" class="spsDraw" title="Draws 4 pictures from the description above, then you pick one (with the picture maker chosen above, even if not saved yet)">🎨 Draw</button>
+              ${u ? '<button type="button" class="spsClear">✕</button>' : ""}</div></figcaption></figure>`; }).join("")}</div>
+      <div class="spCands"></div>`;
+    const done = (r) => { story = r; renderRefs(el); $("spNote").textContent = ""; };
+    box.querySelectorAll(".spslot").forEach((tile) => {
+      const slot = tile.dataset.slot, q = (c) => tile.querySelector(c);
+      q(".spsFile").onchange = async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        try {
+          $("spNote").textContent = "Uploading…";
+          const r = await fetch(`/api/stories/${story.id}/species/${encodeURIComponent(key)}/image?slot=${slot}`, { method: "POST", headers: { "content-type": f.type }, body: f });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Upload failed.");
+          done(await r.json());
+        } catch (err) { $("spNote").textContent = err.message; }
+      };
+      q(".spsChar").onclick = async () => { try { done(await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "POST", body: { slug: box.querySelector(".spPick").value, slot } })); } catch (err) { $("spNote").textContent = err.message; } };
+      const clr = q(".spsClear"); if (clr) clr.onclick = async () => { try { done(await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference?slot=${slot}`, { method: "DELETE" })); } catch (err) { $("spNote").textContent = err.message; } };
+      q(".spsDraw").onclick = async (e) => {
+        const b = e.target; b.disabled = true; $("spNote").textContent = "Drawing 4 pictures… this can take a few minutes.";
+        try {
+          const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/redraw`, { method: "POST", body: { slot, maker: el.querySelector(".spMaker").value, description: el.querySelector(".spDesc").value, count: 4, lora: el.querySelector(".spLora").value, lora_strength: parseFloat(el.querySelector(".spLoraSt").value) || 1, lora_trigger: el.querySelector(".spLoraTrig").value, palette: el.querySelector(".spPalette").value, clothing: el.querySelector(".spClothing").value, combat: el.querySelector(".spCombat").value, negative: el.querySelector(".spNeg").value, gender: el.querySelector(".spGender").value, gender_note: el.querySelector(".spGenderNote").value } });
+          const cands = box.querySelector(".spCands");
+          cands.innerHTML = `<div class="hint">Pictures for “${esc(slot === "main" ? "main" : slot)}”. Click a picture to see it full size, then choose the one you want.</div><div class="gallery">${r.candidates.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="primary spUseThis" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div><button class="spKeep">Keep the current one</button>`;
+          $("spNote").textContent = "";
+          cands.querySelectorAll(".spUseThis").forEach((im) => im.onclick = async () => { try { done(await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: im.dataset.url, slot } })); } catch (err) { $("spNote").textContent = err.message; } });
+          cands.querySelector(".spKeep").onclick = async () => { await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: "", slot } }); cands.innerHTML = ""; };
+          cands.scrollIntoView({ block: "nearest" });
+        } catch (err) { $("spNote").textContent = err.message; }
+        b.disabled = false;
+      };
+    });
+  };
   const body = () => ({ species: [...document.querySelectorAll(".spcard")].map((el) => ({ name: (story.species[el.dataset.key] || {}).name || el.dataset.key, description: el.querySelector(".spDesc").value, traits: el.querySelector(".spTraits").value, maker: el.querySelector(".spMaker").value, lora: el.querySelector(".spLora").value, lora_strength: parseFloat(el.querySelector(".spLoraSt").value) || 1, lora_trigger: el.querySelector(".spLoraTrig").value, palette: el.querySelector(".spPalette").value, clothing: el.querySelector(".spClothing").value, combat: el.querySelector(".spCombat").value, negative: el.querySelector(".spNeg").value, gender: el.querySelector(".spGender").value, gender_note: el.querySelector(".spGenderNote").value })) });
   document.querySelectorAll(".spcard").forEach((el) => {
     const key = el.dataset.key; makerSelect(el.querySelector(".spMaker"), choices, (story.species[key] || {}).maker || "");
-    bindLoraSelect(el.querySelector(".spLora"), (story.species[key] || {}).lora || "", () => el.querySelector(".spMaker").value, el.querySelector(".spMaker"));
-    el.querySelector(".spUse").onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "POST", body: { slug: el.querySelector(".spPick").value } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } };
-    el.querySelector(".spWrite").onclick = async (e) => { e.target.disabled = true; $("spNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/write`, { method: "POST" }); el.querySelector(".spDesc").value = r.description; el.querySelector(".spTraits").value = r.traits; if (r.palette) el.querySelector(".spPalette").value = r.palette; if (r.clothing) el.querySelector(".spClothing").value = r.clothing; if (r.combat) el.querySelector(".spCombat").value = r.combat; if (r.negative) el.querySelector(".spNeg").value = r.negative; if (r.gender) { el.querySelector(".spGender").value = r.gender; el.querySelector(".spGenderNote").value = r.gender_note || ""; } $("spNote").textContent = "Drafted. Edit if you like, then Save."; } catch (err) { $("spNote").textContent = err.message; } e.target.disabled = false; };
-    el.querySelector(".spRedraw").onclick = async (e) => {
-      const b = e.target; b.disabled = true; $("spNote").textContent = "Drawing 4 pictures… this can take a few minutes.";
-      try {
-        const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/redraw`, { method: "POST", body: { maker: el.querySelector(".spMaker").value, description: el.querySelector(".spDesc").value, count: 4, lora: el.querySelector(".spLora").value, lora_strength: parseFloat(el.querySelector(".spLoraSt").value) || 1, lora_trigger: el.querySelector(".spLoraTrig").value, palette: el.querySelector(".spPalette").value, clothing: el.querySelector(".spClothing").value, combat: el.querySelector(".spCombat").value, negative: el.querySelector(".spNeg").value, gender: el.querySelector(".spGender").value, gender_note: el.querySelector(".spGenderNote").value } });
-        const box = el.querySelector(".spCands");
-        box.innerHTML = `<div class="hint">Click a picture to see it full size, then choose the one you want.</div><div class="gallery">${r.candidates.map((u) => `<figure><img loading="lazy" src="${thumbUrl(u, 480)}" alt=""><figcaption><button class="primary spUseThis" data-url="${esc(u)}">Use this one</button></figcaption></figure>`).join("")}</div><button class="spKeep">Keep the current one</button>`;
-        $("spNote").textContent = "";
-        box.querySelectorAll(".spUseThis").forEach((im) => im.onclick = async () => { try { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: im.dataset.url } }); showSpecies(nav); } catch (err) { $("spNote").textContent = err.message; } });
-        box.querySelector(".spKeep").onclick = async () => { await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/pick`, { method: "POST", body: { url: "" } }); box.innerHTML = ""; };
-        box.scrollIntoView({ block: "nearest" });
-      } catch (err) { $("spNote").textContent = err.message; }
-      b.disabled = false;
-    };
-    const clr = el.querySelector(".spClear"); if (clr) clr.onclick = async () => { story = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/reference`, { method: "DELETE" }); showSpecies(nav); };
+    bindLoraSelect(el.querySelector(".spLora"), (story.species[key] || {}).lora || "", () => el.querySelector(".spMaker").value, el.querySelector(".spMaker"), el.querySelector(".spLoraTrig"));
+    el.querySelector(".spWrite").onclick = async (e) => { e.target.disabled = true; $("spNote").textContent = "Writing…"; try { const r = await api(`/stories/${story.id}/species/${encodeURIComponent(key)}/write`, { method: "POST" }); el.querySelector(".spDesc").value = r.description; el.querySelector(".spTraits").value = r.traits; if (r.palette) el.querySelector(".spPalette").value = r.palette; if (r.clothing) el.querySelector(".spClothing").value = r.clothing; if (r.combat) el.querySelector(".spCombat").value = r.combat; if (r.negative) el.querySelector(".spNeg").value = r.negative; if (r.gender) { el.querySelector(".spGender").value = r.gender; el.querySelector(".spGenderNote").value = r.gender_note || ""; renderRefs(el); } $("spNote").textContent = "Drafted. Edit if you like, then Save."; } catch (err) { $("spNote").textContent = err.message; } e.target.disabled = false; };
+    el.querySelector(".spGender").onchange = () => renderRefs(el);
+    renderRefs(el);
   });
   document.querySelectorAll(".spcard").forEach((el) => {
     const b = el.querySelector(".spLib"); if (!b) return;

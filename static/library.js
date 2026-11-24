@@ -54,13 +54,14 @@ async function showLibrary(tab, opts = {}) {
 
 // One species of the library, opened for editing.
 async function showSpeciesLibraryEditor(id, opts = {}) {
-  let sp = id ? (await api("/species-library")).find((x) => x.id === id) : { id: null, name: "", description: "", traits: "", maker: "", lora: "", lora_strength: 1, lora_trigger: "", image: "" };
+  let sp = id ? (await api("/species-library")).find((x) => x.id === id) : { id: null, name: "", description: "", traits: "", maker: "", lora: "", lora_strength: 1, lora_trigger: "", image: "", refs: {} };
   if (!sp) return showLibrary("Species", opts);
   const choices = typeof makerChoices === "function" ? await makerChoices() : [["", "Same as the story", ""]];
   modal(`<h2>${sp.id ? "Edit species" : "New species"}</h2>
     <div class="avrow"><div id="spvPreview">${sp.image ? `<img class="avatar" src="${esc(sp.image)}" alt="">` : '<div class="avatar noimg">No reference picture yet</div>'}</div>
       <div><input type="file" id="spvFile" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:4px">
         <div id="spvNote" class="hint">Uploads are saved at once. The reference picture is what new members of this species are drawn from. You can also keep a drawn one: use “Save to library” on a species card in a story.</div></div></div>
+    <label>More reference pictures <small class="hint">(a male and a female one, and their daily and combat clothing: a species of one sex has only that sex. Uploaded here, saved at once)</small></label><div class="spslots" id="spvSlots"></div>
     <label>Name</label><input id="spv_name" value="${esc(sp.name)}" placeholder="e.g. Elf">
     <label>What is true of the whole species <small class="hint">(skin or covering, eyes, crests, build, clothing: added to every member's picture prompt)</small></label><textarea class="short" id="spv_description" rows="3">${esc(sp.description || "")}</textarea>
     <label>Story traits <small class="hint">(abilities, weaknesses, senses, customs: given to the narrator)</small></label><textarea class="short" id="spv_traits" rows="3">${esc(sp.traits || "")}</textarea>
@@ -72,12 +73,33 @@ async function showSpeciesLibraryEditor(id, opts = {}) {
     <label>Words to keep out of this species' pictures <small class="hint">(negative prompt)</small></label><textarea class="short" id="spv_negative" rows="2">${esc(sp.negative || "")}</textarea>
     <label>Picture maker for this species</label><select id="spv_maker"></select>
     <label>LoRA for this species <small class="hint">(ComfyUI only)</small></label>
-    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;gap:6px"><select id="spv_lora" style="max-width:320px"><option value="">(none)</option></select><input id="spv_str" type="number" step="0.05" min="-2" max="2" value="${esc(String(sp.lora_strength ?? 1))}" style="width:80px" title="Strength: 0.6 to 1.0 is usual"><input id="spv_trig" value="${esc(sp.lora_trigger || "")}" placeholder="trigger word (if it has one)" style="max-width:220px"></div>
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;gap:6px"><select id="spv_lora" style="max-width:320px"><option value="">(none)</option></select><input id="spv_str" type="number" step="0.05" min="-2" max="2" value="${esc(String(sp.lora_strength ?? 1))}" style="width:80px" title="Strength: 0.6 to 1.0 is usual"><input id="spv_trig" value="${esc(sp.lora_trigger || "")}" placeholder="trigger words (filled in from the LoRA)" style="max-width:220px"></div>
     <div class="actions sticky">${sp.id ? '<button class="danger" id="spvDel">Delete species</button>' : ""}<span class="hint" id="spvMsg"></span><span style="flex:1"></span><button id="spvBack">← Library</button><button class="primary" id="spvSave">Save</button></div>`);
   makerSelect($("spv_maker"), choices, sp.maker || "");
-  bindLoraSelect($("spv_lora"), sp.lora || "", () => $("spv_maker").value, $("spv_maker"));
+  bindLoraSelect($("spv_lora"), sp.lora || "", () => $("spv_maker").value, $("spv_maker"), $("spv_trig"));
   const body = () => ({ name: $("spv_name").value, description: $("spv_description").value, traits: $("spv_traits").value, maker: $("spv_maker").value, lora: $("spv_lora").value, lora_strength: +$("spv_str").value || 1, lora_trigger: $("spv_trig").value, palette: $("spv_palette").value, clothing: $("spv_clothing").value, combat: $("spv_combat").value, gender: $("spv_gender").value, gender_note: $("spv_gnote").value, negative: $("spv_negative").value });
   const ensure = async () => { if (!sp.id) { if (!$("spv_name").value.trim()) throw new Error("Give the species a name first."); sp = await api("/species-library", { method: "POST", body: body() }); } return sp.id; };
+  const drawSlots = () => {       // the extra reference pictures (the slots follow the gender chosen above)
+    const slots = speciesSlots($("spv_gender").value).filter(([s]) => s !== "main");
+    $("spvSlots").innerHTML = slots.map(([slot, label, hint]) => { const u = (sp.refs || {})[slot];
+      return `<figure class="spslot" data-slot="${slot}"><div class="spslotimg">${u ? `<img src="${esc(u)}" alt="${esc(label)}">` : '<div class="noart">Empty</div>'}</div><figcaption><b>${esc(label)}</b><div class="hint">${esc(hint)}</div>
+        <div class="spsbtns"><label class="btnlike">⬆ Upload<input type="file" class="spsFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label>${u ? '<button type="button" class="spsClear">✕</button>' : ""}</div></figcaption></figure>`; }).join("");
+    $("spvSlots").querySelectorAll(".spslot").forEach((tile) => {
+      const slot = tile.dataset.slot;
+      tile.querySelector(".spsFile").onchange = async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        try {
+          const lid = await ensure();
+          const r = await fetch(`/api/species-library/${lid}/image?slot=${slot}`, { method: "POST", headers: { "content-type": f.type }, body: f });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Upload failed.");
+          sp = await r.json(); drawSlots(); $("spvNote").textContent = "Saved. Press Save to keep the other details too.";
+        } catch (err) { $("spvNote").textContent = err.message; }
+      };
+      const clr = tile.querySelector(".spsClear");
+      if (clr) clr.onclick = async () => { try { sp = await api(`/species-library/${sp.id}/image?slot=${slot}`, { method: "DELETE" }); drawSlots(); } catch (err) { $("spvNote").textContent = err.message; } };
+    });
+  };
+  $("spv_gender").onchange = drawSlots; drawSlots();
   $("spvBack").onclick = () => showLibrary("Species", opts);
   $("spvSave").onclick = async () => { try { if (sp.id) await api("/species-library/" + sp.id, { method: "PUT", body: body() }); else await api("/species-library", { method: "POST", body: body() }); showLibrary("Species", opts); } catch (e) { $("spvMsg").textContent = e.message; } };
   if ($("spvDel")) $("spvDel").onclick = async () => { if (confirm(`Delete “${sp.name}” from the library? Stories that already have it keep their own copy.`)) { await api("/species-library/" + sp.id, { method: "DELETE" }); showLibrary("Species", opts); } };

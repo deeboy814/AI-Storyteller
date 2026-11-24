@@ -32,8 +32,9 @@ KEY_HELP = {
     "gemini": "aistudio.google.com → Get API key",
     "xai": "console.x.ai → API keys",
 }
-NOT_CHAT = re.compile(r"embed|tts|whisper|audio|realtime|transcribe|moderation|dall-e|imagen|image|veo|sora|search|computer-use|davinci|babbage|aqa|guard|rerank|ocr", re.I)
-IS_IMAGE = re.compile(r"image|imagen|imagine|dall-e", re.I)
+NOT_CHAT = re.compile(r"embed|tts|whisper|audio|realtime|transcribe|moderation|dall-e|imagen|image|imagine|nano-banana|video|veo|sora|lyria|music|robotics|antigravity|gpt-live|search|computer-use|davinci|babbage|aqa|guard|rerank|ocr", re.I)   # not story writers: pictures, video, music, voice, robots, agents...
+IS_IMAGE = re.compile(r"image|imagen|imagine|nano-banana|dall-e", re.I)
+NOT_IMAGE = re.compile(r"video|veo|sora", re.I)      # video makers are not picture makers
 
 
 def tier_of(provider_id: str, model: str) -> str:
@@ -164,7 +165,7 @@ def _header_kind(name: str) -> str:
                     n = struct.unpack("<Q", fh.read(8))[0]
                     keys = json.loads(fh.read(n)).keys() if n < 50_000_000 else []
                 ks = " ".join(keys)
-                kind = ("krea2" if "txtfusion.projector.weight" in ks else "anima" if "adaln_modulation_cross_attn" in ks else "chroma" if "distilled_guidance_layer" in ks else "flux2" if "double_stream_modulation_img" in ks
+                kind = ("zimage" if ("cap_embedder.0.weight" in ks and "context_refiner.0.attention" in ks) else "krea2" if "txtfusion.projector.weight" in ks else "anima" if "adaln_modulation_cross_attn" in ks else "chroma" if "distilled_guidance_layer" in ks else "flux2" if "double_stream_modulation_img" in ks
                         else "qwen" if ("txt_norm" in ks and "transformer_blocks.0.img_mod" in ks and not re.search(r"edit", name, re.IGNORECASE)) else "")
             except Exception:
                 kind = ""
@@ -175,14 +176,12 @@ def _header_kind(name: str) -> str:
 
 # ---------- which models a LoRA works with ----------
 LORA_FAMILY_LABEL = {"sdxl": "SDXL / Illustrious / Pony checkpoints", "chroma": "Chroma", "flux1": "FLUX.1-style (works on Chroma, partly)", "flux2": "FLUX.2 klein",
-                     "anima": "Anima / Vivid Gloom", "krea2": "Krea 2", "qwen": "Qwen-Image", "unknown": "Unknown (not sure which model)"}
+                     "anima": "Anima / Vivid Gloom", "krea2": "Krea 2", "zimage": "Z-Image", "qwen": "Qwen-Image", "unknown": "Unknown (not sure which model)"}
 _LORA_CACHE: dict = {}
 
 
-def lora_family(name: str) -> str:
-    """Which kind of model a LoRA file was trained for: read from its own header (the architecture and base model the trainer wrote, else the layer names), then its name.
-    "sdxl" (SDXL, Illustrious, Pony checkpoints), "chroma", "flux1" (FLUX.1-shaped: partly works on Chroma), "flux2", "anima", "krea2", "qwen" or "unknown"."""
-    import json, struct
+def lora_file(name: str):
+    """The LoRA's file in ComfyUI's loras folder on this computer (None when ComfyUI is somewhere the app cannot see, or the name is not a file there)."""
     from pathlib import Path
     roots = [Path.home() / "ComfyUI"]
     try:
@@ -192,7 +191,15 @@ def lora_family(name: str) -> str:
             roots.insert(0, Path(cmd.split()[0]).expanduser().parent)
     except Exception:
         pass
-    f = next((r / "models" / "loras" / name for r in roots if (r / "models" / "loras" / name).is_file()), None)
+    root = next((r / "models" / "loras" for r in roots if (r / "models" / "loras" / name).is_file()), None)
+    return (root / name) if root and ".." not in Path(name).parts else None
+
+
+def lora_family(name: str) -> str:
+    """Which kind of model a LoRA file was trained for: read from its own header (the architecture and base model the trainer wrote, else the layer names), then its name.
+    "sdxl" (SDXL, Illustrious, Pony checkpoints), "chroma", "flux1" (FLUX.1-shaped: partly works on Chroma), "flux2", "anima", "krea2", "zimage", "qwen" or "unknown"."""
+    import json, struct
+    f = lora_file(name)
     low = str(name).lower()
     meta, ks = {}, ""
     if f:
@@ -208,6 +215,8 @@ def lora_family(name: str) -> str:
         except Exception:
             pass
     def from_words(txt: str) -> str:
+        if re.search(r"z[-_ ]?image|zimage", txt):
+            return "zimage"
         if re.search(r"krea", txt):
             return "krea2"
         if re.search(r"anima(?!gine)", txt):
@@ -224,8 +233,12 @@ def lora_family(name: str) -> str:
             return "sdxl"
         return ""
     fam = from_words(" ".join(str(meta.get(k, "")) for k in ("modelspec.architecture", "ss_base_model_version")).lower()) or from_words(str(meta.get("ss_sd_model_name", "")).lower())
+    if not fam and re.search(r"flux[-_ ]?2|klein", low):      # the file name says FLUX.2 klein (the layer names of its LoRAs look just like FLUX.1's)
+        fam = "flux2"
     if not fam and ks:           # no usable header words: the layer names say what it was trained on
-        if re.search(r"txtfusion|blocks\.\d+\.attn\.gate|blocks_\d+_attn_gate", ks):
+        if re.search(r"context_refiner|cap_embedder|diffusion_model\.layers\.\d+\.(attention\.to_[qk]|feed_forward\.w[123]|adaLN_modulation)", ks):      # Z-Image (a Lumina-style DiT): its extra layers, or its main layer names
+            fam = "zimage"
+        elif re.search(r"txtfusion|blocks\.\d+\.attn\.gate|blocks_\d+_attn_gate", ks):
             fam = "krea2"
         elif re.search(r"cross_attn|adaln", ks):
             fam = "anima"
@@ -234,7 +247,7 @@ def lora_family(name: str) -> str:
         elif re.search(r"single_blocks|single_transformer_blocks|double_blocks", ks):
             fam = "flux1"
     if not fam:
-        fam = "krea2" if re.search(r"krea", low) else "anima" if re.search(r"anima(?!gine)", low) else "chroma" if "chroma" in low else "flux2" if re.search(r"flux2|klein", low) else "flux1" if "flux" in low else "sdxl" if re.search(r"illustrious|pony|sdxl|xl\b|ilxl|\bill\b", low) else "unknown"
+        fam = "zimage" if re.search(r"z[-_ ]?image|zimage", low) else "krea2" if re.search(r"krea", low) else "anima" if re.search(r"anima(?!gine)", low) else "chroma" if "chroma" in low else "flux2" if re.search(r"flux2|klein", low) else "flux1" if "flux" in low else "sdxl" if re.search(r"illustrious|pony|sdxl|xl\b|ilxl|\bill\b", low) else "unknown"
     if fam == "flux1" and "chroma" in low:       # a "chroma" LoRA trained with the FLUX.1 trainer is still a Chroma LoRA
         fam = "chroma"
     if f:
@@ -247,7 +260,7 @@ def model_family(name: str, is_checkpoint: bool = False) -> str:
     if is_checkpoint:
         return "sdxl"
     k = diffusion_kind(name)
-    return {"flux2": "flux2", "chroma": "chroma", "anima": "anima", "krea2": "krea2", "qwen": "qwen"}.get(k, "unknown")
+    return {"flux2": "flux2", "chroma": "chroma", "anima": "anima", "krea2": "krea2", "zimage": "zimage", "qwen": "qwen"}.get(k, "unknown")
 
 
 def lora_fits(model_fam: str, lora_fam: str) -> str:
@@ -269,6 +282,8 @@ def diffusion_kind(name: str) -> str:
     n = str(name)
     if re.search(r"flux[._ -]?2", n, re.IGNORECASE):
         return "flux2"
+    if re.search(r"z[._ -]?image", n, re.IGNORECASE):
+        return "zimage"
     if re.search(r"krea[._ -]?2", n, re.IGNORECASE):
         return "krea2"
     if re.search(r"anima|vividgloom", n, re.IGNORECASE):
@@ -342,7 +357,7 @@ async def _image_provider(p: dict, hw: dict) -> dict:
                        + [{"id": i, "tier": "local", "kind": "flux" if is_flux(i) else diffusion_kind(i), "family": model_family(i)} for i in r["unets"]])
     elif e["has_key"]:
         r = await live_ids(p)
-        ids = [i for i in r["ids"] if IS_IMAGE.search(i)] if r["ok"] else []
+        ids = [i for i in r["ids"] if IS_IMAGE.search(i) and not NOT_IMAGE.search(i)] if r["ok"] else []
         if not ids and p.get("model"):
             ids = [p["model"]]
         e["models"] = _sorted([{"id": i, "tier": tier_of(p["id"], i)} for i in ids])
@@ -399,10 +414,20 @@ def recommend(text: list[dict], images: list[dict], hw: dict) -> tuple[dict, lis
     # --- images: local if it can run, else an online image maker
     img_local = next((p for p in images if p["local"] and p["ready"]), None)
     img_online = next((p for p in images if not p["local"] and p["ready"]), None)
+    def best_img(p: dict) -> str:
+        """The provider's own default model when it has one; else a general-purpose model (not the first file in alphabetical order, which may be a niche style)."""
+        ids = [m["id"] for m in p["models"]]
+        if p.get("default_model") in ids:
+            return p["default_model"]
+        for pat in (r"flux-2-klein-9b", r"flux-2-klein", r"krea2_turbo", r"illustrious-xl", r"realvis", r"gpt-image-2$", r"gemini-3.*image$"):
+            hit = next((i for i in ids if re.search(pat, i, re.I)), None)
+            if hit:
+                return hit
+        return ids[0]
     if img_local:
-        recs["images"] = {"provider": img_local["id"], "model": img_local["models"][0]["id"], "why": "Free and private: draws on your own graphics card."}
+        recs["images"] = {"provider": img_local["id"], "model": best_img(img_local), "why": "Free and private: draws on your own graphics card."}
     elif img_online:
-        recs["images"] = {"provider": img_online["id"], "model": img_online["models"][0]["id"], "why": f"{img_online['name']} makes the pictures (billed per image)."}
+        recs["images"] = {"provider": img_online["id"], "model": best_img(img_online), "why": f"{img_online['name']} makes the pictures (billed per image)."}
     # --- warnings
     if hw["vram_gb"] <= 0:
         notes.append("No dedicated graphics card was detected, so local models would run on the CPU and be slow. Online models are the better choice for the story.")
@@ -435,3 +460,96 @@ async def build(cfg: dict, hw: dict) -> dict:
     recs, notes = recommend(text, images, hw)
     return {"hardware": {**hw, "summary": hardware.describe(hw)}, "text": text, "images": images, "recommended": recs, "notes": notes,
             "install": local_suggestions(text, hw), "tier_labels": TIER_LABEL}
+
+
+# ---------- a LoRA's trigger words ----------
+# Most LoRAs only show their effect when the prompt holds the words they were trained with. They are in the file's own header (the trainer's tag list), in a notes
+# file beside it (Civitai's .civitai.info "trainedWords", the Lora Manager's .json "activation text") or, for some, a plain "trigger" field.
+_TRIG_CACHE: dict = {}
+_GENERIC_TAGS = {"1girl", "1boy", "2girls", "2boys", "solo", "multiple girls", "multiple boys", "looking at viewer", "simple background", "white background", "portrait", "upper body",
+                 "smile", "open mouth", "closed mouth", "standing", "sitting", "realistic", "photorealistic", "photo", "masterpiece", "best quality", "highres", "absurdres", "male focus",
+                 "female focus", "1other", "blurry", "outdoors", "indoors", "solo focus", "full body", "cowboy shot", "close-up", "from side", "from behind", "from above", "from below",
+                 "looking away", "looking to the side", "male", "female", "man", "woman", "boy", "girl", "nsfw", "background", "grey background", "dark background", "no humans", "monochrome", "greyscale", "lips", "blush", "long hair", "short hair", "breasts", "english text", "text", "watermark", "signature"}
+
+
+def _clean_triggers(words) -> list[str]:
+    out = []
+    for w in words:
+        w = re.sub(r"\s+", " ", str(w or "")).strip(" ,;\"'")
+        if 1 < len(w) <= 40 and len(w.split()) <= 5 and w.lower() not in (x.lower() for x in out):
+            out.append(w)
+    return out
+
+
+def _notes_beside(f) -> list[str]:
+    """Trigger words from the notes files people keep next to a LoRA (Civitai Helper / Lora Manager / A1111 style)."""
+    import json
+    out = []
+    for suffix in (".civitai.info", ".json", ".info"):
+        n = f.with_name(f.stem + suffix)
+        if not n.is_file() or n.stat().st_size > 2_000_000:
+            continue
+        try:
+            d = json.loads(n.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        words = list(d.get("trainedWords") or []) if isinstance(d, dict) else []
+        if isinstance(d, dict):
+            for key in ("activation text", "activation_text", "trigger words", "trigger_words", "trigger"):
+                v = d.get(key)
+                words += (v if isinstance(v, list) else re.split(r"\s*,\s*", v) if isinstance(v, str) else [])
+        if words:
+            out = _clean_triggers(words)
+            break
+    return out
+
+
+def lora_triggers(name: str) -> dict:
+    """The words that make a LoRA work, read from the file: {"trigger": "word, word" or "", "source": "notes" | "header" | "tags" | "", "known": whether the file could be read}.
+    A guess from the trainer's tag list: the tags that were in (nearly) every training picture and are not everyday tags like 1girl or solo. Captions written as sentences give none."""
+    import json, struct
+    f = lora_file(name)
+    if not f:
+        return {"trigger": "", "source": "", "known": False}
+    key = (str(f), f.stat().st_mtime)
+    if key in _TRIG_CACHE:
+        return _TRIG_CACHE[key]
+    res = {"trigger": "", "source": "", "known": True}
+    words = _notes_beside(f)
+    if words:
+        res.update(trigger=", ".join(words[:6]), source="notes")
+    else:
+        try:
+            with open(f, "rb") as fh:
+                n = struct.unpack("<Q", fh.read(8))[0]
+                meta = (json.loads(fh.read(n)) if n < 80_000_000 else {}).get("__metadata__") or {}
+        except Exception:
+            meta = {}
+        for k in ("modelspec.trigger_phrase", "trigger_phrase", "ss_trigger_words", "trigger_words", "activation text", "activation_text", "modelspec.trigger_word"):
+            v = meta.get(k)
+            if v and (words := _clean_triggers(v if isinstance(v, list) else re.split(r"\s*,\s*", str(v)))):
+                res.update(trigger=", ".join(words[:6]), source="header")
+                break
+        else:
+            try:
+                freq = json.loads(meta.get("ss_tag_frequency") or "{}")
+            except Exception:
+                freq = {}
+            counts: dict[str, int] = {}
+            spelled: dict[str, str] = {}      # the trainer's own capitalisation (vulc4nST)
+            for d in freq.values() if isinstance(freq, dict) else []:
+                for tag, c in (d or {}).items():
+                    # a dataset folder called "1_H4Lib,alien,female," was tagged as one string: split it into its tags
+                    for part in (re.split(r"\s*,\s*", str(tag)) if "," in str(tag) else [str(tag)]):
+                        part = part.strip()
+                        if part:
+                            counts[part.lower()] = counts.get(part.lower(), 0) + int(c or 0)
+                            spelled.setdefault(part.lower(), part)
+            if counts:
+                top = max(counts.values())
+                lead = [t for t, c in sorted(counts.items(), key=lambda kv: -kv[1]) if c >= 0.9 * top and t not in _GENERIC_TAGS]
+                lead = _clean_triggers([spelled.get(x, x) for x in lead])
+                if lead and len(lead) <= 4:       # more than a handful of tags in every picture means a general dataset, not a trigger
+                    res.update(trigger=", ".join(lead), source="tags")
+    _TRIG_CACHE[key] = res
+    return res

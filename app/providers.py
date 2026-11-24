@@ -360,6 +360,108 @@ async def complete(provider, model, system, messages, **kw) -> str:
     return out
 
 
+BATCH_CHUNK = 500          # requests per Message Batch
+BATCH_GIVE_UP = 5400       # seconds: a batch that has not ended by then is cancelled (they usually take minutes; the service allows up to 24 hours)
+
+
+async def batch_complete(provider, model, system: str, jobs: list[tuple[str, str]], *, max_tokens: int = 700, temperature: float = 0.2, concurrency: int = 4,
+                         progress=None, poll: float = 15.0, use_batch: bool = True, **extra) -> tuple[dict[str, str], dict[str, str]]:
+    """Many independent one-message jobs at once: [(id, user text)] with one shared system prompt. Returns ({id: reply text}, {id: error text}).
+    Claude (type anthropic) uses the Message Batches service: half the price, results usually within minutes (slower than a normal call), so only for work
+    nobody is waiting on live. Other providers (and use_batch=False) run the jobs as normal calls, a few at a time.
+    `progress(done, total)` is called as results arrive."""
+    total = len(jobs)
+    out: dict[str, str] = {}
+    err: dict[str, str] = {}
+    if not jobs:
+        return out, err
+    peak = [0]
+    _report, progress = progress, (lambda d, t: (peak.__setitem__(0, max(peak[0], d)), _report and _report(peak[0], t)))
+    if not (use_batch and provider.get("type") == "anthropic" and provider.get("api_key")):
+        sem = asyncio.Semaphore(max(1, concurrency))
+
+        async def one(jid: str, text: str):
+            async with sem:
+                try:
+                    out[jid] = await complete(provider, model, system, [{"role": "user", "content": text}], temperature=temperature, max_tokens=max_tokens, **extra)
+                except Exception as e:
+                    err[jid] = str(e)[:300] or e.__class__.__name__
+                if progress:
+                    progress(len(out) + len(err), total)
+        await asyncio.gather(*(one(j, t) for j, t in jobs))
+        return out, err
+
+    base = provider["base_url"].rstrip("/") + "/v1/messages/batches"
+    headers = {"x-api-key": provider["api_key"], "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    todo = dict(jobs)
+    for attempt in range(3):                       # a second and third round only for requests the model refused over a setting it does not take
+        retry: dict[str, str] = {}
+        ids = list(todo)
+        for k in range(0, len(ids), BATCH_CHUNK):
+            part = ids[k:k + BATCH_CHUNK]
+            reqs = []
+            for jid in part:
+                params = {"model": model, "max_tokens": max_tokens, "system": [{"type": "text", "text": system}],
+                          "messages": [{"role": "user", "content": todo[jid]}], "thinking": _THINKING_OFF.get(model, {"type": "disabled"})}
+                if model not in _NO_TEMPERATURE:
+                    params["temperature"] = min(temperature, 1.0)
+                reqs.append({"custom_id": jid, "params": params})
+            async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+                r = await c.post(base, headers=headers, json={"requests": reqs})
+                await _check(r)
+                bid = r.json()["id"]
+                waited = 0.0
+                while True:
+                    st = (await c.get(f"{base}/{bid}", headers=headers)).json()
+                    rc = st.get("request_counts") or {}
+                    if progress:
+                        progress(len(out) + len(err) + sum(rc.get(x, 0) for x in ("succeeded", "errored", "canceled", "expired")), total)
+                    if st.get("processing_status") == "ended":
+                        break
+                    if waited > BATCH_GIVE_UP:
+                        try:
+                            await c.post(f"{base}/{bid}/cancel", headers=headers)
+                        except Exception:
+                            pass
+                        raise ProviderError(f"The batch (id {bid}) was still not finished after {BATCH_GIVE_UP // 60} minutes, so it was cancelled. Try again later, or untick the cheaper batch option.")
+                    await asyncio.sleep(poll)
+                    waited += poll
+                res = await c.get(st.get("results_url") or f"{base}/{bid}/results", headers=headers)
+                await _check(res)
+                for line in res.text.splitlines():
+                    if not line.strip():
+                        continue
+                    d = json.loads(line)
+                    jid, rs = d.get("custom_id"), d.get("result") or {}
+                    if rs.get("type") == "succeeded":
+                        m = rs.get("message") or {}
+                        out[jid] = "".join(b.get("text", "") for b in m.get("content", []) if b.get("type") == "text")
+                        u = m.get("usage") or {}
+                        try:
+                            usage.record({"kind": "text", "provider": provider["id"], "model": model, "ttl": None, "batch": True,
+                                          "input": int(u.get("input_tokens", 0) or 0), "cache_read": int(u.get("cache_read_input_tokens", 0) or 0),
+                                          "cache_write": int(u.get("cache_creation_input_tokens", 0) or 0), "output": int(u.get("output_tokens", 0) or 0)})
+                        except Exception:
+                            pass
+                    else:
+                        e = ((rs.get("error") or {}).get("error") or rs.get("error") or {})
+                        msg = (e.get("message") if isinstance(e, dict) else str(e)) or rs.get("type", "failed")
+                        low = msg.lower()
+                        if attempt < 2 and "temperature" in low and "deprecated" in low:
+                            _NO_TEMPERATURE.add(model); retry[jid] = todo[jid]
+                        elif attempt < 2 and "between_tools" in low:
+                            _THINKING_OFF[model] = {"type": "between_tools"}; retry[jid] = todo[jid]
+                        else:
+                            err[jid] = str(msg)[:300]
+        if not retry:
+            break
+        todo = retry
+    for jid in todo:
+        if jid not in out and jid not in err:
+            err[jid] = "no result"
+    return out, err
+
+
 async def list_ollama_models(provider) -> list[str]:
     try:
         async with httpx.AsyncClient(timeout=3) as c:

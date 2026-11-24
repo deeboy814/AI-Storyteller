@@ -158,21 +158,57 @@ DIFFICULTY = {"easy": 8, "medium": 12, "hard": 16, "very hard": 20, "heroic": 24
 BASE_STAT = 5          # a stat of 5 is average and adds nothing; each point above or below adds or subtracts 1
 
 
-def stat_mod(v: float) -> int:
-    """The bonus a stat adds to a roll. Up to 10 each point counts (5 is average, 10 is +5). Stats can climb far past 10 when a story levels up (a stat of 30
-    or 100), and a flat +1 per point would make every check automatic, so above 10 each doubling of the stat adds only +3 (20 is +8, 40 is +11, 80 is +14)."""
+# The game difficulty: how much a stat is worth on a roll. Stored as story["dice"]["scale"]; a story that never chose one keeps the original (hard) maths.
+SCALES = {
+    "easy": {"label": "Easy: everyday life", "hint": "Stats run 1 to 10 and 5 is an ordinary person: each point is worth +2 (1 is −8 and very hard to pass, 5 is +0, 10 is +10 and almost impossible to fail)."},
+    "normal": {"label": "Normal: tabletop style", "hint": "Stats run about 3 to 20 and 10 is average: every 2 points is worth +1 (8 is −1, 10 is +0, 14 is +2, 20 is +5)."},
+    "hard": {"label": "Hard: a stat of 5 is average", "hint": "Each point is worth +1 up to 10 (5 is +0, 10 is +5), then it eases off (20 is +8). The original setting."},
+}
+DEFAULT_SCALE = "hard"
+
+
+def dice_scale(story: dict) -> str:
+    s = (story.get("dice") or {}).get("scale")
+    return s if s in SCALES else DEFAULT_SCALE
+
+
+def suggest_scale(story: dict) -> str:
+    """A first guess for a new story from its starting stats: mostly 9 or more reads like a tabletop sheet (normal), 5 or less like everyday life on a 1 to 10 scale (easy),
+    anything between is the original (hard). Only used to pre-select the choice in the dice question; the player decides."""
+    vals = sorted(x["value"] for x in check_stats(story) if x.get("value") is not None and not x.get("grade"))
+    if not vals:
+        return DEFAULT_SCALE
+    med = vals[len(vals) // 2]
+    return "normal" if med >= 9 else "easy" if med <= 5 else DEFAULT_SCALE
+
+
+def _eased(top: float, v: float, at: float) -> int:
+    """Past the top of a scale each doubling of the stat adds only +3, so a stat of 100 from many level-ups does not make every check automatic."""
     import math
-    if v <= 10:
-        return int(round(v - BASE_STAT))
-    return int(round(5 + 3 * math.log2(v / 10)))
+    return int(round(top + 3 * math.log2(v / at)))
 
 
-def roll(value, difficulty: str = "medium", dc=None, adv: str = "", label: str = "", rng=None) -> dict:
-    """A d20 check: d20 + the stat's bonus (stat - 5, easing off above 10) against a difficulty (or a number). `adv` is "adv" or "dis" for two dice. Pure code, so the outcome is fair and the narrator cannot fudge it."""
+def stat_mod(v: float, scale: str = "hard") -> int:
+    """The bonus a stat adds to a roll, by game difficulty.
+    hard: 5 is average; up to 10 each point counts (10 is +5), above 10 each doubling adds +3 (20 is +8, 40 is +11, 80 is +14).
+    easy: 1 to 10 with 5 average, +2 a point (1 is -8, 5 is +0, 10 is +10); above 10 each doubling adds +3.
+    normal: 10 is average, +1 for every 2 points (3 is -4, 20 is +5, 30 is +10); above 30 each doubling adds +3."""
+    if scale == "easy":
+        return max(-10, int(round(2 * (v - BASE_STAT)))) if v <= 10 else _eased(10, v, 10)
+    if scale == "normal":
+        return max(-5, int((v - 10) // 2)) if v <= 30 else _eased(10, v, 30)
+    return int(round(v - BASE_STAT)) if v <= 10 else _eased(5, v, 10)
+
+
+def roll(value, difficulty: str = "medium", dc=None, adv: str = "", label: str = "", rng=None, scale: str = "hard", grade: bool = False) -> dict:
+    """A d20 check: d20 + the stat's bonus (by game difficulty `scale`) against a difficulty (or a number). `adv` is "adv" or "dis" for two dice. `grade` marks a stat
+    written as a letter (F to SSS, always 1 to 10), which counts double on the normal scale so that B is average there too. Pure code, so the outcome is fair and the narrator cannot fudge it."""
     import random
     rng = rng or random
-    v = float(value) if value is not None else float(BASE_STAT)
-    mod = stat_mod(v)
+    scale = scale if scale in SCALES else DEFAULT_SCALE
+    v = float(value) if value is not None else None
+    mod = 0 if v is None else stat_mod(v * 2 if grade and scale == "normal" else v, scale)
+    v = float(BASE_STAT) if v is None else v
     rolls = [rng.randint(1, 20)] + ([rng.randint(1, 20)] if adv in ("adv", "dis") else [])
     die = max(rolls) if adv == "adv" else min(rolls)
     try:
@@ -278,7 +314,7 @@ def check_stats(story: dict) -> list[dict]:
             continue
         g = grade_value((tr.get("me") or {}).get(f["id"].split(".", 1)[1]))
         if g is not None:
-            out.append({"id": f["id"], "label": f["label"], "value": g})
+            out.append({"id": f["id"], "label": f["label"], "value": g, "grade": True})
     return out
 
 
@@ -330,7 +366,7 @@ def auto_roll(story: dict, move: str, rng=None) -> dict | None:
     if not st:
         return None
     diff = "hard" if re.search(r"\b(difficult|hard|dangerous|risky|impossible)\b", move, re.IGNORECASE) else "easy" if re.search(r"\b(easy|simple|carefully)\b", move, re.IGNORECASE) else (story.get("dice") or {}).get("difficulty", "medium")
-    r = roll(st["value"], diff, label=st["label"], rng=rng)
+    r = roll(st["value"], diff, label=st["label"], rng=rng, scale=dice_scale(story), grade=bool(st.get("grade")))
     r["auto"] = True
     return r
 

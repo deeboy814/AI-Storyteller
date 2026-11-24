@@ -14,6 +14,7 @@ function cmdsFromText(t) {
 async function showStoryForm(s) {
   const isNew = !s;
   if (!TRACKER_FIELDS.length) TRACKER_FIELDS = await api("/tracker-fields");
+  let DICE = { scales: {}, difficulties: {} }; try { DICE = await api("/dice-options"); } catch (e) { /* the dice section just stays empty */ }
   const D = {   // the draft
     title: s ? s.title : "", subtitle: s ? s.subtitle || "" : "", description: s ? s.description || "" : "", base_prompt: s ? s.base_prompt : "",
     prologue: s ? s.prologue || "" : "", opening: s ? s.opening || "" : "", opening_in_context: !s || s.opening_in_context !== false,
@@ -24,6 +25,7 @@ async function showStoryForm(s) {
     cast: [], cover: null, intro: [], backdrop: null, models: null,
     sheets: { on: !!(s && s.statsheets && s.statsheets.on), auto: !s || !s.statsheets || s.statsheets.auto !== false },   // character sheets for NPCs
   };
+  D.dice = { mode: (s && s.dice && s.dice.mode) || "", scale: (s && s.dice && s.dice.scale) || "hard", difficulty: (s && s.dice && s.dice.difficulty) || "medium" };
   const tabs = isNew ? ["Basics", "Cast", "Story start", "Trackers & endings", "Media", "Options"] : ["Basics", "Story start", "Trackers & endings", "Options"];
   let tab = "Basics", picker = null, trk = null;
   const aiHelp = (kind) => api("/suggest", { method: "POST", body: { kind, title: D.title, base_prompt: D.base_prompt, opening: D.opening, prologue: D.prologue, cast: D.cast.map((c) => ({ name: c.name, appearance: c.appearance, personality: c.personality })), ...modelOf() } });
@@ -42,7 +44,7 @@ async function showStoryForm(s) {
       D.endings = [...document.querySelectorAll(".endrow")].map((r) => ({ title: r.querySelector("input").value, text: r.querySelector("textarea").value })).filter((e) => e.title.trim() || e.text.trim());
       D.art.direction = val("sfArtDir"); D.art.setting = val("sfArtSet");
     }
-    if (tab === "Options") { D.use_state_block = $("fState").checked; D.auto_replies = $("fAutoRep").checked; D.rule_check = $("fRuleChk").checked; D.narrator_acts = $("fActs").checked; D.code_check = $("fCode").checked; D.format_fix = $("fFix").checked; D.app_status = $("fAppSt").checked; D.clock = { mode: $("fClockMode").value, start: $("fClockStart").value || "06:00", minutes: +$("fClockMin").value || 30, weekdays: $("fWdMode").value, start_day: $("fWdStart").value }; if ($("fNsfw")) D.nsfw = $("fNsfw").checked; D.sheets = { on: $("fSheets").checked, auto: $("fSheetsAuto").checked }; if ($("fCmds")) D.commands = cmdsFromText($("fCmds").value); if (picker) D.models = picker.get(); }
+    if (tab === "Options") { D.use_state_block = $("fState").checked; D.auto_replies = $("fAutoRep").checked; D.rule_check = $("fRuleChk").checked; D.narrator_acts = $("fActs").checked; D.code_check = $("fCode").checked; D.format_fix = $("fFix").checked; D.app_status = $("fAppSt").checked; D.dice = { mode: $("fDiceMode").value, scale: $("fDiceScale").value, difficulty: $("fDiceDiff").value }; D.clock = { mode: $("fClockMode").value, start: $("fClockStart").value || "06:00", minutes: +$("fClockMin").value || 30, weekdays: $("fWdMode").value, start_day: $("fWdStart").value }; if ($("fNsfw")) D.nsfw = $("fNsfw").checked; D.sheets = { on: $("fSheets").checked, auto: $("fSheetsAuto").checked }; if ($("fCmds")) D.commands = cmdsFromText($("fCmds").value); if (picker) D.models = picker.get(); }
   };
 
   // ---- panes
@@ -96,7 +98,7 @@ async function showStoryForm(s) {
     "Options": () => `<h3>Options</h3>
       <label>Command buttons <small class="hint">(a row of buttons above the input box; one per line: <b>Label | what it sends</b>. Start the text with <b>@edit</b> to put it in the box instead of sending, or write just <b>@points</b> to open the stat-points window, which needs no AI call)</small></label>
       <textarea class="short" id="fCmds" rows="4" placeholder="Status | Show my status&#10;Shop | Open the shop&#10;Assign points | @points">${esc(cmdsToText(D.commands))}</textarea>
-      ${chk("fState", D.use_state_block, "Let the app track the story state", "Fills the sidebar from a hidden block. Turn off if your prompt prints its own status panel.")}
+      ${chk("fState", D.use_state_block, "Let the app track the story state", "Fills the side panel from a hidden block the narrator writes. Turn off if your prompt prints its own status panel.")}
       ${chk("fAutoRep", D.auto_replies, "Suggest three replies after every narrator reply", "Otherwise use the 💡 button. Costs one small call each time.")}
       ${chk("fRuleChk", D.rule_check, "Check each reply against this story's rules", "The small helper AI reads the story prompt and the reply and flags clear slips (a missing status line, a quest without its notice, points spent for you). A flagged reply gets a one-click fix. Costs one small call per reply (it reads the whole story prompt).")}
       ${chk("fActs", D.narrator_acts, "Let the narrator decide some of my character's routine actions", "Lets the narrator write routine, in-character actions, thoughts and short lines for your character (following an order, a habitual reaction), based on their backstory, stats, skills, quests and the story so far, which keeps replies long and scenes moving. It still follows exactly what you write, and the story prompt says how far it may go. Off: only you decide what your character does or says.")}
@@ -106,6 +108,11 @@ async function showStoryForm(s) {
       <label>World clock <small class="hint">(the app keeps the in-world time and tells the narrator each turn, so the time of day stops drifting)</small></label>
       <div class="grid2" style="grid-template-columns:2fr 1fr 1fr"><select id="fClockMode"><option value="auto" ${D.clock.mode === "auto" ? "selected" : ""}>Let the story prompt decide (on when it talks about a clock or a Time value)</option><option value="on" ${D.clock.mode === "on" ? "selected" : ""}>On</option><option value="off" ${D.clock.mode === "off" ? "selected" : ""}>Off</option></select>
         <div><label style="margin:0">Day starts at</label><input id="fClockStart" type="time" value="${esc(D.clock.start || "06:00")}"></div><div><label style="margin:0">Minutes per reply</label><input id="fClockMin" type="number" min="1" max="720" value="${esc(String(D.clock.minutes || 30))}"></div></div>
+      <label>Dice <small class="hint">(the app rolls a d20 plus your stat's bonus against a difficulty and the narrator must play out the result. The 🎲 Check… button in ⚡ always rolls on any move you type)</small></label>
+      <div class="grid2" style="grid-template-columns:2fr 1fr"><select id="fDiceMode"><option value="" ${!D.dice.mode ? "selected" : ""}>Automatic rolls: let the story prompt decide (on when it mentions rolls, checks or dice)</option><option value="auto" ${D.dice.mode === "auto" ? "selected" : ""}>Automatic rolls: the app rolls for risky actions</option><option value="manual" ${D.dice.mode === "manual" ? "selected" : ""}>Only when I press 🎲</option><option value="off" ${D.dice.mode === "off" ? "selected" : ""}>Never roll</option></select>
+        <select id="fDiceDiff" title="How hard an automatic roll usually is (the number to beat)">${Object.entries(DICE.difficulties).map(([k, v]) => `<option value="${esc(k)}" ${D.dice.difficulty === k ? "selected" : ""}>Usual roll: ${esc(k)} (${v})</option>`).join("")}</select></div>
+      <div class="grid2" style="grid-template-columns:1fr"><select id="fDiceScale">${Object.entries(DICE.scales).map(([k, v]) => `<option value="${esc(k)}" ${D.dice.scale === k ? "selected" : ""}>Game difficulty — ${esc(v.label)}</option>`).join("")}</select></div>
+      <div class="hint" id="fDiceHint"></div>
       <label>Days of the week <small class="hint">(the app keeps Monday, Tuesday… and tells the narrator, moving on when a day ends: the Day number, or the clock passing midnight)</small></label>
       <div class="grid2" style="grid-template-columns:2fr 1fr"><select id="fWdMode"><option value="auto" ${(D.clock.weekdays || "auto") === "auto" ? "selected" : ""}>Let the story prompt decide (on when it names days of the week or has a Weekday value)</option><option value="on" ${D.clock.weekdays === "on" ? "selected" : ""}>On</option><option value="off" ${D.clock.weekdays === "off" ? "selected" : ""}>Off</option></select>
         <div><select id="fWdStart"><option value="">Day 1 is: what the prompt says (else Monday)</option>${["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d) => `<option value="${d}" ${D.clock.start_day === d ? "selected" : ""}>Day 1 is a ${d}</option>`).join("")}</select></div></div>
@@ -162,6 +169,10 @@ async function showStoryForm(s) {
       $("mBack").onchange = (e) => { const f = pick(e.target)[0]; if (f) { D.backdrop = f; render(); } };
       if ($("mBackDel")) $("mBackDel").onclick = () => { D.backdrop = null; render(); };
     }
+    if (tab === "Options" && $("fDiceScale")) {
+      const showScale = () => { $("fDiceHint").textContent = (DICE.scales[$("fDiceScale").value] || {}).hint || ""; };
+      $("fDiceScale").onchange = showScale; showScale();
+    }
     if (tab === "Options" && isNew) {
       api("/config").then((cf) => { picker = mountAIChooser($("aiPick"), { initial: D.models || cf.default_models || {} }); });
     }
@@ -185,7 +196,7 @@ async function showStoryForm(s) {
     const prog = (t) => { const e = $("sfProg"); if (e) e.textContent = t; };
     $("mSave").disabled = true;
     const body = { commands: D.commands, title: D.title, subtitle: D.subtitle, base_prompt: D.base_prompt, description: D.description, prologue: D.prologue, opening: D.opening, opening_in_context: D.opening_in_context,
-      opening_options: D.opening_options, alt_openings: D.alt_openings, opening_name: D.opening_name, endings: D.endings, statsheets: D.sheets, auto_replies: D.auto_replies, rule_check: D.rule_check, narrator_acts: D.narrator_acts, code_check: D.code_check, format_fix: D.format_fix, app_status: D.app_status, clock: D.clock, use_state_block: D.use_state_block, art: D.art,
+      opening_options: D.opening_options, alt_openings: D.alt_openings, opening_name: D.opening_name, endings: D.endings, statsheets: D.sheets, auto_replies: D.auto_replies, rule_check: D.rule_check, narrator_acts: D.narrator_acts, code_check: D.code_check, format_fix: D.format_fix, app_status: D.app_status, clock: D.clock, dice: D.dice, use_state_block: D.use_state_block, art: D.art,
       sidebar: D.sidebar.mode === "player" ? { mode: "player", fields: D.sidebar.fields, custom: D.sidebar.custom || [] } : D.sidebar.mode === "ai" ? { mode: "ai", schema: D.sidebar.schema } : { mode: "prompt" } };
     try {
       if (!isNew) { story = await api("/stories/" + s.id, { method: "PUT", body }); localStorage.setItem("story", story.id); closeModal(); renderAll(); applyTheme(config); return; }

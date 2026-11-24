@@ -17,6 +17,11 @@ async function showMemory() {
       <label class="chk"><input type="checkbox" id="mKeep" checked> Start from the current summary (leave ticked for imported stories: their early history exists only in it)</label>
       <div class="actions" style="justify-content:flex-start"><button id="mRebuild">Rebuild</button><span class="hint" id="mProg"></span></div>
       <p class="hint">A backup of the story is saved first.</p></details>
+    <details id="mDigDet"><summary>One-line digests of older turns</summary>
+      <p class="hint" id="mDigInfo">Checking…</p>
+      <label class="chk hidden" id="mDigBatchRow"><input type="checkbox" id="mDigBatch" checked> Use Claude's cheaper batch service (half price; the answers usually take a few minutes instead of seconds)</label>
+      <div class="actions" style="justify-content:flex-start"><button id="mDigRun" disabled>Write the missing digests</button><span class="hint" id="mDigProg"></span></div>
+      <p class="hint">A digest is one line per exchange (who, where, what changed). The memory summary reads them instead of the full replies, and the app uses them to bring back older events that match the scene. They use the AI chosen under "Rebuild the summary" above.</p></details>
     <div class="actions"><button id="mBackups">Backups…</button><button id="mLore" title="Facts about your world, sent to the narrator only when their trigger words come up">📚 Lore…</button><button id="mCont" title="Read the whole story for contradictions and repair them">🔎 Continuity check…</button><span style="flex:1"></span><button id="mClose">Close</button><button class="primary" id="mSave">Save</button></div>`);
   $("mClose").onclick = closeModal;
   $("mBackups").onclick = () => showBackups(story.id);
@@ -36,11 +41,33 @@ async function showMemory() {
       showMemory();
     } catch (err) { $("mProg").textContent = err.message; e.target.disabled = false; }
   };
+  const digState = async () => {
+    const [provider, model] = $("mModel").value.split("|");
+    try {
+      const d = await api(`/stories/${story.id}/digests?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`);
+      $("mDigInfo").textContent = d.replies ? `${d.with_digest} of ${d.replies} replies have a digest.` + (d.missing ? ` Writing the other ${d.missing} means reading about ${d.tokens.toLocaleString()} tokens${d.cost != null ? ` (${d.cost < 0.01 ? "under $0.01" : "about $" + d.cost.toFixed(2)}${d.batch_ok ? ", half that with the batch option" : ""}) with ${d.model}` : ` with ${d.model}`}.` : " Nothing to write.") : "No replies yet.";
+      $("mDigBatchRow").classList.toggle("hidden", !d.batch_ok);
+      $("mDigRun").disabled = !d.missing;
+    } catch (err) { $("mDigInfo").textContent = err.message; }
+  };
+  digState();
+  $("mModel").addEventListener("change", digState);
+  $("mDigRun").onclick = async (e) => {
+    const [provider, model] = $("mModel").value.split("|");
+    e.target.disabled = true;
+    try {
+      const job = await api(`/stories/${story.id}/digests/backfill`, { method: "POST", body: { provider, model, batch: $("mDigBatch").checked } });
+      const j = await watchJob(job.id, (x) => { $("mDigProg").textContent = x.current ? `${x.current}… (${x.done}/${x.total})` : ""; });
+      if (j.status !== "done") throw new Error(j.error || "failed");
+      $("mDigProg").textContent = `Wrote ${j.result.made} digests` + (j.result.failed ? `; ${j.result.failed} failed` : "") + ".";
+      digState();
+    } catch (err) { $("mDigProg").textContent = err.message; e.target.disabled = false; }
+  };
 }
 
 async function showBackups(sid) {
   const list = await api(`/stories/${sid}/snapshots`);
-  modal(`<h2>Backups</h2>
+  modal(`<h2>💾 Backups</h2>
     <p class="hint">The app saves a copy of this story before every summarize, memory edit, restore or delete, and every 5 turns (the newest 40 are kept). Restoring replaces the story with that copy; the current version is backed up first.</p>
     <div class="snaplist">${list.map((b) => `<div class="storyrow"><div><b>${new Date(b.when * 1000).toLocaleString()}</b><br><small>${esc(b.reason)} · ${b.turns} turns</small></div><button data-r="${esc(b.name)}">Restore</button></div>`).join("") || "<p class='hint'>No backups yet.</p>"}</div>
     <div class="actions"><button id="bNow">Back up now</button><span style="flex:1"></span><button id="bClose">Close</button></div>`);

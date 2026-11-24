@@ -3,7 +3,7 @@ import copy
 import json
 import re
 
-from . import appstatus, characters, localfix, moods, store, tracker
+from . import appstatus, localfix, moods, store, tracker
 from . import inventory, statsheet
 
 ENGINE_CORE = """\
@@ -75,7 +75,7 @@ NEWCHAR_RULE = """\
 === NEW CHARACTERS (app feature) ===
 When a NEW named character who may appear again (not a one-off extra) shows up for the first time, also end the reply with one hidden tag for each:
 <newchar>Full Name | one line of purely visual details: age, hair, eyes, build, clothing, distinguishing features</newchar>
-placed before the scene tag and the state block if there are any, otherwise at the very end. Once per character; never for the player character or for
+placed before the scene tag and the state block if there are any, otherwise at the very end. Once per character (this includes a generic stand-in such as the waitress the first time the story gives them a real name: describe them in more detail than the stand-in's picture); never for the player character or for
 anyone already named earlier in the story. Keep the details safe for work. The tag is hidden from the player; the app uses it to offer art for that character.
 If the new character is NOT human, begin their visual details with their species and a colon (Elf: tall, pointed ears, ...). The first time a NEW species appears (one that is not in the SPECIES list), also add ONE hidden tag describing the whole species, so the app can draw every member consistently and the story keeps it straight:
 <newspecies>Species | what every member looks like (skin or covering, eyes, ears, crests, build) | colour palette (skin, hair, eyes, clothing colours) | everyday clothing style | what they wear into a fight | words an image generator should avoid (features this species does NOT have) | gender: female, male, hermaphrodite, unisex, other, or empty when it has both sexes</newspecies>
@@ -119,8 +119,13 @@ def portrait_lines(story: dict) -> list[str]:
     return [f"{', '.join(names)}: {', '.join(moods)}" for moods, names in sorted(groups.items(), key=lambda kv: kv[1][0])] + avail
 
 
-def variants_note(story: dict) -> str:
-    """Outfits (when switched on) and place pictures a character has, with the tag rule. The narrator picks what fits the scene: [[Name/smile @swimsuit @pool]]."""
+VARIANT_RULE = ("Add @outfit and/or @place after the mood to show them that way: [[Name/smile @swimsuit @pool]]. Pick the outfit that matches what they are wearing in the scene "
+                "(if the story does not change it, keep the one marked wearing now; write their clothes in the text to match) and a place only when the scene is really there. "
+                "Without @ the usual picture is used.")
+
+
+def _variant_rows(story: dict) -> list[str]:
+    """One row per character that has outfits (when switched on) or place pictures."""
     outfits_on = bool((story.get("art") or {}).get("outfits"))
     pnames = {" ".join(p["name"].lower().split()): p["name"] for p in story.get("places") or []}
     rows = []
@@ -135,12 +140,13 @@ def variants_note(story: dict) -> str:
             bits.append("pictures at: " + ", ".join(pl))
         if bits:
             rows.append(f"{c['name']} - " + " | ".join(bits))
-    if not rows:
-        return ""
-    return ("Outfits and places per character:\n" + "\n".join(rows) + "\n"
-            "Add @outfit and/or @place after the mood to show them that way: [[Name/smile @swimsuit @pool]]. Pick the outfit that matches what they are wearing in the scene "
-            "(if the story does not change it, keep the one marked wearing now; write their clothes in the text to match) and a place only when the scene is really there. "
-            "Without @ the usual picture is used.")
+    return rows
+
+
+def variants_note(story: dict) -> str:
+    """Outfits (when switched on) and place pictures a character has, with the tag rule. The narrator picks what fits the scene: [[Name/smile @swimsuit @pool]]."""
+    rows = _variant_rows(story)
+    return ("Outfits and places per character:\n" + "\n".join(rows) + "\n" + VARIANT_RULE) if rows else ""
 
 
 def generic_lines(story: dict) -> list[str]:
@@ -155,29 +161,90 @@ def generic_lines(story: dict) -> list[str]:
 
 GENERIC_RULE = ("GENERIC CHARACTERS: when a person with no name speaks or appears (a waiter, a guard, a clerk, someone in the crowd), do not invent a name for them. If one of the "
                 "'Generic characters' in the PICTURES AVAILABLE note fits the role, show them with that tag ([[Waitress/normal]]) and refer to them in the text by their role (the waitress, the guard), "
-                "never by a made-up name. Only when the story gives that person a real name, or they become important, use that name instead (the player will be offered to give them a picture of their own). "
+                "never by a made-up name. Only when the story gives that person a real name, or they become important, use that name instead of the generic tag: they are now a new character who needs their own picture, so never keep showing the generic character's picture for them (the player will be offered to give them one of their own). "
                 "Pick the generic character whose role and look fit the person; if none fits, just write them without a tag.")
+
+
+_PIC_HEADS = {"P": "Portraits (characters and the moods available):",
+              "G": "Generic characters (unnamed, throwaway people; the role is the tag name):",
+              "L": "Places (fixed pictures):"}
+_EXT_NOTE = "(Extended mood set: prefer the most specific fitting mood over normal or smile.)"
+PICS_DELTA_MAX = 3000      # characters: a bigger list of changes since the saved list is folded into a fresh saved list (one cache rewrite)
+
+
+def _pic_units(story: dict) -> list[list[str]]:
+    """The picture lists as [section, line] units: P portraits, G generic characters, L places, V outfits/places per character."""
+    art = story.get("art") or {}
+    on = art.get("portraits", True)
+    u = []
+    if on:
+        u += [["P", x] for x in portrait_lines(story)]
+        u += [["G", x] for x in generic_lines(story)]
+    u += [["L", x] for x in _place_rows(story)]
+    if on:
+        u += [["V", x] for x in _variant_rows(story)]
+    return u
+
+
+def _pic_render(units: list, extended: bool) -> str:
+    out = []
+    for k in "PGL":
+        ls = [t for s_, t in units if s_ == k]
+        if ls:
+            out.append(_PIC_HEADS[k] + "\n" + "\n".join(ls))
+    v = [t for s_, t in units if s_ == "V"]
+    if v:
+        out.append("Outfits and places per character:\n" + "\n".join(v) + "\n" + VARIANT_RULE)
+    if out and extended:
+        out.append(_EXT_NOTE)
+    return "\n".join(out)
+
+
+def pics_snap_sync(story: dict, free: bool = False) -> bool:
+    """Keeps the saved copy of the picture lists that goes into the CACHED part of the prompt (so the long lists are not paid for again every turn).
+    New moods, places and outfits drawn later travel in a short update at the end of the newest message instead. The saved copy is refreshed when
+    there is none yet, when that costs nothing extra (`free`: the memory summary was just rewritten, or the cache had gone cold anyway), or when the
+    update has grown past PICS_DELTA_MAX. True when the saved copy changed."""
+    units, ext = _pic_units(story), extended_moods_on(story)
+    snap = story.get("pics_snap")
+    if not units:
+        if snap:
+            story.pop("pics_snap", None)
+            return True
+        return False
+    if snap and snap.get("units") == units and bool(snap.get("ext")) == ext:
+        return False
+    if snap:
+        old = {tuple(x) for x in snap.get("units") or []}
+        delta = sum(len(t) for s_, t in units if (s_, t) not in old)
+        if not free and delta <= PICS_DELTA_MAX:
+            return False
+    story["pics_snap"] = {"units": units, "ext": ext}
+    return True
+
+
+def pictures_snapshot_block(story: dict) -> str:
+    """The saved picture lists, for the cached part of the prompt ('' when there is no saved copy)."""
+    snap = story.get("pics_snap")
+    if not snap or not snap.get("units"):
+        return ""
+    return ("=== PICTURES AVAILABLE (main list, for the narrator only; newer pictures are listed in an update note at the end of the player's newest message, "
+            "and a line there replaces an older line for the same names) ===\n" + _pic_render(snap["units"], bool(snap.get("ext"))))
 
 
 def pictures_available(story: dict) -> str:
     """The lists that change as pictures get drawn (moods per character, places with pictures). They go at the END of the newest message, not in the
-    cached start of the prompt, so drawing a new mood no longer makes the whole prompt be paid for again."""
-    art = story.get("art") or {}
-    out = []
-    lines = portrait_lines(story)
-    if lines and art.get("portraits", True):
-        out.append("Portraits (characters and the moods available):\n" + "\n".join(lines))
-    gen = generic_lines(story)
-    if gen and art.get("portraits", True):
-        out.append("Generic characters (unnamed, throwaway people; the role is the tag name):\n" + "\n".join(gen))
-    rows = _place_rows(story)
-    if rows:
-        out.append("Places (fixed pictures):\n" + "\n".join(rows))
-    if (vn := variants_note(story)) and art.get("portraits", True):
-        out.append(vn)
-    if out and extended_moods_on(story):
-        out.append("(Extended mood set: prefer the most specific fitting mood over normal or smile.)")
-    return ("[PICTURES AVAILABLE NOW, for the narrator only]\n" + "\n".join(out)) if out else ""
+    cached start of the prompt, so drawing a new mood no longer makes the whole prompt be paid for again. With a saved copy (see pics_snap_sync) only
+    what was added or changed since that copy is sent here."""
+    units = _pic_units(story)
+    snap = story.get("pics_snap")
+    if snap and snap.get("units"):
+        old = {tuple(x) for x in snap["units"]}
+        new = [u for u in units if tuple(u) not in old]
+        if not new:
+            return ""
+        return "[PICTURES ADDED OR CHANGED SINCE THE MAIN LIST, for the narrator only; these lines replace older ones for the same names]\n" + _pic_render(new, False)
+    return ("[PICTURES AVAILABLE NOW, for the narrator only]\n" + _pic_render(units, extended_moods_on(story))) if units else ""
 
 
 def images_block(story: dict) -> str:
@@ -198,7 +265,7 @@ def images_block(story: dict) -> str:
                          "Always prefer a listed mood, even if it is only the closest fit; ask for a new mood only when no listed one comes close. ")
         parts.append(
             "=== PORTRAITS (character images available in this app; this replaces any other instruction about images) ===\n"
-            "Which characters have which moods is listed in the PICTURES AVAILABLE note at the end of each player message.\n"
+            "Which characters have which moods is listed in the PICTURES AVAILABLE notes (a main list near the start, and an update at the end of the newest player message when pictures were added; the newest line for a name wins).\n"
             "Directly above each line of dialogue from a listed character, output one image tag on its own line: "
               "[[Name/mood]], choosing the mood that best fits what they feel or do in that line. "
             + mood_rule
@@ -226,7 +293,7 @@ def _place_rows(story: dict) -> list[str]:
 
 
 def species_block(story: dict) -> str:
-    """What is true of each species that has story traits (Art → Species), so the narrator keeps abilities, weaknesses and customs consistent."""
+    """What is true of each species that has story traits (🖼 Art → Species & makers), so the narrator keeps abilities, weaknesses and customs consistent."""
     _gen = {"female": "all female", "male": "all male", "hermaphrodite": "all hermaphrodites", "unisex": "no male or female distinction", "other": ""}
     def _g(sp):
         g = sp.get("gender") or ""
@@ -241,7 +308,7 @@ def places_block(story: dict) -> str:
     """Static place pictures the narrator can show: rooms and locations the story returns to again and again (only places that have a picture)."""
     if not _place_rows(story):
         return ""
-    return ("=== PLACES (fixed pictures of locations the story returns to often; the list is in the PICTURES AVAILABLE note at the end of each player message) ===\n"
+    return ("=== PLACES (fixed pictures of locations the story returns to often; the list is in the PICTURES AVAILABLE notes) ===\n"
             "When a scene takes place in, or moves into, one of these places, put one tag on its own line near the start of that scene: ![](place:Name) "
               "(the name spelled exactly as in that list). Use it once when the characters arrive there, not again in every reply while they stay, and again when they come back. "
               "These are for routine, repeated settings. For anything else, or a dramatic moment inside one of them, use a scene frame instead if the app asks for those.")
@@ -623,6 +690,8 @@ def build(story: dict, beats_note: str = "", local: bool = False) -> Built:
         extras.append("=== PINNED FACTS (the player's corrections; they are true and override anything below) ===\n" + "\n".join("- " + f for f in story["pinned_facts"]))
     if story.get("summary"):
         extras.append("=== STORY SO FAR (memory: summary of older events) ===\n" + story["summary"])
+    if (ps := pictures_snapshot_block(story)):
+        extras.append(ps)          # saved picture lists: cached with the rest (see pics_snap_sync)
     tail = ""
     if use_state and story.get("state"):
         tail = "[CURRENT STATE, for the narrator only; do not repeat it]\n" + json.dumps(story["state"], ensure_ascii=False)
@@ -642,6 +711,9 @@ def build(story: dict, beats_note: str = "", local: bool = False) -> Built:
     mem = memory_block(story)
     if mem:
         tail = (tail + "\n\n" if tail else "") + mem
+    rel = relevant_events(story)
+    if rel:
+        tail = (tail + "\n\n" if tail else "") + rel
     rem = picture_reminder(story)
     if rem:
         tail = (tail + "\n\n" if tail else "") + rem
@@ -804,9 +876,9 @@ def event_entries(events: str) -> tuple[str, list[str]]:
 
 
 def summary_append_request(head: str, last_entries: list[str], turns: list[dict], next_no: int) -> list[dict]:
-    transcript = "\n\n".join(("PLAYER: " if t["role"] == "user" else "NARRATOR: ") + t["text"] for t in turns)
+    transcript_ = transcript(turns)
     content = (f"CURRENT STATUS:\n{head}\n\nLAST FEW EVENT ENTRIES:\n{chr(10).join(last_entries) or '(none yet)'}\n\n"
-               f"The next entry is number {next_no}.\n\nNEW STORY TEXT:\n{transcript}")
+               f"The next entry is number {next_no}.\n\nNEW STORY TEXT:\n{transcript_}" + DIGEST_NOTE * ("one-line digest" in transcript_))
     return [{"role": "user", "content": content}]
 
 
@@ -897,8 +969,112 @@ def memory_block(story: dict) -> str:
             + "\n".join(rows)) if rows else ""
 
 
+# ---------- turn digests (one line per exchange, written by the helper AI right after each reply; see main.py `_events_after_turn`) ----------
+def digests_on() -> bool:
+    return bool(store.load_config().get("turn_digests", True))
+
+
+def transcript(turns: list[dict], use_digests: bool | None = None) -> str:
+    """The turns as text for the memory writer. A reply that has a digest is given as its one-line digest (the player's move is kept, cut at 500
+    characters); a reply without one is given word for word."""
+    use = digests_on() if use_digests is None else use_digests
+    out = []
+    for i, t in enumerate(turns):
+        if t["role"] == "user":
+            nxt = turns[i + 1] if i + 1 < len(turns) else None
+            short = use and nxt and nxt["role"] == "assistant" and nxt.get("digest")
+            out.append("PLAYER: " + (t["text"][:500] + ("…" if len(t["text"]) > 500 else "") if short else t["text"]))
+        elif use and t.get("digest"):
+            out.append("NARRATOR (one-line digest of the reply): " + t["digest"])
+        else:
+            out.append("NARRATOR: " + t["text"])
+    return "\n\n".join(out)
+
+
+_STOP = frozenset("""the and for she her hers his him you your yours not but was were are has had have can could would should will with from into onto than then that this
+these those they them their there here what when where which while who whom why how all any each few more most other some such only own same too very just also still
+about above after again against also another because been before being below between both brought does doing down during even every further herself himself itself like made make
+many much must myself over said say says under until want went once ever back first next last one two three off out our ours ask asked asks look looks looked turn turns
+player narrator you're i'm it's don't didn't isn't wasn't can't won't let lets get got gets going goes take takes took come comes came see sees saw tell tells told""".split())
+MEMORY_PULL_CHARS = 1300       # size of the note of matching older events
+MEMORY_PULL_MAX = 5            # at most this many older events in it
+
+
+DIGEST_NOTE = "\n\n(Some replies are given as one-line digests written right after each reply: treat each digest as the full account of that reply and keep its names, numbers, promises and consequences.)"
+
+
+def _words(text: str) -> set[str]:
+    """Lowercase words of three letters or more, without filler words; a possessive or plain plural is cut back (Mara's -> mara, doors -> door)."""
+    out = set()
+    for w in re.findall(r"[a-z][a-z'\-]{2,}", (text or "").lower()):
+        w = w.strip("'-")
+        w = w[:-2] if w.endswith("'s") else w
+        if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        if len(w) >= 3 and w not in _STOP:
+            out.add(w)
+    return out
+
+
+def relevant_events(story: dict) -> str:
+    """Older events that match what is happening now, picked in code (no AI call) from the digests of turns the memory summary already covers:
+    the words of the player's newest move (counted three times) and of the narrator's last reply are matched against each digest and its key words,
+    rarer words counting more. This puts details the summary had to squeeze (a promise, an item, what happened at a place) back in front of the narrator
+    exactly when the scene touches them. Newest turn only, so the cached part of the prompt stays unchanged."""
+    cfg = store.load_config()
+    if not cfg.get("memory_pull", True) or not cfg.get("turn_digests", True):
+        return ""
+    turns = story.get("turns") or []
+    upto = min(story.get("summary_upto", 0), len(turns))
+    cands = [(i, t) for i, t in enumerate(turns[:upto]) if t["role"] == "assistant" and t.get("digest")]
+    if len(cands) < 6 or not turns or turns[-1]["role"] != "user":
+        return ""
+    docs = []
+    for i, t in cands:
+        keys = _words(" ".join(t.get("dkeys") or []))
+        docs.append((i, t, _words(t["digest"]) | keys, keys))
+    n = len(docs)
+    df: dict[str, int] = {}
+    for _, _, ws, _ in docs:
+        for w in ws:
+            df[w] = df.get(w, 0) + 1
+    import math
+    idf = lambda w: math.log(1 + n / df[w])
+    query: dict[str, float] = {}
+    prev = turns[-2]["text"][-3000:] if len(turns) >= 2 and turns[-2]["role"] == "assistant" else ""
+    for w in _words(prev):
+        query[w] = 0.5                  # who and what the last reply was about (counts half)
+    mine = _words(turns[-1]["text"])
+    for w in mine:
+        query[w] = 3.0                  # what the player just said (counts six times as much)
+    scored = []
+    for i, t, ws, keys in docs:
+        hit = [w for w in query if w in ws]
+        if not hit:
+            continue
+        score = sum(idf(w) * query[w] * (2 if w in keys else 1) for w in hit)
+        move_score = sum(idf(w) * 3.0 * (2 if w in keys else 1) for w in hit if w in mine)
+        key_score = sum(idf(w) * query[w] * 2 for w in hit if w in keys)
+        if move_score < 2.5 and key_score < 4.0:               # a match needs something from the move, or several rare people/places of the scene (key words)
+            continue
+        scored.append((score, i, t))
+    if not scored:
+        return ""
+    top = max(x[0] for x in scored)
+    scored = [x for x in scored if x[0] >= 0.4 * top]            # only the clearly better matches
+    picked = sorted(sorted(scored, key=lambda x: -x[0])[:MEMORY_PULL_MAX], key=lambda x: x[1])
+    lines, size = [], 0
+    for _, i, t in picked:
+        line = f"- (Turn {i // 2 + 1}) {t['digest'].strip()}"
+        if size + len(line) > MEMORY_PULL_CHARS:
+            break
+        lines.append(line); size += len(line)
+    return ("[OLDER EVENTS THAT MATCH THIS SCENE, for the narrator only: details from earlier turns that the story summary may have squeezed; stay consistent with them, do not recite them]\n"
+            + "\n".join(lines)) if lines else ""
+
+
 def summary_request(old_summary: str, turns: list[dict], logs: str = "") -> list[dict]:
-    transcript = "\n\n".join(("PLAYER: " if t["role"] == "user" else "NARRATOR: ") + t["text"] for t in turns)
+    transcript_ = transcript(turns)
     extra = f"CHARACTER LOGS (kept separately; do not repeat these details):\n{logs}\n\n" if logs else ""
-    content = f"EXISTING SUMMARY:\n{old_summary or '(none yet)'}\n\n{extra}NEW EVENTS:\n{transcript}\n\nWrite the updated summary."
+    content = f"EXISTING SUMMARY:\n{old_summary or '(none yet)'}\n\n{extra}NEW EVENTS:\n{transcript_}\n\nWrite the updated summary." + DIGEST_NOTE * ("one-line digest" in transcript_)
     return [{"role": "user", "content": content}]

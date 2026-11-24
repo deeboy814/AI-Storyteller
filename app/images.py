@@ -14,6 +14,7 @@ import base64
 import copy
 import io
 import json
+import logging
 import os
 import random
 import re
@@ -153,11 +154,13 @@ def _tw_num(tw: dict, key: str, lo: float, hi: float):
         return None
 
 
-def parse_loras(text) -> list[tuple[str, float]]:
-    """The LoRA list from a checkpoint's settings: one per line, "file.safetensors @ 0.8" (no "@" = strength 1). Strength is kept between -2 and 2."""
+def _lora_lines(text) -> list[tuple[str, float, str | None]]:
+    """The LoRA list from a checkpoint's settings: one per line, "file.safetensors @ 0.8 | trigger words" (no "@" = strength 1; no "|" = the trigger words are looked up in the file;
+    "| none" = this LoRA needs none). Strength is kept between -2 and 2."""
     out = []
     for ln in re.split(r"[\n;]", str(text or "")):
-        name, _, st = ln.strip().partition("@")
+        head, bar, trig = ln.strip().partition("|")
+        name, _, st = head.partition("@")
         name = name.strip()
         if not name:
             continue
@@ -165,8 +168,39 @@ def parse_loras(text) -> list[tuple[str, float]]:
             s = max(-2.0, min(2.0, float(st))) if st.strip() else 1.0
         except ValueError:
             s = 1.0
-        out.append((name, s))
+        out.append((name, s, trig.strip() if bar else None))
     return out[:6]
+
+
+def parse_loras(text) -> list[tuple[str, float]]:
+    return [(n, s) for n, s, _ in _lora_lines(text)]
+
+
+def lora_trigger_words(text) -> list[str]:
+    """The words the LoRAs in this list need in the prompt to show their effect: the ones written after "|" on the line, else (nothing written) the file's own notes or header, read from
+    ComfyUI's loras folder. A guess from a trainer's tag list is only used when it is written on the line (the settings screens fill it in, so the player can see and change it)."""
+    out: list[str] = []
+    for name, _, trig in _lora_lines(text):
+        if trig is None:
+            try:
+                from . import catalog
+                r = catalog.lora_triggers(name)
+                trig = r["trigger"] if r.get("source") in ("notes", "header") else ""
+            except Exception:
+                trig = ""
+        if trig.lower() in ("none", "-", "no"):
+            continue
+        for w in re.split(r"\s*,\s*", trig):
+            if w.strip() and w.strip().lower() not in (x.lower() for x in out):
+                out.append(w.strip())
+    return out
+
+
+def with_trigger_words(prompt: str, words: list[str]) -> str:
+    """The trigger words go first (the way LoRAs are trained), except those the prompt already has."""
+    low = (prompt or "").lower()
+    add = [w for w in words if not re.search(r"(?<![\w-])" + re.escape(w.lower()) + r"(?![\w-])", low)]
+    return (", ".join(add) + ", " + prompt) if add and prompt else ", ".join(add) if add else prompt
 
 
 _MODEL_LOADERS = ("CheckpointLoaderSimple", "CheckpointLoader", "UNETLoader", "UnetLoaderGGUF", "DiffusionModelLoader")
@@ -307,6 +341,22 @@ async def stop_all() -> None:
             pass
 
 
+def _warn_lora_family(model: str, loras: list[tuple[str, float]]) -> None:
+    """A LoRA made for another kind of model is applied without any error and changes nothing: say so in the server log (only for models the app can tell the kind of)."""
+    try:
+        from . import catalog
+        if not catalog.diffusion_kind(model):
+            return
+        mf = catalog.model_family(model)
+        for name, _ in loras:
+            lf = catalog.lora_family(name)
+            if catalog.lora_fits(mf, lf) == "no":
+                logging.getLogger("uvicorn.error").warning("LoRA %s was made for %s, not %s (%s): it will load without an error but change nothing.",
+                                                         name, catalog.LORA_FAMILY_LABEL.get(lf, lf), catalog.LORA_FAMILY_LABEL.get(mf, mf), model)
+    except Exception:
+        pass
+
+
 async def _comfyui(p, prompt, negative, shape, refs, seed):
     base = (p.get("base_url") or "http://127.0.0.1:8188").rstrip("/")
     STOP["bases"].add(base)
@@ -333,7 +383,10 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
             refs = [(face_region(d, p.get("_tight_face") or False), "image/png") for d, m in refs]
     loras = parse_loras(tw.get("loras"))      # LoRAs chosen for this checkpoint (Settings -> Pictures -> Local)
     if loras:
+        _warn_lora_family(p.get("model", ""), loras)
+    if loras:
         wf = add_loras(wf, loras)
+        prompt = with_trigger_words(prompt, lora_trigger_words(tw.get("loras")))      # a LoRA only shows its effect when its trigger words are in the prompt
     # optional tweaks added to every picture; a checkpoint's own words replace the shared ones
     xpos = (tw.get("extra_positive") or "").strip() or (p.get("extra_positive") or "").strip()
     xneg = (tw.get("extra_negative") or "").strip() or (p.get("extra_negative") or "").strip()
@@ -360,7 +413,7 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
             wf = fill_workflow(wf, values)
             sub = await c.post(base + "/prompt", json={"prompt": wf, "client_id": uuid.uuid4().hex})
             if sub.status_code >= 400 and "lora_name" in sub.text and "not in list" in sub.text.lower():
-                raise ImageError("A LoRA chosen for this checkpoint is not in ComfyUI's loras folder (or its name changed). Remove it or pick another under Settings → Pictures → Local → Settings for this checkpoint.")
+                raise ImageError("A LoRA chosen for this checkpoint is not in ComfyUI's loras folder (or its name changed). Remove it or pick another under 🖼 Art → Picture makers → Picture settings (Settings for this model).")
             if sub.status_code >= 400:
                 raise ImageError(f"ComfyUI rejected the workflow ({sub.status_code}): {sub.text[:600]}")
             pid = sub.json()["prompt_id"]
@@ -531,8 +584,10 @@ async def animate(provider: dict, still: bytes, prompt: str, size: tuple[int, in
     The workflow gets {{ref1}} (the picture), {{prompt}}, {{negative}}, {{seed}}, {{width}}, {{height}}."""
     wf = (provider.get("video_workflow") or "").strip()
     if provider.get("type") != "comfyui" or not wf:
-        raise ImageError("Animating needs a ComfyUI picture maker with a Video workflow filled in (Settings → Pictures → Local).")
+        raise ImageError("Animating needs a ComfyUI picture maker with a Video workflow filled in (🖼 Art → Picture makers → Video generation).")
     vm, vl = (provider.get("video_model") or "").strip(), parse_loras(provider.get("video_loras"))
+    if vl:
+        prompt = with_trigger_words(prompt, lora_trigger_words(provider.get("video_loras")))      # video LoRAs that need a trigger word get it in the motion prompt
     if vm or vl:       # the app-wide video model and LoRAs (Settings -> Picture makers -> Local)
         try:
             wf = json.dumps(apply_video_settings(json.loads(wf), vm, vl))
@@ -571,6 +626,15 @@ async def generate(provider: dict, prompt: str, negative: str = "", shape: str =
         held.__enter__()       # never stopped by the idle timer while drawing (a slow first load can take minutes)
     try:
         data = await fn(provider, prompt, negative, shape, list(refs or []), seed)
+        if local and provider.get("nsfw_maker") and refs and not provider.get("_video") and provider.get("check_faces", True):
+            # A reference-picture maker sometimes draws the character twice (two heads): count the faces and redraw with another seed, up to twice
+            from . import facecheck
+            for _try in range(2):
+                n = await facecheck.count_faces(data)
+                if n is None or n < 2 or _stopped(t0):
+                    break
+                logging.getLogger("uvicorn.error").info("Adult picture showed %d faces; redrawing with another seed.", n)
+                data = await fn(provider, prompt, negative, shape, list(refs or []), random.randint(0, 2**32 - 1))
     finally:
         if held:
             held.__exit__(None, None, None)
@@ -650,10 +714,15 @@ MOOD_EMPHASIS = ("The mood must be unmistakable at a glance: show it strongly in
                  "Frame from the waist up so the hands and posture are visible.")
 
 
-def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has_ref: bool, ext_only: bool = False, nsfw: bool = False, species_ref: str = "", framing: str = "", own_clothes: bool = True) -> str:
+def portrait_prompt(art: dict, name: str, appearance: str, mood: str | None, has_ref: bool, ext_only: bool = False, nsfw: bool = False, species_ref: str = "", framing: str = "", own_clothes: bool = True, species_clothes: str = "") -> str:
     head = plain(art.get("direction") or "").strip()
     if species_ref:   # the only reference is the first picture of this species: a different individual of the same kind
-        body = (f"The reference picture shows another member of the same species ({species_ref}). Draw a DIFFERENT individual of that species: {name}: {appearance}. "
+        if species_clothes:     # two references: the first shows a member of the species, the second the clothing it wears
+            lead = (f"The first reference picture shows another member of the same species ({species_ref}). The second reference picture shows the {species_clothes} clothing this species wears: "
+                    f"dress {name} in clothing of that style, cut and colours (do not copy that person's face or body). ")
+        else:
+            lead = f"The reference picture shows another member of the same species ({species_ref}). "
+        body = (lead + f"Draw a DIFFERENT individual of that species: {name}: {appearance}. "
                 f"Keep what is true of the whole species (skin or covering, ears, crests, eyes, build, proportions, clothing style) but give this individual their own face and features; "
                 f"do NOT copy the reference's face. " + (f"Expression: {mood}. " if mood else "Neutral expression. ") + "Upper body portrait (framed from the chest up), facing the viewer, simple soft background.")
     elif ext_only:   # the only references come from ANOTHER story, drawn in a different style and outfit

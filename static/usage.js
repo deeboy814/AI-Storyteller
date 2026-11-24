@@ -13,7 +13,7 @@ async function showUsage(opts = {}) {
     <td><select data-k="kind"><option value="text" ${p.kind !== "image" ? "selected" : ""}>text</option><option value="image" ${p.kind === "image" ? "selected" : ""}>picture</option></select></td>
     <td><input data-k="input" type="number" step="any" value="${p.input ?? ""}" placeholder="in"></td><td><input data-k="output" type="number" step="any" value="${p.output ?? ""}" placeholder="out"></td>
     <td><input data-k="cache_read" type="number" step="any" value="${p.cache_read ?? ""}" placeholder="cached in"></td><td><input data-k="per_image" type="number" step="any" value="${p.per_image ?? ""}" placeholder="per pic"></td></tr>`;
-  modal(`<h2>Usage &amp; cost</h2>
+  modal(`<h2>💲 Usage &amp; cost</h2>
     <div class="grid2"><div><label>Period</label><select id="uDays">${[[1, "Last 24 hours"], [7, "Last 7 days"], [30, "Last 30 days"], [0, "All time"]].map(([d, n]) => `<option value="${d}" ${d === days ? "selected" : ""}>${n}</option>`).join("")}</select></div>
     <div><label>Show</label><select id="uScope"><option value="all">All stories</option>${story ? `<option value="story" ${scope === "story" ? "selected" : ""}>Only “${esc(story.title)}”</option>` : ""}</select></div><div></div></div>
     <div class="hint" id="uBudget"></div>

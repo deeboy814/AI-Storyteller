@@ -144,7 +144,7 @@ function panelSidebarHtml() {
   const panes = [["status", "Status", info], ["rel", "Relations", rel], ["cast", artN ? "Cast 🎨" : "Cast", castH], ["items", "Items", itemsHtml], ["quests", qn ? `Quests · ${qn}` : "Quests", qh]].filter((x) => x[2]);
   if (!panes.some((x) => x[0] === panelTab)) panelTab = panes[0][0];
   const chgbar = `<div class="chgbar${changes.length ? "" : " none"}" title="${esc(list.join("\n") || "Nothing changed in the last reply")}">${changes.length ? `● ${changes.length} change${changes.length > 1 ? "s" : ""} this turn` : "No changes this turn"}</div>`;
-  const tabs = `<div class="ptabs">${panes.length > 1 ? panes.map((x) => `<button class="ptab${x[0] === panelTab ? " on" : ""}" data-tab="${x[0]}">${esc(x[1])}</button>`).join("") : `<span class="ptitle">${esc(panes[0][1])}</span>`}<button class="pmin" title="${panelMin ? "Show the panel" : "Minimize the panel"}">${panelMin ? "▸" : "▾"}</button></div>`;
+  const tabs = `<div class="ptabs">${panes.length > 1 ? panes.map((x) => `<button class="ptab${x[0] === panelTab ? " on" : ""}" data-tab="${x[0]}">${esc(x[1])}</button>`).join("") : `<span class="ptitle">${esc(panes[0][1])}</span>`}${(story.sidebar || {}).editable ? `<button class="pedit" title="Edit the values by hand">✎</button>` : ""}<button class="pmin" title="${panelMin ? "Show the panel" : "Minimize the panel"}">${panelMin ? "▸" : "▾"}</button></div>`;
   return chgbar + tabs + (panelMin ? "" : panes.filter((x) => x[0] === panelTab).map((x) => `<div class="ppane">${x[2]}</div>`).join(""));
 }
 
@@ -152,6 +152,7 @@ function bindPanel(el) {   // tab clicks, minimize, quest rows (called after the
   const keep = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* not saved */ } };
   el.querySelectorAll(".ptab").forEach((b) => b.onclick = () => { panelTab = b.dataset.tab; panelMin = false; keep("panelTab", panelTab); keep("panelMin", "0"); renderSidebar(); });
   const ye = el.querySelector(".youedit"); if (ye) ye.onclick = () => showPlayer();
+  const pe = el.querySelector(".pedit"); if (pe) pe.onclick = () => showTrackerValues();
   const m = el.querySelector(".pmin"); if (m) m.onclick = () => { panelMin = !panelMin; keep("panelMin", panelMin ? "1" : "0"); renderSidebar(); };
   el.querySelectorAll(".spend").forEach((b) => b.onclick = () => spendPoint(b.dataset.id, +b.dataset.n));
   const cp = el.querySelector(".clockpill"); if (cp) cp.onclick = async () => { const t = prompt("Set the in-world time and/or day (for example 14:30, Tuesday, or Tuesday 2:30 pm):"); if (!t) return; try { const r = await api(`/stories/${story.id}/clock/set`, { method: "POST", body: { time: t } }); story = r.story; renderSidebar(); } catch (e) { alert(e.message); } };
@@ -240,7 +241,7 @@ function trackerEditor(el, initial, ctx) {
         } catch (err) { msg.textContent = err.message; e.target.disabled = false; }
       };
     });
-    el.querySelector(".tadd").onclick = () => { sync(); if (list.length < 24) list.push({ label: "", scope: "me", kind: "slider", min: 0, max: 100 }); draw(); const ins = el.querySelectorAll('.trow [data-k="label"]'); if (ins.length) ins[ins.length - 1].focus(); };
+    el.querySelector(".tadd").onclick = () => { sync(); if (list.length < 40) list.push({ label: "", scope: "me", kind: "slider", min: 0, max: 100 }); draw(); const ins = el.querySelectorAll('.trow [data-k="label"]'); if (ins.length) ins[ins.length - 1].focus(); };
   };
   draw();
   return { get: () => { sync(); return list.filter((f) => (f.label || "").trim()); } };
@@ -305,7 +306,7 @@ function fillPoints(p) {
 async function showPoints() {
   if (!story) return;
   let p; try { p = await api(`/stories/${story.id}/points`); story = await api("/stories/" + story.id); renderSidebar(); } catch (e) { alert(e.message); return; }
-  if (!p.on) { alert("This story has no points to spend. Set up a Points tracker with a “spend points on” list under Settings → Story & narration → Side panel."); return; }
+  if (!p.on) { alert("This story has no points to spend. Set up a Points tracker with a “spend points on” list under the story's ⚙ Writing & panel tab → Side panel."); return; }
   modal(`<h2>⭐ Spend your ${esc(p.label.toLowerCase())}</h2>
     <p class="hint">Spend them on the stats and skills below. The narrator is told the final numbers with your next move and cannot assign points itself. You can take back points you spent since your last move.${p.cap ? ` A stat cannot go above ${p.cap} this way.` : ""}</p>
     <div class="ptsleft" id="ptsLeft"></div><div id="ptsList"></div>
@@ -325,4 +326,49 @@ async function maybeAskPoints() {
   try { if (localStorage.getItem("pointsAsked:" + story.id)) return; } catch (e) { /* ask */ }
   if (!activeFields().some((f) => (f.spend_on || []).length)) return;
   try { const p = await api(`/stories/${story.id}/points`); if (p.on && p.points > 0) showPoints(); } catch (e) { /* optional */ }
+}
+
+
+// ---- hand-edit the side panel's values (only when the story's "Let me edit the side panel" is on; the story's ⚙ Writing & panel tab → Side panel)
+function showTrackerValues() {
+  const tr = story.tracker || {}, F = activeFields().filter((f) => ["text", "number", "slider", "status", "pair"].includes(f.kind) && !f.hidden && !f.counts && !f.levels);
+  const cur = (sec, k, n) => (n ? ((tr.chars || {})[n] || {})[k] : (tr[sec] || {})[k]);
+  const input = (f, val, attrs) => {
+    const v = val == null ? "" : String(val);
+    if (f.kind === "status" && (f.options || []).length) return `<select ${attrs}><option value=""></option>${f.options.map((o) => `<option ${o === v ? "selected" : ""}>${esc(o)}</option>`).join("")}${v && !f.options.includes(v) ? `<option selected>${esc(v)}</option>` : ""}</select>`;
+    if (f.kind === "number" || f.kind === "slider") return `<input type="number" step="any" ${f.kind === "slider" ? `min="${f.min ?? 0}" max="${f.max ?? 100}"` : ""} value="${esc(v)}" ${attrs}>`;
+    return v.length > 60 || v.includes("\n") ? `<textarea rows="3" ${attrs}>${esc(v)}</textarea>` : `<input value="${esc(v)}" ${attrs}>`;
+  };
+  const sect = (sec, title) => { const fs = F.filter((f) => f.id.startsWith(sec + ".")); return fs.length ? `<h3>${title}</h3>${fs.map((f) => `<div class="field"><label>${esc(f.label)}</label>${input(f, cur(sec, f.id.split(".")[1]), `data-s="${sec}" data-k="${f.id.split(".")[1]}"`)}</div>`).join("")}` : ""; };
+  const cf = F.filter((f) => f.id.startsWith("chars.")), names = Object.keys(tr.chars || {});
+  const charBlock = (n) => `<div class="tvchar" data-n="${esc(n)}"><div class="row"><b>${esc(n)}</b> <button class="x tvdel" title="Remove ${esc(n)} from the panel">×</button></div>${cf.map((f) => `<div class="field"><label>${esc(f.label)}</label>${input(f, cur("chars", f.id.split(".")[1], n), `data-s="chars" data-n="${esc(n)}" data-k="${f.id.split(".")[1]}"`)}</div>`).join("")}</div>`;
+  modal(`<h2>Edit the side panel</h2><p class="hint">Change any value, or empty it to clear it. Your edits stick: the narrator is told about them and an old value it repeats from earlier replies is ignored (it still changes them when the story really does). Quests and the app's own counters are not editable here.</p>
+    <div class="stpane">${sect("scene", "Scene")}${sect("me", "You")}
+    ${cf.length ? `<h3>Characters</h3><div id="tvChars">${names.map(charBlock).join("")}</div><div class="actions" style="justify-content:flex-start"><input id="tvNew" placeholder="Add a character by name" style="max-width:240px"><button id="tvAdd">＋ Add</button></div>` : ""}
+    <div id="tvMsg" class="hint"></div></div>
+    <div class="actions sticky"><button id="mClose">Cancel</button><button class="primary" id="mGo">Save changes</button></div>`);
+  $("modalCard").classList.add("tall");
+  const removed = new Set();
+  const bindDel = (root) => root.querySelectorAll(".tvdel").forEach((b) => b.onclick = () => { const bl = b.closest(".tvchar"); removed.add(bl.dataset.n); bl.remove(); });
+  bindDel($("modal"));
+  if ($("tvAdd")) $("tvAdd").onclick = () => { const n = $("tvNew").value.trim(); if (!n || document.querySelector(`.tvchar[data-n="${CSS.escape(n)}"]`)) return; removed.delete(n); $("tvChars").insertAdjacentHTML("beforeend", charBlock(n)); bindDel($("tvChars")); $("tvNew").value = ""; };
+  $("mClose").onclick = () => closeModal();
+  $("mGo").onclick = async () => {
+    const values = { scene: {}, me: {}, chars: {} };
+    document.querySelectorAll("#modal [data-s]").forEach((el) => {
+      const sec = el.dataset.s, k = el.dataset.k, was = cur(sec, k, el.dataset.n), now = el.value.trim();
+      if (String(was == null ? "" : was) === now) return;
+      if (sec === "chars") (values.chars[el.dataset.n] = values.chars[el.dataset.n] || {})[k] = now; else values[sec][k] = now;
+    });
+    removed.forEach((n) => { if (names.includes(n)) values.chars[n] = null; });
+    for (const n of names) if (!document.querySelector(`.tvchar[data-n="${CSS.escape(n)}"]`)) values.chars[n] = null;
+    document.querySelectorAll(".tvchar").forEach((bl) => { const n = bl.dataset.n; if (!names.includes(n)) { const row = {}; bl.querySelectorAll("[data-k]").forEach((el) => { if (el.value.trim()) row[el.dataset.k] = el.value.trim(); }); values.chars[n] = row; } });
+    $("mGo").disabled = true;
+    try {
+      const r = await api(`/stories/${story.id}/tracker/values`, { method: "PUT", body: { values } });
+      story.tracker = r.tracker;
+      if (r.errors && r.errors.length) { $("tvMsg").textContent = "Saved, but some values did not fit and were left as they were: " + r.errors.join("; "); renderSidebar(); $("mGo").disabled = false; return; }
+      closeModal(); renderSidebar();
+    } catch (e) { $("mGo").disabled = false; $("tvMsg").textContent = e.message; }
+  };
 }

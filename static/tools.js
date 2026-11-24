@@ -68,7 +68,7 @@ function renderNarrativeKeepScroll() { const box = $("narrative"), y = box.scrol
 // ---------- search & bookmarks ----------
 function showSearch(initialTab = "Search") {
   if (!story) return;
-  modal(`<h2>Search</h2><div class="tabs"><button class="tab stab" data-t="Search">Search</button><button class="tab stab" data-t="Bookmarks">Bookmarks (${story.turns.filter((t) => t.bookmark).length})</button></div>
+  modal(`<h2>🔍 Search</h2><div class="tabs"><button class="tab stab" data-t="Search">Search</button><button class="tab stab" data-t="Bookmarks">Bookmarks (${story.turns.filter((t) => t.bookmark).length})</button></div>
     <div id="sSearch"><input id="sQ" placeholder="Find text in this story (names, places, words)…" autofocus><div id="sRes"></div></div>
     <div id="sMarks" class="hidden"></div><div class="actions"><button id="mClose">Close</button></div>`);
   $("mClose").onclick = closeModal;
@@ -249,7 +249,7 @@ async function showVoices() {
   const opts = (sel) => `<option value="">(same as narrator)</option>` + (pv.length ? `<optgroup label="Neural voices (on this computer)">${pv.map((id) => `<option value="piper:${esc(id)}" ${"piper:" + id === sel ? "selected" : ""}>${esc(pname(id))}</option>`).join("")}</optgroup>` : "")
     + `<optgroup label="Browser voices">${vs.map((v) => `<option value="${esc(v.name)}" ${v.name === sel ? "selected" : ""}>${esc(v.name)} (${esc(v.lang)})</option>`).join("")}</optgroup>`;
   const narrOpts = (sel) => opts(sel || (pv.length ? "piper:" + pv[0] : "")).replace('<option value="">(same as narrator)</option>', "");
-  modal(`<h2>Read-aloud voices</h2><p class="hint">Speech is made on this computer, so nothing is sent anywhere. Voices are saved on this device. Speaker lines (<code>**Name** | "…"</code>) use that character's voice; everything else uses the narrator.</p>
+  modal(`<h2>🔊 Read-aloud voices</h2><p class="hint">Speech is made on this computer, so nothing is sent anywhere. Voices are saved on this device. Speaker lines (<code>**Name** | "…"</code>) use that character's voice; everything else uses the narrator.</p>
     ${noLang ? `<p class="hint" style="color:var(--danger)">Your computer has no ${lang0.toUpperCase()} voice installed, so speech will sound garbled. Install a neural voice below, or on Linux install a system voice with <code>sudo apt install speech-dispatcher espeak-ng</code>, then restart the browser.</p>` : ""}
     <details class="aiBox" ${pv.length ? "" : "open"}><summary><b>Neural voices</b> <span class="hint">${pv.length ? pv.length + " installed" : "optional download: natural-sounding speech"}</span></summary>
       <p class="hint">Natural-sounding voices from the free Piper project. They run on this computer (no account, no cost). ${ps && ps.engine ? "The voice engine is installed." : "The first voice also installs the voice engine (about 35 MB from PyPI)."} Each voice is one download of about 63 MB from the Piper voices collection on Hugging Face, kept in the app's data/voices folder.</p>
@@ -422,18 +422,22 @@ async function maybeAskDice(tries = 0) {
       ? "Its prompt already talks about rolls, so the app would roll for risky moves by itself."
       : "Dice make outcomes fair: when your move is risky, the app rolls a d20 plus your stat against a difficulty and the narrator must play out the result, so the story cannot simply let you win."}
       Choose how you want them (you can change this later in ⚡ → 🎲).</p>
+    <label>Game difficulty <select id="dcScale">${Object.entries(d.scales).map(([k, v]) => `<option value="${esc(k)}" ${k === d.suggested_scale ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></label>
+    <div class="hint" id="dcScaleHint"></div>
     <div class="actions" style="justify-content:flex-start;flex-wrap:wrap">
       <button class="primary" id="dcAuto">${d.prompt_calls_for_checks ? "Keep automatic dice" : "Turn on automatic dice"}</button>
       <button id="dcMan">Only when I press 🎲</button><button id="dcOff">No dice</button></div>
     <div class="hint" id="dcMsg">${d.prompt_calls_for_checks ? "" : "Automatic also adds a short dice rule to the story prompt (you can edit it in ✏️ Edit story)."}</div>`);
   const answer = (mode) => async () => {
-    try { await api(`/stories/${sid}/dice/offer`, { method: "POST", body: { mode } }); story = await api(`/stories/${sid}`); } catch (e) { $("dcMsg").textContent = e.message; return; }
+    try { await api(`/stories/${sid}/dice/offer`, { method: "POST", body: { mode, scale: $("dcScale").value } }); story = await api(`/stories/${sid}`); } catch (e) { $("dcMsg").textContent = e.message; return; }
     closeModal(); renderAll(false);
   };
+  const showScale = () => { $("dcScaleHint").textContent = (d.scales[$("dcScale").value] || {}).hint || ""; };
+  $("dcScale").onchange = showScale; showScale();
   $("dcAuto").onclick = answer("auto"); $("dcMan").onclick = answer("manual"); $("dcOff").onclick = answer("off");
 }
 
-// ---- 🎲 dice: the app rolls d20 + the stat's bonus (stat - 5, easing off above 10) against a difficulty and sends the result with your move
+// ---- 🎲 dice: the app rolls d20 + the stat's bonus (by the story's game difficulty: easy, normal or hard) against a difficulty and sends the result with your move
 async function diceForm() {
   const box = $("qDice"); if (!box || !story) return;
   if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
@@ -444,10 +448,8 @@ async function diceForm() {
     <label>Difficulty <select id="dDiff">${Object.entries(d.difficulties).map(([k, v]) => `<option value="${esc(k)}" ${k === d.difficulty ? "selected" : ""}>${esc(k)} (${v})</option>`).join("")}</select></label>
     <label>Dice <select id="dAdv"><option value="">one d20</option><option value="adv">advantage (best of two)</option><option value="dis">disadvantage (worst of two)</option></select></label>
     <button class="primary" id="dGo">🎲 Roll and send</button></div>
-    <div class="hint">Your move is whatever is in the box (or “I attempt it.”). Result = d20 + the stat's bonus (stat − 5, easing off above 10 so a high-level stat stays meaningful) against the difficulty; the app rolls, so the narrator cannot fudge it.</div>
-    <div class="lrow" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px"><label>Automatic rolls <select id="dMode"><option value="">Let the story prompt decide (${d.prompt_calls_for_checks ? "it calls for rolls: automatic" : "it does not mention rolls: only when I press 🎲"})</option><option value="auto">Automatic: the app rolls for risky actions</option><option value="manual">Only when I press 🎲</option><option value="off">Never</option></select></label></div></div>`;
-  $("dMode").value = d.mode || "";
-  $("dMode").onchange = () => api(`/stories/${story.id}/dice`, { method: "PUT", body: { mode: $("dMode").value } }).catch((e) => alert(e.message));
+    <div class="hint">Your move is whatever is in the box (or “I attempt it.”). Result = d20 + the stat's bonus against the difficulty; the app rolls, so the narrator cannot fudge it. Automatic rolls and the game difficulty (<b>${esc((d.scales[d.scale] || {}).label || d.scale)}</b>) are set in 📝 Story → Story → Options.</div>
+</div>`;
   $("dGo").onclick = async () => {
     if (busy) return;
     try {

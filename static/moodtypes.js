@@ -68,7 +68,7 @@ async function showMoodTypes(startName, back) {
       <div class="mthead"><input id="mtName" value="${esc(m.name)}" ${isNew ? "" : "disabled"} placeholder="Name, for example blushing or spooning"><span class="hint">${isNew ? "This is the name the narrator uses in a portrait tag." : m.builtin ? (m.edited ? "Built in, changed by you." : "Built in.") : "Made by you."}</span></div>
       <div class="grid2" style="grid-template-columns:1fr 1fr">
         <div><label>Category</label><select id="mtCat">${cats.map((c) => `<option value="${esc(c.id)}" ${m.category === c.id ? "selected" : ""}>${esc(c.name)}${c.nsfw ? " (adult)" : ""}</option>`).join("")}</select></div>
-        <div><label>Also in the sets</label><div class="mtsets"><label class="chk"><input type="checkbox" id="mtBasic" ${(m.sets || []).includes("basic") ? "checked" : ""}> Basic</label> <label class="chk"><input type="checkbox" id="mtExt" ${(m.sets || []).includes("extended") ? "checked" : ""}> Extended</label> <label class="chk"><input type="checkbox" id="mtFull" ${(m.sets || []).includes("full") ? "checked" : ""}> Full</label></div></div></div>
+        <div><label>Also in the sets</label><div class="mtsets"><label class="chk"><input type="checkbox" id="mtBasic" ${(m.sets || []).includes("basic") ? "checked" : ""}> Basic</label> <label class="chk"><input type="checkbox" id="mtExt" ${(m.sets || []).includes("extended") ? "checked" : ""}> Extended</label></div></div></div>
       <label class="chk top"><input type="checkbox" id="mtNsfw" ${m.nsfw ? "checked" : ""}><span><b>Adult (NSFW)</b><span class="hint" id="mtNsfwHint">Drawn with the adult wording. Hidden from the narrator and from batch drawing unless the story has adult content on.</span></span></label>
       <div class="mtscope"><label class="chk"><input type="radio" name="mtScope" value="all" checked> All my stories</label> <label class="chk"><input type="radio" name="mtScope" value="story"> Only this story (look, frame and tags only${hasStory ? "; this story already has its own wording" : ""})</label></div>
       ${field("mtLook", "Look: what to draw", m.look, 3, "The face AND the body language, in plain words.")}
@@ -106,7 +106,7 @@ async function showMoodTypes(startName, back) {
     const save = async () => {
       const name = ($("mtName").value || "").trim(); if (!name) { $("mtMsg").textContent = "Give it a name."; return false; }
       const d = draft(), sc = scope();
-      const sets = [$("mtBasic").checked ? "basic" : null, $("mtExt").checked ? "extended" : null, $("mtFull").checked ? "full" : null].filter(Boolean);
+      const sets = [$("mtBasic").checked ? "basic" : null, $("mtExt").checked ? "extended" : null].filter(Boolean);
       const body = sc === "story" ? { name, scope: "story", sid: story.id, look: d.look, framing: d.framing, framing_tags: d.framing_tags } : { name, ...d, nsfw: catOf(d.category).nsfw && !d.nsfw ? undefined : d.nsfw, sets };
       try {
         const r = await api("/moods", { method: "PUT", body });

@@ -79,8 +79,10 @@ DEFAULT_CONFIG = {
     "events_mode": "every",     # key events: "every" = after each reply a small text-model call logs important moments per character; "off"
     "char_memory_size": "medium",   # how much of each present character's history the narrator is reminded of: small / medium / large
     "char_memory": True,        # each character's key events are sent to the narrator only while they are in the scene; the shared summary stays short; long logs are condensed
+    "turn_digests": True,       # the per-reply helper call also writes a one-line digest of the exchange; the memory summary reads these instead of the full replies
+    "memory_pull": True,        # each turn, older digests that match the scene (names, places, items) are added to the newest message; lets the summary stay smaller
     "events_model": "",         # "provider|model" for that bookkeeping call ("" = the story's own model; a cheaper or local one is fine)
-    "default_art_direction": "",   # art style new stories start with (chosen under Settings → AI & story)
+    "default_art_direction": "",   # art style new stories start with (chosen under 🖼 Art → Style & options)
     "image_categories": [],   # the groups of picture types (Moods, Actions, Positions, Finishes by default): see moods.py; empty = the defaults
     "mood_defs": {},    # picture types you edited or made (see moods.py): {"blushing": {"look": "...", "framing": "...", "tags": "...", "kind": "expression", "nsfw": false, "note": "when the narrator uses it"}}
     "mood_looks": {},   # what to draw for moods you add yourself: {"blushing": "embarrassed, red cheeks, hand over mouth"}
@@ -128,6 +130,7 @@ def load_config() -> dict:
     if isinstance(cfg.get("mood_sets"), dict):      # sets added after the config was saved (for example "action") are filled in; the player's own lists stay as written
         for k, v in DEFAULT_SETS.items():
             cfg["mood_sets"].setdefault(k, list(v))
+        cfg["mood_sets"].pop("full", None)      # the Extended Full Set (1.8.0) was merged into the Expressions category
     have = {p["id"] for p in cfg["providers"]}
     cfg["providers"] += [json.loads(json.dumps(p)) for p in DEFAULT_CONFIG["providers"] if p["id"] not in have]   # new built-in providers
     # one key serves both the text and the picture side of the same company

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI Storyteller</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="booting">
@@ -27,15 +28,16 @@ window.__bugErr = [];
     <button class="icon hmenu" id="btnMenu" title="Menu: story tools and settings" aria-expanded="false">☰</button>
     <div class="tools" id="tools">
       <select id="modelSelect" title="Model"></select>
+      <select id="imageSelect" title="Picture maker (this story)"></select>
       <button class="icon mobonly lbl" id="btnCast" title="Cast: characters, relationships and gallery">👥 <span>Cast</span></button>
-      <button class="icon" id="btnTools" title="Story tools panel: Cast, Lore library, Avatar, Inventory, Journal, Search">🧰</button>
-      <button class="icon" id="btnSide" title="Status panel">ℹ️</button>
-      <button class="icon" id="btnHome" title="Home: all your stories">🏠</button>
+      <button class="icon" id="btnTools" title="Story tools panel: Cast, Lore library, Avatar, Inventory, Journal, Search">🧰<span class="moblbl"> Tools</span></button>
+      <button class="icon" id="btnSide" title="Status panel">ℹ️<span class="moblbl"> Panel</span></button>
+      <button class="icon" id="btnHome" title="Home: all your stories">🏠<span class="moblbl"> Home</span></button>
       <span class="tsep"></span>
       <button class="icon lbl" id="btnArt" title="Art: every picture tool of this story (characters, species, places, backgrounds, cover, styles, picture makers)">🖼️ <span>Art</span></button>
       <button class="icon lbl" id="btnStory" title="Story: the story itself, narration style and notes, options, memory, beats and endings">📝 <span>Story</span></button>
       <span class="tsep"></span>
-      <button class="icon" id="btnSettings" title="Settings">⚙️</button>
+      <button class="icon" id="btnSettings" title="Settings">⚙️<span class="moblbl"> Settings</span></button>
     </div>
   </header>
 

@@ -13,8 +13,8 @@ from collections import Counter
 # Moods the app knows how to draw for ONE character (see main.MOOD_LOOKS). Moods outside this list (hug, kissing, ...) need
 # other people in the frame or romantic content, so automatic sets never draw them; they can still be uploaded by hand.
 DRAWABLE = {"normal", "laugh", "grin", "cry", "sob", "moved", "awe", "contempt", "flustered", "shame-rage", "ponder", "annoyed", "yawn", "asleep", "scared", "anxious", "joy",
-            "cry-hug", "smile-hug", "shy-hug", "blank", "awkward", "letdown", "proud", "sulk", "worried", "very shy", "stern", "shame", "shock", "panic", "tease", "happy", "kiss",
-            "wedding dress", "suspicion", "fake smile", "woozy", "resign", "smile", "shy", "surprise", "sulky", "fear", "sad", "angry", "scorn", "despair", "combat", "cute", "dead", "zombie",
+            "cry-hug", "smile-hug", "shy-hug", "blank", "awkward", "letdown", "proud", "worried", "very shy", "stern", "shame", "shock", "panic", "tease", "happy", "kiss",
+            "suspicion", "fake smile", "resign", "smile", "shy", "surprise", "sulky", "fear", "sad", "angry", "scorn", "despair", "combat", "cute", "dead", "zombie",
             # action moods (one character in motion; see ACTION_MOODS)
             "strike", "guard", "dodge", "charge", "leap", "aim", "cast", "draw weapon", "wounded", "knocked down", "defeated", "exhausted", "flee", "sneak", "battle cry", "victory"}
 
@@ -46,18 +46,18 @@ DEFAULT_CATEGORIES = [
 ]
 # where the built-in picture types belong. Everything not named here that the app knows as a face-and-feeling is in Expressions; anything it has never heard of is an action.
 BUILTIN_ACTIONS_ADULT = ["aroused", "seductive", "undressing", "lingerie", "showering", "bathing", "nude", "climaxing", "afterglow"]
-BUILTIN_CLOTHED = {"aroused", "seductive"}     # adult pictures that keep the character's usual outfit (the others show the body: no everyday clothes in the look)
+BUILTIN_CLOTHED = {"aroused", "seductive", "undressing"}     # adult pictures that keep the character's current outfit (undressing = taking that outfit off; the others show the body: no everyday clothes in the look)
 
-# The Extended Full Set: every face and feeling the app can draw for one character (a set in the Draw menus, next to Basic and Extended). The looks and tags are in main.py.
+# The extra faces and feelings built in beyond Basic and Extended (they are in the Expressions category: "All: Expressions" draws them). The looks and tags are in main.py.
+# (This was the "Extended Full Set" in 1.8.0; it is no longer a set of its own.)
 FULL_SET = ["laugh", "smile", "grin", "sad", "cry", "sob", "moved", "surprise", "awe", "contempt", "flustered", "shame-rage", "shy", "ponder", "annoyed", "angry", "yawn", "asleep",
-            "scared", "anxious", "joy", "cry-hug", "smile-hug", "shy-hug", "blank", "awkward", "letdown", "proud", "sulk", "worried", "very shy", "stern", "shame", "shock", "panic",
-            "tease", "happy", "kiss", "wedding dress", "suspicion", "fake smile", "woozy", "resign"]
+            "scared", "anxious", "joy", "cry-hug", "smile-hug", "shy-hug", "blank", "awkward", "letdown", "proud", "worried", "very shy", "stern", "shame", "shock", "panic",
+            "tease", "happy", "kiss", "suspicion", "fake smile", "resign"]
 
 DEFAULT_SETS = {
     "basic": ["normal 2", "smile 1", "smile 2", "surprise", "fear", "sad", "angry 1", "scorn 1", "shy"],
     "extended": ["normal 2", "smile 1", "smile 2", "surprise", "sulky", "fear", "sad", "angry 1", "angry 2", "scorn 1", "scorn 2",
                  "despair", "shy", "cute 1", "cute 2", "combat 1", "combat 2", "dead"],
-    "full": list(FULL_SET),
     "action": list(ACTION_MOODS),
     "action_adult": list(ADULT_ACTION_MOODS),
 }

@@ -107,7 +107,7 @@ def is_action(cfg: dict | None, mood: str) -> bool:
 
 
 def shows_body(cfg: dict | None, mood: str) -> bool:
-    """An adult picture of the body: no everyday clothes in the look (positions, finishes, nude, undressing...). An adult face picture (aroused) keeps their usual outfit."""
+    """An adult picture of the body: no everyday clothes in the look (positions, finishes, nude, undressing...). An adult picture of clothes (aroused, seductive, undressing) keeps their current outfit."""
     return is_nsfw(cfg, mood) and is_action(cfg, mood) and not (base(mood) in characters.BUILTIN_CLOTHED and "nsfw" not in def_of(cfg, mood))
 
 
@@ -131,7 +131,7 @@ def builtin_names_in(cid: str) -> list[str]:
         return out
     if cid == "expressions":
         out = []
-        for lst in (characters.DEFAULT_SETS["basic"], characters.DEFAULT_SETS["extended"]):
+        for lst in (characters.DEFAULT_SETS["basic"], characters.DEFAULT_SETS["extended"], characters.FULL_SET):
             for m in lst:
                 b = base(m)
                 if b not in out and builtin_category(b) == "expressions":
@@ -156,7 +156,7 @@ def draw_names(cfg: dict | None, cid: str, nsfw_story: bool) -> list[str]:
     """What a batch ("All: <category>") draws: the picture names as the draw sets write them (smile 1, smile 2, combat 1...), then every other picture in the category."""
     sets = (cfg or {}).get("mood_sets") or characters.DEFAULT_SETS
     out = []
-    for key in [k for k in ("basic", "extended", "action", "action_adult") if k in sets] + [k for k in sets if k not in ("basic", "extended", "action", "action_adult", "full")]:      # (the Extended Full Set is its own batch: it does not widen "All: Expressions")
+    for key in [k for k in ("basic", "extended", "action", "action_adult") if k in sets] + [k for k in sets if k not in ("basic", "extended", "action", "action_adult")]:
         for m in sets.get(key, []):
             m = str(m).strip().lower()
             if m and m not in out and category_of(cfg, m) == cid and (nsfw_story or not is_nsfw(cfg, m)):

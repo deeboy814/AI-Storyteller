@@ -10,7 +10,7 @@ async function asHomeDefaults(fn) {
   const obs = new MutationObserver(() => { if (m.classList.contains("hidden")) { obs.disconnect(); back(); } });
   obs.observe(m, { attributes: true, attributeFilter: ["class"] });
 }
-function hideHome() { $("home").classList.add("hidden"); }
+function hideHome() { $("home").classList.add("hidden"); if (window.placeStopPics) placeStopPics(); }
 function gradientFor(title) { let h = 0; for (const ch of title) h = (h * 31 + ch.charCodeAt(0)) % 360; return `linear-gradient(135deg, hsl(${h} 45% 28%), hsl(${(h + 50) % 360} 50% 16%))`; }
 // Rename a story in place: replaces `el` with a text box (Enter or clicking away saves, Esc cancels). `done(newTitle)` runs after a save.
 function editTitleInline(el, id, current, done) {
@@ -35,6 +35,7 @@ function blurb(s) { return s.description || s.subtitle || ""; }
 async function showHome() {
   const home = $("home");
   home.classList.remove("hidden");
+  if (window.placeStopPics) placeStopPics();
   const list = (await api("/stories")).sort((a, b) => b.updated - a.updated);
   const card = (s) => `<div class="hcard" data-id="${esc(s.id)}">
     <div class="hcover" style="${s.cover ? "" : `background:${gradientFor(s.title)}`}">${s.cover ? `<img loading="lazy" src="${esc(s.cover)}" alt="">` : `<span>${esc((s.title || "?").trim().charAt(0).toUpperCase())}</span>`}
@@ -43,7 +44,7 @@ async function showHome() {
       <p>${esc(blurb(s)) || '<i>No description yet. Use ⋯ to add one.</i>'}</p>
       <small>${s.turns} turn${s.turns === 1 ? "" : "s"}${s.player ? " · " + esc(s.player) : ""}${s.cast ? " · " + s.cast + " characters" : ""}</small></div></div>`;
   home.innerHTML = `<div class="hwrap">
-    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Import a story<input type="file" id="hPack" accept=".zip,application/zip" hidden></label><button id="hLib" title="Avatars, characters and species you keep once and use in any story">📚 Library</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings: AI models, memory and cost (usage), appearance, backups, storage">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close or restart AI Storyteller">${isThisComputer() ? "🚪 Quit" : "🔄 Restart"}</button></div>
+    <div class="hhead"><h1>AI Storyteller</h1><span style="flex:1"></span>${story ? '<button id="hBack">← Back to story</button>' : ""}<label class="btnlike" title="Import a story package (.zip) exported from the story creator">📦 Open a story package<input type="file" id="hPack" accept=".zip,application/zip" hidden></label><button id="hLib" title="Avatars, characters and species you keep once and use in any story">📚 Library</button><button id="hMk" title="Which AI draws pictures, ComfyUI and the picture services">🖼 Picture makers</button><button id="hSet" title="Settings: AI models, memory and cost (usage), appearance, backups, storage">⚙ Settings</button><button id="hQuit" class="quitbtn" title="Close or restart AI Storyteller">${isThisComputer() ? "🚪 Quit" : "🔄 Restart"}</button></div>
     <div class="hgrid">
       ${list.map(card).join("")}
       <button class="hcard hnew" id="hNew"><div class="hplus">＋</div><b>New story</b><small>Write or paste a prompt and start playing</small></button>
@@ -294,7 +295,7 @@ async function showStorage() {
   let rep, del;
   try { [rep, del] = await Promise.all([api("/storage"), api("/deleted-stories")]); } catch (e) { alert(e.message); return; }
   const keptTotal = rep.kept_pictures.reduce((a, k) => a + k.bytes, 0);
-  modal(`<h2>Storage</h2>
+  modal(`<h2>🗂 Storage</h2>
     <h3>Recently deleted stories</h3>
     ${del.length ? del.map((d) => `<div class="aiBox"><b>${esc(d.title)}</b> <small class="muted">${d.turns} turn${d.turns === 1 ? "" : "s"} · deleted ${new Date(d.when * 1000).toLocaleString()} · ${d.pictures_kept ? "pictures kept" : "pictures deleted"}</small>
       <div class="actions" style="justify-content:flex-start;margin-top:6px"><button data-restore="${esc(d.id)}">Restore</button><button class="danger" data-forget="${esc(d.id)}">Delete forever</button></div></div>`).join("")

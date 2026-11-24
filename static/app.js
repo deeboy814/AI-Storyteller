@@ -90,6 +90,7 @@ function renderNarrative(streamText = null, scroll = "bottom") {   // scroll: "b
   let html = openingHtml();
   const lastAi = story.turns.map((t) => t.role).lastIndexOf("assistant");
   story.turns.forEach((t, i) => {
+    portraitSeed = i; portraitCount = 0;
     const sw = (story.art || {}).scene_where, sc = t.role === "user" ? "" : sceneHtml(t, i);
     const chk = t.role === "assistant" && i === lastAi && t.check && (t.check.issues || []).length
       ? `<div class="rulechk">⚠ <b>Possible rule slips</b><ul>${t.check.issues.map((x) => `<li>${esc(x)}</li>`).join("")}</ul><button class="rcfix">Fix this reply</button> <button class="rcok">Ignore</button></div>` : "";
@@ -97,6 +98,7 @@ function renderNarrative(streamText = null, scroll = "bottom") {   // scroll: "b
     const inner = t.role === "user" ? `<div class="player">${md(t.text)}${t.roll ? `<div class="rolltag" title="Rolled by the app: d20 + (stat − 5) against the difficulty. The narrator must narrate this outcome.">🎲 ${esc(rollText(t.roll))}</div>` : ""}${(t.cmds || []).length && !Object.values(CMD_LABEL).includes(t.text) ? `<div class="cmdtags">${t.cmds.map((c) => esc(CMD_LABEL[c] || c)).join(" · ")}</div>` : ""}</div>` : (sw === "banner_top" ? sc + md(t.text) : md(t.text) + sc) + (i === lastAi ? usageLine(t.usage) : "") + tidy + chk;
     html += `<div class="turn ${t.role}${t.bookmark ? " bm" : ""}" data-i="${i}">${t.bookmark ? `<div class="bmlabel">★ ${esc(t.bookmark)}</div>` : ""}${inner}${turnBar(t, i, lastAi)}</div>`;
   });
+  portraitSeed = story.turns.length; portraitCount = 0;
   if (streamText !== null) html += `<div class="typing" style="min-height:${Math.max(200, box.clientHeight - 40)}px">${md(stripState(streamText)) || ""}</div>`;   // room below, so your move can sit at the top of the page while the reply grows
   if (!story.turns.length && streamText === null)
     html += '<div class="empty">Your story is ready.<br><button class="primary" id="eBegin">Begin the story</button></div>';
@@ -487,7 +489,7 @@ function showImport(list, opts = {}) {
       <label>Which AI writes the summary (and the story prompt, when you give none)?</label><select id="iModel" style="width:100%">${modelOpts}</select>
       <p class="hint">The text is cut into parts of about 14,000 characters and summarized one part at a time, each building on the last. A cheaper model is fine; a stronger one keeps more detail. You can edit the result afterwards (👤 Player → Memory).</p>
     </div>
-    <label>Latest status panel (optional; if you leave it empty, the last status panel found in the text is used)</label>
+    <label>Latest status panel (optional; it sets the side panel's starting values, e.g. day, place, relationships. If you leave it empty, the last status panel found in the text, or in the final turn, is used)</label>
     <textarea class="short" id="iPanel" style="min-height:90px"></textarea>
     <div id="pTurns"><label>Optional: last few turns, word for word</label>
     <textarea class="short" id="iTurns" style="min-height:80px" placeholder="PLAYER: what you did&#10;NARRATOR: what the narrator wrote"></textarea>
@@ -558,7 +560,7 @@ function showPlayer(tab = "Avatar") {
     ? `<div><label>${label}</label><textarea class="short" id="av_${key}" rows="${rows}">${esc(av[key] || "")}</textarea></div>`
     : `<div><label>${label}</label><input id="av_${key}" value="${esc(av[key] || "")}"></div>`;
   const preview = () => story.avatar_image ? `<img class="avatar" src="${story.avatar_image}" alt="">` : '<div class="avatar noimg">No image</div>';
-  modal(`<h2>Avatar</h2>
+  modal(`<h2>🧑 Avatar</h2>
     <div class="tabs"><button class="tab on" data-tab="Avatar">Avatar</button><button class="tab" data-tab="Notes">User notes</button></div>
     <div id="tabAvatar">
       ${config.avatar_library ? avatarLibraryRow() : ""}
@@ -656,6 +658,7 @@ function currentChoices() { // what this story uses right now, including older s
   const ev = (config.events_model || "").split("|");
   out.recaps = m.recaps || (story && ev.length === 2 && ev[0] ? { provider: ev[0], model: ev[1] } : d.recaps);
   out.small = m.small || (story ? null : d.small);
+  out.replies = m.replies || (story ? null : d.replies);
   out.images = m.images || (story && config.image_active ? { provider: config.image_active, model: "" } : d.images);
   if (out.images && !out.images.model) out.images = null;
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v));
@@ -669,7 +672,7 @@ async function showSettings(tab = "AI", opts = {}) {
     <label>Models (comma-separated${p.type === "ollama" ? "; installed ones are found automatically" : "; found automatically once a key is saved"})</label><input data-f="models" value="${esc((p.models || []).join(", "))}">
     <div class="actions" style="margin-top:8px"><button class="danger" data-rm="${i}">Remove provider</button></div></div>`;
   const field = (label, control, help = "") => `<div class="field"><label>${label}</label>${control}${help ? `<div class="hint">${help}</div>` : ""}</div>`;
-  modal(`<h2>${opts.only ? "Writing & side panel" : "Settings"}</h2>
+  modal(`<h2>${opts.only ? "Writing & side panel" : "⚙ Settings"}</h2>
     <div class="tabs"><button class="tab stt" data-t="AI">AI models</button><button class="tab stt" data-t="Story">Story &amp; narration</button><button class="tab stt" data-t="Memory">Memory &amp; cost</button><button class="tab stt" data-t="Appearance">Appearance</button><button class="tab stt" data-t="Phone">Phone &amp; tablet</button><button class="tab stt" data-t="Local">Local models</button><button class="tab stt" data-t="Backup">Libraries &amp; backup</button></div>
 
     <div class="stpane" data-p="AI">
@@ -689,12 +692,14 @@ async function showSettings(tab = "AI", opts = {}) {
 
     <div class="stpane hidden" data-p="Story">
       ${story ? `<h3>Content</h3><label class="chk top"><input type="checkbox" id="sNsfw" ${story.nsfw ? "checked" : ""}><span><b>Adult (NSFW) content</b><span class="hint">Allows explicit content between adult characters in the narration. Off by default and set per story. It also lets scene pictures and portraits show adult content between adults (covers and backdrops stay safe for work). Online picture services (Gemini, OpenAI, Grok) usually refuse explicit images; a local model in ComfyUI is what allows them. Your AI provider's own rules still apply.</span></span></label>` : ""}
-      <h3>Writing</h3>
+      <h3>Writing</h3>${story ? '<div class="hint">These three apply to all your stories, not just this one.</div>' : ""}
       <div class="grid2">${field("Creativity (temperature)", `<input id="sTemp" type="number" step="0.05" min="0" max="2" value="${config.temperature}">`, "How adventurous the word choice is. Lower (0.5) = predictable and focused, higher (1.1) = more varied and surprising. Matters for local models; Claude's newer models and ChatGPT's reasoning models ignore it.")}
         ${field("Longest reply", `<input id="sMax" type="number" step="128" min="256" value="${config.max_tokens}">`, "tokens (about ¾ of a word each). Replies stop here.")}
         ${field("Context size (local models)", `<input id="sCtx" type="number" step="1024" min="2048" value="${config.num_ctx}">`, "How much text a local model reads at once. Bigger remembers more but needs more video memory; 8192 is safe on 12 GB.")}</div>
       <h3>Side panel</h3>
       ${story ? `<div class="field"><label>What the side panel shows in “${esc(story.title)}”</label><select id="sbMode"><option value="prompt">Leave it to the prompt author</option><option value="player">I choose the fields</option><option value="ai">Let the AI decide</option></select><div class="hint" id="sbHint"></div></div>
+        <label class="chk" title="For imports whose numbers came out wrong, or any value you want to correct"><input type="checkbox" id="sbEditable"> Let me edit the side panel's values by hand</label>
+        <div class="hint">Adds a ✎ button to the side panel. Changes are saved straight away (not with the Save button). The AI still updates the values after each reply.</div>
         <div id="sbFields"></div><div id="sbCustom"></div><div id="sbAi"></div>
         <div class="actions" style="justify-content:flex-start;margin-top:4px"><button id="sbBuild" title="Forget the panel's values and read them again from the whole story (corrects a panel that went wrong)">Re-read the story and rebuild</button><span class="hint" id="sbNote"></span></div>` : '<div class="hint">Open a story to set its side panel.</div>'}
       <div class="field"><label>Default for new stories</label><select id="sbDefault"><option value="prompt">Leave it to the prompt author</option><option value="player">I choose the fields</option><option value="ai">Let the AI decide</option></select></div>
@@ -715,8 +720,11 @@ async function showSettings(tab = "AI", opts = {}) {
         ${field("…keeping this many recent", `<input id="sRecent" type="number" min="2" step="2" value="${config.keep_recent || 10}">`, "messages, word for word")}<div></div></div>
       <div class="hint">Older turns are folded into a short summary the narrator always reads. A longer window keeps more detail verbatim but costs more tokens per turn and causes fewer cache rewrites. Edit the summary any time under 🧠 Memory.</div>
       <h3>Character memory</h3>
-      <label class="chk top"><input type="checkbox" id="sCharMem" ${config.char_memory !== false ? "checked" : ""}><span><b>Keep each character's key events on their card, and send them only when they are in the scene</b><span class="hint">The narrator is reminded of the key past events of the characters named in the latest exchange (a short note, about 400 to 600 tokens, added to the newest message), so the shared memory summary above can stay short (about 1,200 words) and cover plot, places, items and open threads. Long event logs are condensed automatically by the helper AI (older events folded into a short history; your own entries are never touched). Needs <b>Key events log</b> on AI &amp; story to be on. Saves the most with models that do not cache the prompt; with Claude's caching the saving is smaller, since the summary is cached.</span></span></label>
+      <label class="chk top"><input type="checkbox" id="sCharMem" ${config.char_memory !== false ? "checked" : ""}><span><b>Keep each character's key events on their card, and send them only when they are in the scene</b><span class="hint">The narrator is reminded of the key past events of the characters named in the latest exchange (a short note, about 400 to 600 tokens, added to the newest message), so the shared memory summary above can stay short (about 1,200 words) and cover plot, places, items and open threads. Long event logs are condensed automatically by the helper AI (older events folded into a short history; your own entries are never touched). Needs the <b>Key events log</b> on (📝 Story → ⚙ Writing &amp; panel → Key events). Saves the most with models that do not cache the prompt; with Claude's caching the saving is smaller, since the summary is cached.</span></span></label>
       <div class="grid2">${field("How much of each character's history the narrator sees", '<select id="sCharMemSize"><option value="small">Small (cheapest)</option><option value="medium">Medium</option><option value="large">Large (most detail)</option></select>', "Applies to the characters named in the latest exchange. A smaller note costs less per turn (it is not cached) but older events of that character are left out.")}<div></div><div></div></div>
+      <h3>Turn digests</h3>
+      <label class="chk top"><input type="checkbox" id="sDigest" ${config.turn_digests !== false ? "checked" : ""}><span><b>Write a one-line digest of every exchange</b><span class="hint">The same small helper call that logs key events also writes one line about each exchange (where, who, what changed, promises, items) and a few key words. When the memory summary is updated it reads these lines instead of the full replies (much less to read), and they are the material for the matching below. Costs almost nothing (the helper call already runs). Stories played before this can get their digests under 🧠 Memory.</span></span></label>
+      <label class="chk top"><input type="checkbox" id="sPull" ${config.memory_pull !== false ? "checked" : ""}><span><b>Bring back older events that match the scene</b><span class="hint">Each turn the app looks (in code, no AI call) for older digests that share names, places or items with your newest move and the last reply, and adds up to 5 of them as a short note (about 300 tokens) to the newest message. That lets the shared memory summary stay about a third smaller: what it squeezes comes back exactly when the scene touches it. Needs digests on.</span></span></label>
       <h3>Claude prompt caching</h3>
       <label class="chk top"><input type="checkbox" id="sCache" ${config.prompt_cache !== false ? "checked" : ""}><span><b>Cache the story prompt</b><span class="hint">Cached prompt text costs about 10% of normal. Strongly recommended for Claude; other providers cache automatically.</span></span></label>
       <div class="grid2">${field("Cache lifetime", '<select id="sTtl"><option value="5m">5 minutes</option><option value="1h">1 hour</option></select>', "Saves money only if your next turn comes within this time. 5 minutes is cheapest to write; 1 hour suits slower play.")}<div></div><div></div></div>
@@ -761,7 +769,7 @@ async function showSettings(tab = "AI", opts = {}) {
       <div class="hint">Both are off by default and work independently.</div>
       <label class="chk top"><input type="checkbox" id="sAvLib" ${config.avatar_library ? "checked" : ""}><span><b>Avatar library</b><span class="hint">Create several player avatars (a sheet and a picture each) and reuse them in any story. Each story uses exactly one, as its own copy. Adds a 🧑 Avatars button on the Home screen and a library row in Player → Avatar.</span></span></label>
       <h3>Back up everything</h3>
-      <div class="hint">One .zip with all your stories, character pictures, scene pictures, avatars, usage log and settings. Your per-story backups (🧠 → Backups) protect against bad edits; this protects against a lost or broken disk, so keep a copy on another drive.</div>
+      <div class="hint">One .zip with all your stories, character pictures, scene pictures, avatars, usage log and settings. Your per-story backups (📝 Story → 🧠 Memory → Backups) protect against bad edits; this protects against a lost or broken disk, so keep a copy on another drive.</div>
       <label class="chk top"><input type="checkbox" id="bkKeys"><span><b>Include API keys</b><span class="hint">Off by default. If you include them, keep the file private.</span></span></label>
       <div class="actions" style="justify-content:flex-start;flex-wrap:wrap"><button class="primary" id="bkDownload">Download a backup</button><button id="bkNow">Save one to the backup folder</button><span class="hint" id="bkNote"></span></div>
       <h3>Automatic backups</h3>
@@ -792,6 +800,8 @@ async function showSettings(tab = "AI", opts = {}) {
     const SBH = { prompt: "Shows whatever the story prompt's own status panel or state block provides, and nothing extra.", player: "Shows only the fields you tick. Read from the story's status panel when it writes one; otherwise the AI reads each reply (one small background call).", ai: "The AI reads your story prompt, decides what is worth tracking, and updates it after each reply (one small background call)." };
     const sb = story.sidebar || { mode: "prompt", fields: [] }, groups = [["scene", "Scene"], ["me", "You"], ["chars", "Characters"]];
     $("sbMode").value = sb.mode;
+    $("sbEditable").checked = !!sb.editable;
+    $("sbEditable").onchange = async (e) => { try { const r = await api(`/stories/${story.id}/sidebar/editable`, { method: "PUT", body: { on: e.target.checked } }); story.sidebar = r.sidebar; renderSidebar(); } catch (err) { e.target.checked = !e.target.checked; alert(err.message); } };
     const draw = () => {
       const m = $("sbMode").value; $("sbHint").textContent = SBH[m];
       const own = m === "player" || (m === "prompt" && sbTrk && sbTrk.get().length);   // a story that has its own trackers keeps showing them in "prompt" mode
@@ -855,7 +865,7 @@ async function showSettings(tab = "AI", opts = {}) {
   $("rtRefresh").onclick = rtRefresh; rtRefresh();
   $("rtFree").onclick = async (e) => { e.target.disabled = true; await api("/runtime/free", { method: "POST" }); await rtRefresh(); e.target.disabled = false; };
   let styleBox = null;
-  const picker = mountAIChooser($("aiPick"), { initial: currentChoices(), roles: ["story", "recaps", "small"] });
+  const picker = mountAIChooser($("aiPick"), { initial: currentChoices(), roles: ["story", "recaps", "small", "replies"] });
   if (!story) {      // the default art style for new stories (inside a story the style is chosen in 🖼 Art → Style & options)
     const imgPicker = mountAIChooser($("aiPickImg"), { initial: currentChoices(), roles: ["images"] });   // hidden: only tells the art-style list which picture maker is chosen
     styleBox = mountArtStyle($("artStyleBox"), imgPicker, config.default_art_direction || "");
@@ -883,7 +893,7 @@ async function showSettings(tab = "AI", opts = {}) {
   $("mSave").onclick = async () => {
     collect();
     config.temperature = +$("sTemp").value; config.max_tokens = +$("sMax").value; config.num_ctx = +$("sCtx").value;
-    config.char_memory = $("sCharMem").checked; config.char_memory_size = $("sCharMemSize").value; config.prompt_cache = $("sCache").checked; config.cache_ttl = $("sTtl").value; config.keep_alive = $("sKeep").value.trim() || "30m"; config.claude_thinking = $("sThink").value === "on"; config.claude_effort = $("sEffort").value; config.events_mode = $("sEvents").value; config.thinking_headroom = +$("sHead").value || 0;
+    config.char_memory = $("sCharMem").checked; config.turn_digests = $("sDigest").checked; config.memory_pull = $("sPull").checked; config.char_memory_size = $("sCharMemSize").value; config.prompt_cache = $("sCache").checked; config.cache_ttl = $("sTtl").value; config.keep_alive = $("sKeep").value.trim() || "30m"; config.claude_thinking = $("sThink").value === "on"; config.claude_effort = $("sEffort").value; config.events_mode = $("sEvents").value; config.thinking_headroom = +$("sHead").value || 0;
     Object.assign(config, themeDraft);
     config.budget_daily = +$("sBudD").value || 0; config.budget_monthly = +$("sBudM").value || 0; config.budget_action = $("sBudAct").value;
     config.backup_auto_days = +$("bkDays").value || 0; config.backup_keep = +$("bkKeep").value || 5; config.backup_dir = $("bkDir").value.trim();
@@ -932,9 +942,33 @@ async function loadModels() {
   }
   if ([...sel.options].some((o) => o.value === saved)) sel.value = saved;
   syncModelSelect();
+  try { imageOpts = (await api("/model-options")).images || []; } catch (e) { imageOpts = []; }
+  fillImageSelect();
   if (!sel.options.length) sel.innerHTML = '<option value="|">(no models — open Settings)</option>';
 }
+let imageOpts = [];
+function fillImageSelect() { // the header's picture-maker list: every picture service and its models, like the narrator list
+  const sel = $("imageSelect"); if (!sel) return;
+  sel.innerHTML = "";
+  for (const p of imageOpts) {
+    if (!p.models || !p.models.length) continue;
+    const g = document.createElement("optgroup"); g.label = p.name + (p.local ? (p.ready ? "" : " (not available)") : p.has_key ? "" : " (needs a key)");
+    for (const m of p.models) { const o = document.createElement("option"); o.value = `${p.id}|${m.id}`; o.textContent = m.id.replace(/\.safetensors$/, ""); g.appendChild(o); }
+    sel.appendChild(g);
+  }
+  syncImageSelect();
+}
+function syncImageSelect() { // shows this story's picture maker (or the default one)
+  const sel = $("imageSelect"); if (!sel) return;
+  const c = (story && story.models && story.models.images) || (config && config.default_models && config.default_models.images);
+  sel.classList.toggle("hidden", !story);
+  if (!c || !c.provider) return;
+  const v = `${c.provider}|${c.model}`;
+  if (![...sel.options].some((o) => o.value === v)) { const o = document.createElement("option"); o.value = v; o.textContent = c.model; sel.appendChild(o); }
+  sel.value = v;
+}
 function syncModelSelect() { // the header menu shows this story's narrator model
+  syncImageSelect();
   const c = story && story.models && story.models.story, sel = $("modelSelect");
   if (!c) return;
   const v = `${c.provider}|${c.model}`;
@@ -1033,6 +1067,12 @@ $("btnIllustrate").onclick = () => illustrate();
 $("btnReplies").onclick = () => fetchReplies(true);
 $("btnContinue").onclick = () => { if (busy || !story || !story.turns.length) return; sendCommand("continue"); };
 $("narrative").addEventListener("scroll", () => { const at = narrativeAtBottom(); if (at && !wasAtBottom) maybeShowReplies(); wasAtBottom = at; });
+$("imageSelect").onchange = async (e) => {
+  if (!story) return;
+  const [provider, model] = e.target.value.split("|");
+  try { story.models = await api(`/stories/${story.id}/models`, { method: "PUT", body: { images: { provider, model } } }); }
+  catch (err) { alert(err.message); syncImageSelect(); }
+};
 $("modelSelect").onchange = async (e) => {
   localStorage.setItem("model", e.target.value);
   if (!story) return;
