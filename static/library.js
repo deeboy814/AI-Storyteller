@@ -13,7 +13,7 @@ async function showLibrary(tab, opts = {}) {
     <div class="meta"><b>${esc(name)}</b><small>${esc(sub)}</small>${extra || ""}${btn ? `<div class="avbtns">${btn}</div>` : ""}</div></div>`;
   const grids = {
     Avatars: avs.map((a) => card("av", a.id, a.image, a.name, oneLine([a.sheet.gender, a.sheet.age, a.sheet.appearance].filter(Boolean).join(", "), 70) || "no details yet",
-      story && story.avatar_id === a.id ? '<small class="evn">✓ used in this story</small>' : "", inStory ? `<button data-use="${esc(a.id)}">Use here</button>` : "")),
+      (a.tag ? `<small class="evn" title="Your private tag: never shown in the story">🏷 ${esc(a.tag)}</small>` : "") + (story && story.avatar_id === a.id ? '<small class="evn">✓ used in this story</small>' : ""), inStory ? `<button data-use="${esc(a.id)}">Use here</button>` : "")),
     Characters: chars.map((c) => card("ch", c.id, c.image, c.name, oneLine(c.appearance || "", 70) || "no description yet", (c.species ? `<small class="evn">${esc(c.species)}</small>` : "") + (sheetsOk && c.sheet && ((c.sheet.stats || []).length || (c.sheet.notes || "").trim()) ? '<small class="evn" title="This character has a character sheet">📋 sheet</small>' : ""),
       castPick ? `<button class="primary" data-use="${esc(c.id)}">Add to story</button>` : "")),
     Species: sps.map((x) => card("sp", x.id, x.image, x.name, oneLine(x.description || "", 70) || "no description yet", x.lora ? `<small class="evn">LoRA @ ${esc(String(x.lora_strength ?? 1))}</small>` : "",

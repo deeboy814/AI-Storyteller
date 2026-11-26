@@ -82,7 +82,7 @@ function portraitInfo(spec) {
   const m = ch.moods || {};
   // The narrator's @outfit and @place (or, without them, what the character is wearing now): that version of the picture where there is one, else the usual one.
   const outfitOn = !!(story.art && story.art.outfits), pkey = (x) => (x || "").toLowerCase().split(/\s+/).join(" ");
-  const outfit = outfitOn ? (toks.find((x) => (ch.outfits || {})[x]) || ch.outfit || "") : "";
+  const outfit = outfitOn && !isUnclothed(mood) ? (toks.find((x) => (ch.outfits || {})[x]) || ch.outfit || "") : "";     // unclothed pictures (nude, positions...) come from the usual set
   const place = toks.map((x) => (story.places || []).map((p) => pkey(p.name)).find((k) => k === x) || (story.places || []).map((p) => pkey(p.name)).find((k) => k.includes(x) || x.includes(k))).find(Boolean) || "";
   // "smile", "smile 1", "smile 2"... are the same kind of picture: use whichever of them exist (taking turns, so a character does not show the same one every time).
   const baseOf = (k) => String(k).toLowerCase().replace(/\s*\d+$/, "").trim() || String(k).toLowerCase();
@@ -177,6 +177,35 @@ document.getElementById("narrative").addEventListener("click", async (e) => {
   else if (act === "save") showSaveAsPortrait(im.url);
   else if (act === "del" && confirm("Delete this picture?")) { story = await api(`/stories/${story.id}/images?url=${encodeURIComponent(im.url)}`, { method: "DELETE" }); renderAll(); }
 });
+
+// The next free name for one more picture of a kind: "smile" or "smile 1" taken -> "smile 2". A name nobody has is used as it is (the server decides the same way).
+function nextFreeName(ch, name) {
+  const base = String(name).toLowerCase().replace(/\s*\d+$/, "").trim() || String(name).toLowerCase().trim(), nums = [];
+  for (const k of Object.keys((ch && ch.moods) || {})) if (k.replace(/\s*\d+$/, "").trim() === base) { const m = k.match(/(\d+)$/); nums.push(m ? +m[1] : 1); }
+  return nums.length ? `${base} ${Math.max(...nums) + 1}` : base;
+}
+// Keep the Right now picture for the character on the card: as one of their pictures, or in their Extra pictures (Images tab) to name later.
+function showSaveNowPicture() {
+  const n = story && story.now, ch = n && (story.cast || []).find((c) => c.name === n.name);
+  if (!ch) { alert("The Right now card is not showing a character from the cast."); return; }
+  const mood = String(n.mood || "normal").toLowerCase();
+  modal(`<h2>Save this picture of ${esc(ch.name)}</h2>
+    <p class="hint">Keep the Right now picture as one of ${esc(ch.name)}'s pictures. It can then be used above their lines and as reference material, and it stays when the Right now picture is drawn again.</p>
+    <label>Picture name (expression or action)</label><input id="snName" value="${esc(mood)}" list="snMoods"><datalist id="snMoods">${[...new Set([...Object.keys(moodCatCache), ...Object.keys(ch.moods || {})])].sort().map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
+    <label class="chk"><input type="checkbox" id="snRep"> Replace ${esc(ch.name)}'s current picture of that name (the old one is kept as an earlier version)</label>
+    <p class="hint" id="snNote"></p>
+    <div class="actions"><button id="mClose">Cancel</button><button id="snExtra" title="Put it in ${esc(ch.name)}'s Extra pictures (Images tab) and name it later">Put in Extra pictures</button><button class="primary" id="snGo">Save</button></div>`);
+  const upd = () => { const nm = document.getElementById("snName").value.trim().toLowerCase(), rep = document.getElementById("snRep").checked, have = !!(ch.moods || {})[nm] || nextFreeName(ch, nm) !== nm;
+    document.getElementById("snNote").textContent = !nm ? "" : rep ? (have ? `It replaces “${nm}”.` : `It is saved as “${nm}”.`) : `It is saved as “${nextFreeName(ch, nm)}”.`; };
+  document.getElementById("snName").oninput = upd; document.getElementById("snRep").onchange = upd; upd();
+  document.getElementById("mClose").onclick = closeModal;
+  const go = async (where) => {
+    try { const r = await api(`/stories/${story.id}/now/save`, { method: "POST", body: { where, name: document.getElementById("snName").value, replace: document.getElementById("snRep").checked } });
+      story = r.story; closeModal(); renderAll(); alert(where === "extra" ? `Put in ${ch.name}'s Extra pictures (Images tab). Give it a name there when you know what it is.` : `Saved as “${r.name}” for ${ch.name}.`); }
+    catch (err) { alert(err.message); }
+  };
+  document.getElementById("snGo").onclick = () => go("mood"); document.getElementById("snExtra").onclick = () => go("extra");
+}
 
 function showSaveAsPortrait(url) {
   const cast = story.cast || [];
@@ -532,21 +561,41 @@ function showCast(tab = "Characters") {
 
 // The Images tab groups a character's pictures by image category (Expressions, Actions, Positions...), and each group can be minimized (remembered across characters).
 const moodCatCache = {};          // picture name (without its number) -> category id, filled from /api/moods
+const moodBodyCache = {};         // picture name -> true when it shows the body (nude, positions, finishes...), filled from /api/moods
+// An unclothed picture type in an adult story: it has no outfit versions (the Outfits tab leaves it out) and the story always shows the usual picture for it.
+function isUnclothed(m) {
+  if (!(typeof story !== "undefined" && story && story.nsfw)) return false;
+  return !!moodBodyCache[String(m).toLowerCase().replace(/\s*\d+$/, "").trim()];
+}
+function rememberMoodKinds(list) { for (const m of list || []) { moodCatCache[m.name] = m.category; moodBodyCache[m.name] = !!m.body; } }
+window.addEventListener("load", () => { try { api("/moods").then((r) => rememberMoodKinds(r.moods)).catch(() => {}); } catch (e) { /* the story screen still works without it */ } });
 function moodCategoryId(m) {
   const b = String(m).toLowerCase().replace(/\s*\d+$/, "").trim(), d = ((typeof config !== "undefined" && config && config.mood_defs) || {})[b];
   return moodCatCache[b] || (d && d.category) || (EXPRESSION_MOODS.has(b) ? "expressions" : "actions");
 }
 function minimizedCats() { try { return new Set(JSON.parse(localStorage.getItem("imMinCats") || "[]")); } catch (e) { return new Set(); } }
 function saveMinimizedCats(set) { try { localStorage.setItem("imMinCats", JSON.stringify([...set])); } catch (e) { /* it is a convenience */ } }
-function groupByCategory(items) {       // items: [mood name, figure html]
+// How many pictures a set holds, for the headings of the Images tab: "5 of 12 pictures" (grey "empty" when none).
+function countBadge(n, of) {
+  return n ? `<span class="imcount">${n}${of ? ` of ${of}` : ""} picture${(of || n) === 1 ? "" : "s"}</span>` : `<span class="imcount none">empty${of ? ` (0 of ${of})` : ""}</span>`;
+}
+// The open/closed state of the outfit and place sections of a character is remembered like the picture categories' (until the player changes it).
+function secState() { try { return JSON.parse(localStorage.getItem("imSecOpen") || "{}"); } catch (e) { return {}; } }
+function saveSecState(o) { try { localStorage.setItem("imSecOpen", JSON.stringify(o)); } catch (e) { /* it is a convenience */ } }
+function secOpen(key, dflt) { const v = secState()[key]; return (v === undefined ? dflt : v) ? " open" : ""; }
+function groupByCategory(items, withDelete = false) {       // items: [mood name, figure html]; withDelete: each group gets a "Delete all" button
   if (!items.length) return "";
-  const cats = ((typeof config !== "undefined" && config && config.image_categories) || []), groups = new Map(), min = minimizedCats();
-  for (const c of cats) groups.set(c.id, []);
-  for (const [m, h] of items) { const id = m === "__earlier" ? m : moodCategoryId(m); if (!groups.has(id)) groups.set(id, []); groups.get(id).push(h); }
+  const cats = ((typeof config !== "undefined" && config && config.image_categories) || []), groups = new Map(), names = new Map(), min = minimizedCats();
+  for (const c of cats) { groups.set(c.id, []); names.set(c.id, []); }
+  for (const [m, h] of items) {
+    const id = m === "__earlier" ? m : moodCategoryId(m);
+    if (!groups.has(id)) { groups.set(id, []); names.set(id, []); }
+    groups.get(id).push(h); if (m !== "__earlier") names.get(id).push(m);
+  }
   const later = groups.get("__earlier"); groups.delete("__earlier"); if (later) groups.set("__earlier", later);       // the replaced pictures are a group of their own, last
   return [...groups].filter(([, hs]) => hs.length).map(([id, hs]) => {
-    const c = cats.find((x) => x.id === id);
-    return `<div class="imcat${min.has(id) ? " min" : ""}" data-cat="${esc(id)}"><button type="button" class="imcatHead" aria-expanded="${!min.has(id)}"><span class="imcatArrow">▾</span> ${esc(c ? c.name : id === "__earlier" ? "Earlier versions (replaced pictures)" : id)} <span class="hint">(${hs.length})</span></button><div class="imcatGrid">${hs.join("")}</div></div>`;
+    const c = cats.find((x) => x.id === id), title = c ? c.name : id === "__earlier" ? "Earlier versions (replaced pictures)" : id;
+    return `<div class="imcat${min.has(id) ? " min" : ""}" data-cat="${esc(id)}"><div class="imcatBar"><button type="button" class="imcatHead" aria-expanded="${!min.has(id)}"><span class="imcatArrow">▾</span> ${esc(title)} <span class="hint">(${hs.length})</span></button>${withDelete ? `<button type="button" class="x imcatDel" data-cat="${esc(id)}" data-title="${esc(title)}" data-moods="${esc((names.get(id) || []).join("|"))}" title="Delete every picture in ${esc(title)} (they are removed from the disk)">🗑 Delete all</button>` : ""}</div><div class="imcatGrid">${hs.join("")}</div></div>`;
   }).join("");
 }
 function showCharacter(slug, tab = "Bio") {
@@ -563,19 +612,32 @@ function showCharacter(slug, tab = "Bio") {
       `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 260)}" alt=""><figcaption><span class="mname">${esc(m)}</span><button class="x mcover${c.cover === m ? " on" : ""}" data-mood="${esc(m)}" title="${c.cover === m ? "This is the cover (click to go back to the automatic one)" : "Use this picture as the cover: the one on the character card"}">${c.cover === m ? "★" : "☆"}</button><button class="x mvid" data-url="${esc(u)}" title="Add or make a short video clip for this picture">🎞</button><button class="x mregen" data-mood="${esc(m)}" title="Draw another version. The current one is kept as an earlier version.">↻</button><button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show and edit the exact prompt this picture was drawn from, and draw again from your change">📝</button><button class="x mren" data-mood="${esc(m)}" title="Rename this picture (the narrator picks pictures by name)">✎</button><button class="x mcopy" data-url="${esc(u)}" data-mood="${esc(m)}" title="Also use this picture for another expression or action (a copy is saved under the name you give)">⧉</button><button class="x mdel" data-mood="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`]);
     const old = Object.entries(c.alts || {}).flatMap(([m, us]) => us.map((u) => ["__earlier",
       `<figure class="mood alt"><img loading="lazy" src="${thumbUrl(u, 200)}" alt=""><figcaption><span class="mname">${esc(m)} (earlier)</span><button class="x mprompt" data-mood="${esc(m)}" data-url="${esc(u)}" title="Show the prompt this earlier picture was drawn from">📝</button><button class="x altuse" data-mood="${esc(m)}" data-url="${esc(u)}" title="Make this the active picture">use</button><button class="x mcopy" data-url="${esc(u)}" data-mood="${esc(m)}" title="Also use this earlier picture for another expression or action">⧉</button><button class="x altkeep" data-mood="${esc(m)}" data-url="${esc(u)}" title="Keep this as a picture of its own with a numbered name (${esc(m.replace(/\s*\d+$/, ""))} 2, 3…), so it is used alongside the others">＋ numbered</button><button class="x altdel" data-url="${esc(u)}" title="Delete">×</button></figcaption></figure>`]));
-    return groupByCategory([...cur, ...old]) || '<span class="hint">No pictures yet. Use “Draw options…” to pick a face, or upload your own.</span>';
+    return groupByCategory([...cur, ...old], true) || '<span class="hint">No pictures yet. Use “Draw options…” to pick a face, or upload your own.</span>';
+  };
+  // Extra pictures: pictures kept for this character that have no expression or action name yet (for example the Right now picture, saved with 💾). Give each a name to make it one of their pictures.
+  const extrasPanel = () => {
+    const ex = c.extras || [];
+    if (!ex.length) return "";
+    const names = [...new Set([...Object.keys(moodCatCache), ...Object.keys(c.moods || {})])].sort();
+    return `<div class="sub" style="margin-top:10px"><b>🗂 Extra pictures</b> <span class="imcount">${ex.length} picture${ex.length === 1 ? "" : "s"}</span> <span class="hint">Pictures kept for ${esc(c.name)} that are not an expression or action yet. Type a name (or pick one) and press Assign; if that name already has a picture, this one becomes the next numbered one (smile 2…) unless you tick Replace.</span>
+      <datalist id="exNames">${names.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
+      <div class="moods">${ex.map((x) => `<figure class="mood"><a href="${esc(x.url)}" target="_blank"><img loading="lazy" src="${thumbUrl(x.url, 220)}" alt=""></a><figcaption><span class="mname">${esc(x.label || "extra")}</span>
+        <input class="exname" data-u="${esc(x.url)}" value="${esc(x.mood || "")}" list="exNames" placeholder="expression or action" size="14"> <label class="chk" style="display:inline"><input type="checkbox" class="exrep"> Replace</label>
+        <button class="exassign" data-u="${esc(x.url)}">Assign</button><button class="x exdel" data-u="${esc(x.url)}" title="Delete this picture">×</button></figcaption></figure>`).join("")}</div>
+      <div class="aStatus hint" id="exStatus"></div></div>`;
   };
   // Outfits (only when switched on in the picture settings): each outfit has its own version of a picture for each mood.
   const outfitPanel = () => {
-    const outs = Object.entries(c.outfits || {}), moodsHere = Object.keys(c.moods || {});
+    const outs = Object.entries(c.outfits || {}), moodsHere = Object.keys(c.moods || {}).filter((m) => !isUnclothed(m)), hiddenN = Object.keys(c.moods || {}).length - moodsHere.length;
     const fig = (o, m) => { const u = ((c.outfit_pics || {})[o] || {})[m];
       return u ? `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 220)}" alt=""><figcaption><span class="mname">${esc(m)}</span><button class="x ofdraw" data-o="${esc(o)}" data-m="${esc(m)}" title="Draw this one again in this outfit">↻</button><button class="x mcopy" data-mood="${esc(m)}" data-url="${esc(u)}" data-o="${esc(o)}" title="Also use this picture for another expression or action, or in another outfit">⧉</button><button class="x ofdel" data-o="${esc(o)}" data-m="${esc(m)}" title="Remove this outfit version">×</button></figcaption></figure>`
         : `<figure class="mood empty"><div class="noart">${esc(m)}</div><figcaption><button class="ofdraw" data-o="${esc(o)}" data-m="${esc(m)}" title="Draw ${esc(m)} in this outfit">＋ Draw</button> <label class="btnlike" title="Use your own picture"><input type="file" class="ofup" data-o="${esc(o)}" data-m="${esc(m)}" accept="image/png,image/jpeg,image/webp,image/gif" hidden>📁</label></figcaption></figure>`; };
-    return `<div class="sub" style="margin-top:10px"><b>👗 Outfits</b> <span class="hint">Each picture above can have a version in each outfit. The usual pictures stay as they are.</span>
-      <div class="actions" style="justify-content:flex-start;margin:6px 0"><label class="hint" style="margin:0 4px 0 0">Wearing now:</label><select id="ofWear"><option value="">Usual look</option>${outs.map(([o]) => `<option value="${esc(o)}" ${c.outfit === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></div>
-      ${outs.map(([o, d]) => `<details class="sub" ${c.outfit === o ? "open" : ""}><summary><b>${esc(o)}</b> <small class="muted">${esc(oneLine(d, 70))}</small></summary>
+    const ofTotal = outs.reduce((t, [o]) => t + moodsHere.filter((m) => ((c.outfit_pics || {})[o] || {})[m]).length, 0);
+    return `<div class="sub" style="margin-top:10px"><b>👗 Outfits</b> ${outs.length ? countBadge(ofTotal, 0) : ""} <span class="hint">Each picture above can have a version in each outfit. The usual pictures stay as they are.${hiddenN ? " Pictures that show the body without clothes (nude, positions, finishes…) are not listed: they always use the usual picture." : ""}</span>
+      <div class="actions" style="justify-content:flex-start;margin:6px 0"><label class="hint" style="margin:0 4px 0 0">Wearing now:</label><select id="ofWear"><option value="">Usual look</option>${outs.map(([o]) => `<option value="${esc(o)}" ${c.outfit === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select><button class="ofclrall" ${ofTotal ? "" : "disabled"} title="Delete the pictures of every outfit (the outfits themselves stay)">🗑 Delete all outfit pictures</button></div>
+      ${outs.map(([o, d]) => `<details class="sub" data-sec="${esc("of:" + o)}"${secOpen("of:" + o, c.outfit === o)}><summary><b>${esc(o)}</b> ${countBadge(moodsHere.filter((m) => ((c.outfit_pics || {})[o] || {})[m]).length, moodsHere.length)} <small class="muted">${esc(oneLine(d, 60))}</small></summary>
         <label>What it looks like <small class="hint">(the artist is told this instead of their usual clothes)</small></label><input class="ofdesc" data-o="${esc(o)}" value="${esc(d)}">
-        <div class="actions" style="justify-content:flex-start;margin:4px 0"><button class="ofall" data-o="${esc(o)}" ${moodsHere.length ? "" : "disabled"} title="Draw a version of every picture above that does not have one in this outfit yet">Draw all missing</button><button class="ofrm" data-o="${esc(o)}">Remove outfit</button></div>
+        <div class="actions" style="justify-content:flex-start;margin:4px 0"><button class="ofall" data-o="${esc(o)}" ${moodsHere.length ? "" : "disabled"} title="Draw a version of every picture above that does not have one in this outfit yet">Draw all missing</button><button class="ofclr" data-o="${esc(o)}" ${Object.keys((c.outfit_pics || {})[o] || {}).length ? "" : "disabled"} title="Delete every picture of this outfit (the outfit itself stays)">🗑 Delete its pictures</button><button class="ofrm" data-o="${esc(o)}">Remove outfit</button></div>
         <div class="moods">${moodsHere.map((m) => fig(o, m)).join("") || '<span class="hint">Draw some usual pictures first.</span>'}</div></details>`).join("")}
       <div class="actions" style="justify-content:flex-start;margin-top:6px"><input id="ofName" placeholder="Outfit name, e.g. swimsuit" size="18"><input id="ofNewDesc" placeholder="What it looks like" style="flex:1;min-width:160px"><button id="ofAdd">Add outfit</button></div>
       ${Object.keys(SUGGESTED_OUTFITS).filter((k) => !(c.outfits || {})[k]).length ? `<div class="actions" style="justify-content:flex-start;margin-top:4px"><span class="hint">Ideas:</span>${Object.keys(SUGGESTED_OUTFITS).filter((k) => !(c.outfits || {})[k]).map((k) => `<button class="ofidea" data-o="${esc(k)}" title="${esc(SUGGESTED_OUTFITS[k])}">＋ ${esc(k)}</button>`).join("")}</div>` : ""}
@@ -584,17 +646,19 @@ function showCharacter(slug, tab = "Bio") {
   // Pictures of this character at the story's places: each place gets its own version of each picture, drawn with the place behind them. The narrator picks with @place.
   let plOutfit = "";
   const placePanel = () => {
-    const places = story.places || [], moodsHere = Object.keys(c.moods || {}), pk = (n) => n.toLowerCase().split(/\s+/).join(" ");
+    const places = story.places || [], allMoods = Object.keys(c.moods || {}), pk = (n) => n.toLowerCase().split(/\s+/).join(" ");
     if (!places.length) return '<div class="sub" style="margin-top:10px"><b>📍 Pictures at places</b> <span class="hint">The story has no places yet. Add them (name and description) under the story\'s Places, then draw this character at them here.</span></div>';
     const outs = Object.keys(c.outfits || {}), useOut = story.art && story.art.outfits && outs.includes(plOutfit) ? plOutfit : "";
+    const moodsHere = useOut ? allMoods.filter((m) => !isUnclothed(m)) : allMoods;      // in an outfit, unclothed pictures have no version
     const fig = (k, m) => { const u = ((c.place_pics || {})[k] || {})[m];
       return u ? `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 220)}" alt=""><figcaption><span class="mname">${esc(m)}</span><button class="x pldraw" data-k="${esc(k)}" data-m="${esc(m)}" title="Draw this one again">↻</button><button class="x mcopy" data-mood="${esc(m)}" data-url="${esc(u)}" title="Also use this picture for another expression or action, or in an outfit">⧉</button><button class="x pldel" data-k="${esc(k)}" data-m="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`
         : `<figure class="mood empty"><div class="noart">${esc(m)}</div><figcaption><button class="pldraw" data-k="${esc(k)}" data-m="${esc(m)}" title="Draw ${esc(m)} at this place">＋ Draw</button> <label class="btnlike" title="Use your own picture"><input type="file" class="plup" data-k="${esc(k)}" data-m="${esc(m)}" accept="image/png,image/jpeg,image/webp,image/gif" hidden>📁</label></figcaption></figure>`; };
-    return `<div class="sub" style="margin-top:10px"><b>📍 Pictures at places</b> <span class="hint">${esc(c.name)} drawn at a place from the story, with the place behind them. The narrator can pick one with @place in the picture tag. The usual pictures stay as they are.</span>
+    const plTotal = Object.values(c.place_pics || {}).reduce((t, pics) => t + Object.keys(pics || {}).length, 0);
+    return `<div class="sub" style="margin-top:10px"><b>📍 Pictures at places</b> ${countBadge(plTotal, 0)} <button class="plclrall" ${plTotal ? "" : "disabled"} title="Delete the pictures of every place, including each outfit's versions (the places themselves stay)">🗑 Delete all place pictures</button> <span class="hint">${esc(c.name)} drawn at a place from the story, with the place behind them. The narrator can pick one with @place in the picture tag. The usual pictures stay as they are.</span>
       ${story.art && story.art.outfits && outs.length ? `<div class="actions" style="justify-content:flex-start;margin:6px 0"><label class="hint" style="margin:0 4px 0 0">In outfit:</label><select id="plOutfit"><option value="">Usual look</option>${outs.map((o) => `<option value="${esc(o)}" ${useOut === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></div>` : ""}
       ${places.map((p) => { const k = pk(p.name) + (useOut ? "@" + useOut : ""), n = Object.keys((c.place_pics || {})[k] || {}).length;
-        return `<details class="sub" ${n ? "open" : ""}><summary><b>${esc(p.name)}</b> <small class="muted">${n ? n + " picture" + (n > 1 ? "s" : "") : esc(oneLine(p.description, 70))}</small></summary>
-          <div class="actions" style="justify-content:flex-start;margin:4px 0"><button class="plall" data-k="${esc(k)}" ${moodsHere.length ? "" : "disabled"} title="Draw a version of every picture above that does not have one here yet">Draw all missing</button></div>
+        return `<details class="sub" data-sec="${esc("pl:" + k)}"${secOpen("pl:" + k, !!n)}><summary><b>${esc(p.name)}</b> ${countBadge(n, moodsHere.length)} <small class="muted">${esc(oneLine(p.description, 60))}</small></summary>
+          <div class="actions" style="justify-content:flex-start;margin:4px 0"><button class="plall" data-k="${esc(k)}" ${moodsHere.length ? "" : "disabled"} title="Draw a version of every picture above that does not have one here yet">Draw all missing</button><button class="plclr" data-k="${esc(k)}" data-name="${esc(p.name)}" ${n ? "" : "disabled"} title="Delete every picture of ${esc(c.name)} at this place${useOut ? " in this outfit" : ""} (the place itself stays)">🗑 Delete its pictures${useOut ? " (in " + esc(useOut) + ")" : ""}</button></div>
           <div class="moods">${moodsHere.map((m) => fig(k, m)).join("") || '<span class="hint">Draw some usual pictures first.</span>'}</div></details>`; }).join("")}
       <div class="aStatus hint" id="plStatus"></div></div>`;
   };
@@ -657,6 +721,8 @@ function showCharacter(slug, tab = "Bio") {
       <div class="aStatus hint" id="imStatus"></div>
       <div class="actions imcatBar" style="justify-content:flex-start;margin:0 0 4px"><button type="button" id="imMinAll" class="x">Minimize all</button><button type="button" id="imMaxAll" class="x">Expand all</button></div>
       <div id="imGrid">${moodChips()}</div>
+      <div id="imEarlierVids"></div>
+      ${isNew ? "" : '<div id="imExtras">' + extrasPanel() + "</div>"}
       ${story.art && story.art.outfits && !isNew ? '<div id="imOutfits">' + outfitPanel() + "</div>" : ""}
       ${isNew ? "" : '<div id="imPlaces">' + placePanel() + "</div>"}
       ${isNew ? "" : `<details class="sub" id="imTagsBox"><summary>Picture tags (for tag-style picture models)</summary>
@@ -853,16 +919,52 @@ function showCharacter(slug, tab = "Bio") {
       story = await api(`/stories/${story.id}/cast/${slug}/pictures`, { method: "DELETE" }); renderAll();
     });
     const redrawGrid = () => { $("imGrid").innerHTML = moodChips(); };
+    // 🎞 Earlier videos: every replaced clip of this character's pictures, like the earlier versions of pictures (use one again, or delete it)
+    const loadEarlierVids = async () => {
+      const box = $("imEarlierVids"); if (!box) return;
+      let list = []; try { list = await api(`/stories/${story.id}/cast/${slug}/earlier-videos`); } catch (e) { return; }
+      if (!$("imEarlierVids")) return;
+      if (!list.length) { box.innerHTML = ""; return; }
+      const min = minimizedCats().has("__evid");
+      box.innerHTML = `<div class="imcat${min ? " min" : ""}" data-cat="__evid"><div class="imcatBar"><button type="button" class="imcatHead" aria-expanded="${!min}"><span class="imcatArrow">▾</span> 🎞 Earlier videos (replaced clips) <span class="hint">(${list.length})</span></button></div><div class="imcatGrid">${list.map((v) =>
+        `<figure class="mood alt"><video controls muted loop playsinline preload="metadata" src="${esc(v.url)}" style="width:100%;aspect-ratio:3 / 2;background:#000;border-radius:8px"></video><figcaption><span class="mname">${esc(v.label)} (earlier video)</span><small class="hint">${new Date(v.when * 1000).toLocaleDateString()} · ${(v.size / 1048576).toFixed(1)} MB</small><button class="x evuse" data-pic="${esc(v.picture)}" data-id="${esc(v.id)}" title="Use this video again. The video shown now is kept as an earlier one.">↺ Use</button><button class="x evdel" data-pic="${esc(v.picture)}" data-id="${esc(v.id)}" title="Delete this earlier video">×</button></figcaption></figure>`).join("")}</div></div>`;
+    };
+    loadEarlierVids();
+    $("imEarlierVids").addEventListener("click", async (e) => {
+      const h = e.target.closest(".imcatHead");
+      if (h) { const box = h.closest(".imcat"), set = minimizedCats(); box.classList.toggle("min"); h.setAttribute("aria-expanded", !box.classList.contains("min")); if (box.classList.contains("min")) set.add("__evid"); else set.delete("__evid"); saveMinimizedCats(set); return; }
+      const b = e.target.closest("button"); if (!b) return;
+      try {
+        if (b.classList.contains("evuse")) { await api(`/videos/swap-earlier?url=${encodeURIComponent(b.dataset.pic)}&id=${encodeURIComponent(b.dataset.id)}`, { method: "POST" }); if (window.refreshVideos) await refreshVideos(); await loadEarlierVids(); }
+        else if (b.classList.contains("evdel")) { if (!confirm("Delete this earlier video? This cannot be undone.")) return; await api(`/videos/earlier?url=${encodeURIComponent(b.dataset.pic)}&id=${encodeURIComponent(b.dataset.id)}`, { method: "DELETE" }); await loadEarlierVids(); }
+      } catch (err) { alert(err.message); }
+    });
+    // the outfit and place sections stay as the player left them (open or minimized); Minimize all / Expand all cover them too
+    const saveSec = (d) => { const o = secState(); o[d.dataset.sec] = d.open; saveSecState(o); };
+    ["imOutfits", "imPlaces"].forEach((id) => { const box = $(id); if (box) box.addEventListener("click", (e) => { const sm = e.target.closest("summary"); if (!sm || !box.contains(sm)) return; const d = sm.parentElement; if (d.dataset && d.dataset.sec) setTimeout(() => saveSec(d), 0); }); });
+    const setSecs = (open) => { const o = secState(); document.querySelectorAll("#imOutfits details[data-sec], #imPlaces details[data-sec]").forEach((d) => { d.open = open; o[d.dataset.sec] = open; }); saveSecState(o); };
     $("imGrid").addEventListener("click", (e) => {
       const h = e.target.closest(".imcatHead"); if (!h) return;
-      const box = h.parentElement, set = minimizedCats(), id = box.dataset.cat;
+      const box = h.closest(".imcat"), set = minimizedCats(), id = box.dataset.cat;
       box.classList.toggle("min"); h.setAttribute("aria-expanded", !box.classList.contains("min"));
       if (box.classList.contains("min")) set.add(id); else set.delete(id);
       saveMinimizedCats(set);
     });
-    $("imMinAll").onclick = () => { saveMinimizedCats(new Set([...document.querySelectorAll("#imGrid .imcat")].map((x) => x.dataset.cat))); redrawGrid(); };
-    $("imMaxAll").onclick = () => { saveMinimizedCats(new Set()); redrawGrid(); };
-    api("/moods").then((r) => { for (const m of r.moods || []) moodCatCache[m.name] = m.category; if ($("imGrid")) redrawGrid(); }).catch(() => {});
+    $("imMinAll").onclick = () => { saveMinimizedCats(new Set([...document.querySelectorAll("#imGrid .imcat, #imEarlierVids .imcat")].map((x) => x.dataset.cat))); redrawGrid(); loadEarlierVids(); setSecs(false); };
+    $("imMaxAll").onclick = () => { saveMinimizedCats(new Set()); redrawGrid(); loadEarlierVids(); setSecs(true); };
+    api("/moods").then((r) => { rememberMoodKinds(r.moods); if ($("imGrid")) redrawGrid(); if ($("imOutfits")) $("imOutfits").innerHTML = outfitPanel(); if ($("imPlaces")) $("imPlaces").innerHTML = placePanel(); }).catch(() => {});
+    if ($("imExtras")) $("imExtras").addEventListener("click", async (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      try {
+        if (b.classList.contains("exassign")) {
+          const row = b.closest("figure"), name = row.querySelector(".exname").value.trim(); if (!name) return status("exStatus", "Type the expression or action name first.");
+          b.disabled = true; const r = await api(`/stories/${story.id}/cast/${slug}/extras/assign`, { method: "POST", body: { url: b.dataset.u, name, replace: row.querySelector(".exrep").checked } });
+          story = r.story; refresh("Images"); status("imStatus", `Saved as “${r.name}”.`);
+        } else if (b.classList.contains("exdel") && confirm("Delete this picture?")) {
+          story = await api(`/stories/${story.id}/cast/${slug}/extras?url=${encodeURIComponent(b.dataset.u)}`, { method: "DELETE" }); refresh("Images");
+        }
+      } catch (err) { status("exStatus", err.message); }
+    });
     if ($("imOutfits")) {
       const box = $("imOutfits"), put = (outfits) => api(`/stories/${story.id}/cast/${slug}/outfits`, { method: "PUT", body: { outfits } });
       const fresh = () => (story.cast || []).find((x) => x.slug === slug) || c, cur = () => ({ ...(fresh().outfits || {}) });
@@ -889,13 +991,18 @@ function showCharacter(slug, tab = "Bio") {
           } else if (b.classList.contains("ofrm")) {
             if (!confirm(`Remove the outfit “${b.dataset.o}” and all its pictures?`)) return;
             const o = cur(); delete o[b.dataset.o]; story = await put(o); renderAll(); showCharacter(slug, "Images");
+          } else if (b.classList.contains("ofclr") || b.classList.contains("ofclrall")) {
+            const all = b.classList.contains("ofclrall"), o = b.dataset.o, fc = fresh();
+            const n = all ? Object.values(fc.outfit_pics || {}).reduce((t, pics) => t + Object.keys(pics || {}).length, 0) : Object.keys((fc.outfit_pics || {})[o] || {}).length;
+            if (!confirm(all ? `Delete all ${n} outfit pictures of ${c.name} (every outfit)? The outfits themselves stay. This cannot be undone.` : `Delete the ${n} picture${n === 1 ? "" : "s"} of ${c.name} in the outfit “${o}”? The outfit itself stays. This cannot be undone.`)) return;
+            story = await api(`/stories/${story.id}/cast/${slug}/delete-set`, { method: "POST", body: all ? { kind: "outfits" } : { kind: "outfit", key: o } }); refresh("Images");
           } else if (b.classList.contains("mcopy")) { copyPic(b);
           } else if (b.classList.contains("ofdel")) {
             story = await api(`/stories/${story.id}/cast/${slug}/outfit-pic/${encodeURIComponent(b.dataset.o)}/${encodeURIComponent(b.dataset.m)}`, { method: "DELETE" }); refresh("Images");
           } else if (b.classList.contains("ofdraw")) {
             b.disabled = true; b.textContent = "…"; await drawOne(b.dataset.o, b.dataset.m); refresh("Images");
           } else if (b.classList.contains("ofall")) {
-            const o = b.dataset.o, fc = fresh(), todo = Object.keys(fc.moods || {}).filter((m) => !((fc.outfit_pics || {})[o] || {})[m]);
+            const o = b.dataset.o, fc = fresh(), todo = Object.keys(fc.moods || {}).filter((m) => !isUnclothed(m) && !((fc.outfit_pics || {})[o] || {})[m]);
             b.disabled = true;
             for (let i = 0; i < todo.length; i++) { status("ofStatus", `Drawing ${todo[i]} in ${o} (${i + 1} of ${todo.length})…`); try { await drawOne(o, todo[i]); } catch (err) { status("ofStatus", `${todo[i]}: ${err.message}`); break; } }
             refresh("Images");
@@ -921,10 +1028,16 @@ function showCharacter(slug, tab = "Bio") {
         const b = e.target.closest("button"); if (!b) return;
         try {
           if (b.classList.contains("mcopy")) copyPic(b);
+          else if (b.classList.contains("plclr") || b.classList.contains("plclrall")) {
+            const all = b.classList.contains("plclrall"), k = b.dataset.k, fc = fresh();
+            const n = all ? Object.values(fc.place_pics || {}).reduce((t, pics) => t + Object.keys(pics || {}).length, 0) : Object.keys((fc.place_pics || {})[k] || {}).length;
+            if (!confirm(all ? `Delete all ${n} place pictures of ${c.name} (every place, every outfit's version)? The places themselves stay. This cannot be undone.` : `Delete the ${n} picture${n === 1 ? "" : "s"} of ${c.name} at “${b.dataset.name}”${k.includes("@") ? ` (in the outfit “${k.split("@")[1]}”)` : ""}? The place itself stays. This cannot be undone.`)) return;
+            story = await api(`/stories/${story.id}/cast/${slug}/delete-set`, { method: "POST", body: all ? { kind: "places" } : { kind: "place", key: k } }); refresh("Images");
+          }
           else if (b.classList.contains("pldel")) { story = await api(`/stories/${story.id}/cast/${slug}/place-pic/${encodeURIComponent(b.dataset.k)}/${encodeURIComponent(b.dataset.m)}`, { method: "DELETE" }); refresh("Images"); }
           else if (b.classList.contains("pldraw")) { b.disabled = true; b.textContent = "…"; await drawOne(b.dataset.k, b.dataset.m); refresh("Images"); }
           else if (b.classList.contains("plall")) {
-            const k = b.dataset.k, fc = fresh(), todo = Object.keys(fc.moods || {}).filter((m) => !((fc.place_pics || {})[k] || {})[m]);
+            const k = b.dataset.k, fc = fresh(), todo = Object.keys(fc.moods || {}).filter((m) => !(k.includes("@") && isUnclothed(m)) && !((fc.place_pics || {})[k] || {})[m]);
             b.disabled = true;
             for (let i = 0; i < todo.length; i++) { status("plStatus", `Drawing ${todo[i]} (${i + 1} of ${todo.length})…`); try { await drawOne(k, todo[i]); } catch (err) { status("plStatus", `${todo[i]}: ${err.message}`); break; } }
             refresh("Images");
@@ -943,6 +1056,14 @@ function showCharacter(slug, tab = "Bio") {
       else if (b.classList.contains("altuse")) { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/use?url=${encodeURIComponent(b.dataset.url)}`, { method: "POST" }); refresh("Images"); }
       else if (b.classList.contains("altkeep")) busy(b, "…", async () => { story = (await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/keep?url=${encodeURIComponent(b.dataset.url)}`, { method: "POST" })).story; });
       else if (b.classList.contains("altdel")) { story = await api(`/stories/${story.id}/cast/${slug}/alt?url=${encodeURIComponent(b.dataset.url)}`, { method: "DELETE" }); refresh("Images"); }
+      else if (b.classList.contains("imcatDel")) {
+        const earlier = b.dataset.cat === "__earlier", names = (b.dataset.moods || "").split("|").filter(Boolean), title = b.dataset.title;
+        const nEarlier = Object.values(c.alts || {}).reduce((t, a) => t + a.length, 0), nAlts = names.reduce((t, m) => t + ((c.alts || {})[m] || []).length, 0);
+        const msg = earlier ? `Delete all ${nEarlier} earlier (replaced) versions of ${c.name}'s pictures? The current pictures stay. This cannot be undone.`
+          : `Delete all ${names.length} picture${names.length === 1 ? "" : "s"} in “${title}” of ${c.name}${nAlts ? `, with their ${nAlts} earlier version${nAlts === 1 ? "" : "s"}` : ""}?${names.some((m) => /^normal\b|^default$/.test(m)) ? " This includes the picture on their card." : ""} Their outfit and place versions are kept (delete those in their own sections). This cannot be undone.`;
+        if (!confirm(msg)) return;
+        busy(b, "Deleting…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/delete-set`, { method: "POST", body: earlier ? { kind: "earlier" } : { kind: "category", moods: names } }); });
+      }
     });
   }
 }

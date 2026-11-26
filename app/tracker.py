@@ -189,7 +189,7 @@ def clean_custom(raw, old: list[dict] | None = None) -> list[dict]:
             continue
         d = {"id": fid, "label": label, "kind": kind, "custom": True}
         if f.get("note"):
-            d["note"] = str(f["note"]).strip()[:200]
+            d["note"] = str(f["note"]).strip()[:350]
         if f.get("hidden") in (True, "true", "1", 1, "on"):
             d["hidden"] = True          # narrator-only: the narrator reads and updates it, the side panel never shows it
         if kind == "history":

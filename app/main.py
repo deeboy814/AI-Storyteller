@@ -9,6 +9,7 @@ import io
 import base64
 import zipfile
 import json
+import logging
 import zlib
 import re
 import shutil
@@ -474,6 +475,8 @@ class ImportIn(BaseModel):
     prompt_derived: bool = False        # the story prompt was written by the AI from the text (so a restart can drop its "where the story stands" part)
     provider: str | None = None         # no prompt given: the AI that writes one from the summary
     model: str | None = None
+    build_cards: bool = False           # the AI helper builds character cards (look, personality, bio, key events) from the save
+    nsfw: bool = False                  # the save has adult content: turns the story's adult setting on and tells the helper AI to carry explicit events over uncensored
 
 
 AVATAR_FIELDS = ("name", "gender", "age", "appearance", "personality", "background", "abilities")
@@ -1150,7 +1153,7 @@ async def import_story_route(body: ImportIn):
         cfg = store.load_config()
         prov, model = _pick(cfg, body.provider, body.model) if (body.provider and body.model) else _role(cfg, None, "recaps")
         try:
-            d = await _derive_prompt(cfg, prov, model, body.summary, "", body.recent_turns[-6000:])
+            d = await _derive_prompt(cfg, prov, model, body.summary, "", body.recent_turns[-6000:], adult=body.nsfw)
         except RuntimeError as e:
             raise HTTPException(502, str(e))
         body = body.model_copy(update={"prompt_derived": True, "base_prompt": d["prompt"], "title": body.title.strip() or d["title"], "subtitle": body.subtitle.strip() or d["subtitle"],
@@ -1160,6 +1163,12 @@ async def import_story_route(body: ImportIn):
     res = import_story(body)
     await _seed_tracker_from_import(res["story"], body.status_panel)
     res["warnings"] = warnings + res["warnings"]
+    if body.build_cards:        # the cards take one AI call per character: a background job the dialog watches
+        cfg = store.load_config()
+        prov, model = _pick(cfg, body.provider, body.model) if (body.provider and body.model) else _role(cfg, res["story"], "recaps", "import cards")
+        job = _new_job("import-cards", res["story"]["id"], 0)
+        asyncio.create_task(_cards_task(job, res["story"]["id"], prov, model, "", body.status_panel))
+        res["job"] = job["id"]
     return res
 
 
@@ -1189,6 +1198,8 @@ def import_story(body: ImportIn):
         s["use_state_block"] = src.get("use_state_block", True) if src else False
         _give_default_models(s)
     s["summary"] = body.summary.strip()
+    if body.nsfw:
+        s["nsfw"] = True
     if body.prompt_derived:
         s["prompt_derived"] = True
     turns, warnings = importer.parse_turns(body.recent_turns)
@@ -2061,6 +2072,64 @@ def _portrait_urls(ch: dict, hint: str | None = None, ext: bool = True) -> list[
     return out
 
 
+_NOW_NUDE_RE = re.compile(r"\b(nude|naked|unclothed|undressed|nothing(?! (?:but|except|other|more|else))(?: at all)?|no clothes|without (?:any )?clothes|in the nude|birthday suit|completely bare|stark naked)\b", re.IGNORECASE)
+_NOW_UNDRESS_RE = re.compile(r"\b(undress\w*|disrob\w*|strip(?:s|ped|ping)?|(?:tak\w+|pull\w*|slip\w*|peel\w*|remov\w*|shed\w*|unbutton\w*|unzip\w*|unhook\w*)\b[^.;]{0,25}\b(?:clothes|clothing|dress|shirt|top|blouse|bra|skirt|pants|jeans|trousers|shorts|robe|gown|underwear|panties|lingerie|armou?r|uniform|jacket|coat|bikini|swimsuit|towel))\b", re.IGNORECASE)
+_NOW_LINGERIE_RE = re.compile(r"\b(lingerie|underwear|undies|bra|panties|thong|g-?string|negligee|nightie|babydoll|corset|garter(?: belt)?|stockings)\b", re.IGNORECASE)
+
+
+_SCENE_NUDE_RE = re.compile(r"\b(nude|naked|unclothed|undressed|no clothes|without (?:any )?clothes|in the nude|birthday suit|stark naked|(?:wearing|wears|wore) nothing|bare-skinned)\b", re.IGNORECASE)
+_BODY_KINDS = ("nude", "undressing", "lingerie")
+
+
+def _body_kind(wearing: str, doing: str = "", nude_re=None) -> str:
+    """Which of the character's body pictures a description calls for: "nude", "undressing", "lingerie" or "" (none of them). Nude wins over undressing, which wins over lingerie."""
+    wear, act = (wearing or "").strip(), (doing or "").strip()
+    if (nude_re or _NOW_NUDE_RE).search(wear) or re.search(r"\b(nude|naked|unclothed|undressed)\b", act, re.IGNORECASE):
+        return "nude"
+    if _NOW_UNDRESS_RE.search(act) or _NOW_UNDRESS_RE.search(wear):
+        return "undressing"
+    if _NOW_LINGERIE_RE.search(wear) or _NOW_LINGERIE_RE.search(act):
+        return "lingerie"
+    return ""
+
+
+def _body_pics(s: dict, cfg: dict, ch: dict, kind: str) -> list[str]:
+    """The character's own pictures of that kind (nude, nude 2...); undressing keeps the worn outfit, so that outfit's version comes first when outfits are on."""
+    if not kind:
+        return []
+    out: list[str] = []
+    outfit = (ch.get("outfit") or "").strip().lower()
+    if outfit and (s.get("art") or {}).get("outfits") and not moods.shows_body(cfg, kind):
+        out += [u for k, u in sorted((ch.get("outfit_pics") or {}).get(outfit, {}).items()) if _mood_base(k) == kind and u]
+    out += [u for k, u in sorted((ch.get("moods") or {}).items()) if _mood_base(k) == kind and u and u not in out]
+    return out
+
+
+def _now_body_refs(s: dict, cfg: dict, ch: dict, wearing: str, doing: str) -> list[str]:
+    """For the "right now" picture of an adult story: when the card says the character is nude, undressing or in lingerie, the character's own picture of that
+    (nude / undressing / lingerie) is the reference instead of "normal 1", so the everyday clothes of the usual pictures do not show up. Empty = no such
+    picture (or the card says nothing like it): the usual references are used."""
+    return _body_pics(s, cfg, ch, _body_kind(wearing, doing)) if s.get("nsfw") else []
+
+
+def _scene_body_refs(s: dict, cfg: dict, ch: dict, name: str, scene: str, alone: bool, hint: str = "", turn_text: str = "") -> list[str]:
+    """The same for a scene picture, per character: what the scene says about them (the sentences that name them, or the whole scene when they are the only one
+    shown), else the picture type the scene description or the narrator's own picture tag gave them."""
+    if not s.get("nsfw"):
+        return []
+    first = (name.split() or [""])[0]
+    parts = [x for x in re.split(r"(?<=[.!?;])\s+", scene or "") if x.strip()]
+    mine = " ".join(parts if alone else [x for x in parts if re.search(rf"\b{re.escape(first)}\b", x, re.IGNORECASE)]) if first else ""
+    kind = _body_kind(mine, mine, _SCENE_NUDE_RE) if mine else ""
+    if not kind and _mood_base(hint or "") in _BODY_KINDS:
+        kind = _mood_base(hint)
+    if not kind and first:
+        tags = re.findall(rf"(?:portrait:|\[\[)\s*{re.escape(first)}[^/\]\)]*/\s*([a-z0-9 _-]+?)\s*(?:@|\]|\))", turn_text or "", re.IGNORECASE)
+        if tags and _mood_base(tags[-1]) in _BODY_KINDS:
+            kind = _mood_base(tags[-1])
+    return _body_pics(s, cfg, ch, kind)
+
+
 def _load_refs(urls: list[str], n: int, prov: dict | None = None) -> list[tuple[bytes, str]]:
     if prov and prov.get("ref_mode") == "none":      # a maker that cannot take reference pictures (Chroma, Qwen-Image): the prompt must not talk about references either
         return []
@@ -2452,6 +2521,8 @@ async def upload_outfit_pic(sid: str, slug: str, outfit: str, mood: str, request
     outfit = outfit.strip().lower()
     if outfit not in (ch.get("outfits") or {}):
         raise HTTPException(404, "That outfit is not there any more.")
+    if _unclothed(s, store.load_config(), mood):
+        raise HTTPException(400, _UNCLOTHED_MSG)
     ext = IMAGE_TYPES.get(request.headers.get("content-type", "").split(";")[0].strip())
     data = await request.body()
     if not ext or not data or len(data) > MAX_IMAGE:
@@ -2795,8 +2866,57 @@ def delete_all_pictures(sid: str, slug: str):
                 f = _portrait_file(u)
                 if f:
                     f.unlink(missing_ok=True)
-    ch["moods"], ch["alts"], ch["outfit_pics"], ch["place_pics"] = {}, {}, {}, {}
+    for x in ch.get("extras") or []:
+        f = _portrait_file(x.get("url") or "")
+        if f:
+            f.unlink(missing_ok=True)
+    ch["moods"], ch["alts"], ch["outfit_pics"], ch["place_pics"], ch["extras"] = {}, {}, {}, {}, []
     shutil.rmtree(store.PORTRAITS / sid / "chars" / slug / "_candidates", ignore_errors=True)
+    store.save_story(s)
+    return s
+
+
+class DeleteSetIn(BaseModel):
+    kind: str                  # "category" | "earlier" | "outfit" | "outfits" | "place" | "places"
+    moods: list[str] = []      # category: the picture names the player sees in it
+    key: str = ""              # outfit: the outfit's name; place: the place's key (with "@outfit" when it is that outfit's version)
+
+
+@app.post("/api/stories/{sid}/cast/{slug}/delete-set")
+def delete_picture_set(sid: str, slug: str, body: DeleteSetIn):
+    """Delete a whole set of this character's pictures at once (files too; it cannot be undone). category: the listed usual pictures with their earlier versions;
+    earlier: every replaced (earlier) version; outfit / place: one outfit's or one place's pictures (the outfit or place itself stays); outfits / places: all of them."""
+    s = _story(sid)
+    ch = _char(s, slug)
+
+    def drop(u) -> int:
+        f = _portrait_file(u) if u else None
+        if f:
+            f.unlink(missing_ok=True)
+            return 1
+        return 0
+
+    n, key = 0, " ".join(body.key.strip().lower().split())
+    if body.kind == "category":
+        for m in {x.strip().lower() for x in body.moods if x.strip()}:
+            n += drop((ch.get("moods") or {}).pop(m, None))
+            n += sum(drop(u) for u in (ch.get("alts") or {}).pop(m, []))
+        if ch.get("cover") and ch["cover"] not in (ch.get("moods") or {}):
+            ch.pop("cover", None)
+    elif body.kind == "earlier":
+        n += sum(drop(u) for lst in (ch.get("alts") or {}).values() for u in lst)
+        ch["alts"] = {}
+    elif body.kind in ("outfit", "place"):
+        fld = "outfit_pics" if body.kind == "outfit" else "place_pics"
+        if not key:
+            raise HTTPException(400, "Which one?")
+        n += sum(drop(u) for u in ((ch.get(fld) or {}).pop(key, None) or {}).values())
+    elif body.kind in ("outfits", "places"):
+        fld = "outfit_pics" if body.kind == "outfits" else "place_pics"
+        n += sum(drop(u) for pics in (ch.get(fld) or {}).values() for u in (pics or {}).values())
+        ch[fld] = {}
+    else:
+        raise HTTPException(400, "Unknown set.")
     store.save_story(s)
     return s
 
@@ -2838,12 +2958,15 @@ def copy_picture(sid: str, slug: str, body: CopyPictureIn):
     mine = list((ch.get("moods") or {}).values()) + [u for lst in (ch.get("alts") or {}).values() for u in lst]
     for fld in ("outfit_pics", "place_pics"):       # outfit and place pictures can be copied too
         mine += [u for pics in (ch.get(fld) or {}).values() for u in (pics or {}).values()]
+    mine += [x.get("url") for x in ch.get("extras") or []]
     f = _portrait_file(body.url)
     if body.url not in mine or not f or not f.exists():
         raise HTTPException(404, "That picture is not one of this character's pictures.")
     out = body.outfit.strip().lower()
     if out and out not in (ch.get("outfits") or {}):
         raise HTTPException(404, "That outfit is not there any more.")
+    if out and _unclothed(s, store.load_config(), new):
+        raise HTTPException(400, _UNCLOTHED_MSG)
     data = f.read_bytes()
     ext = images.sniff(data)[0]
     url = _store_outfit_pic(s, ch, out, new, data, ext) if out else _store_mood(s, ch, new, data, ext)
@@ -2854,7 +2977,7 @@ def copy_picture(sid: str, slug: str, body: CopyPictureIn):
     return {"mood": new, "outfit": out, "story": s}
 
 
-_CLOTHES = re.compile(r"\b(blazer|blouse|skirt|shoes?|boots?|sandals|sneakers|heels|uniforms?|jackets?|coats?|hoodie|t-?shirt|shirts?|tee|dress(?:es|ed)?|gown|jeans|trousers|pants|shorts|slacks|suits?|neck-?ties?|ties?|scarf|hats?|caps?|beanie|sweater|cardigan|vest|apron|robes?|kimono|lanyard|badge|clipboard|backpack|satchel|belt|gloves?|stockings|tights|socks|leggings|bodysuit|jumpsuit|fatigues|outfit|clothes|clothing|wears?|wearing|worn|watch|bracelets?|necklaces?|earrings?|holding|holds?|clutch(?:es|ing)?|carr(?:y|ies|ying)|tablet|phone|headset|name ?tag|bustier|bra|camisole|corset|bodice|tank|bandeau|panties|thong|lingerie|lace|garters?|cargo|headphones|armband|jewel(?:l)?ery|chains?|bag|purse|hoops?|pendant|rings?|choker|top|tee-?shirt|sneaker|platform|straps?)\b", re.IGNORECASE)
+_CLOTHES = re.compile(r"\b(blazer|blouse|skirt|shoes?|boots?|sandals|sneakers|heels|uniforms?|jackets?|coats?|hoodie|t-?shirt|shirts?|tee|dress(?:es|ed)?|gown|jeans|trousers|\w*pants|slippers?|sweatshirts?|joggers|shorts|slacks|suits?|neck-?ties?|ties?|scarf|hats?|caps?|beanie|sweater|cardigan|vest|apron|robes?|kimono|lanyard|badge|clipboard|backpack|satchel|belt|gloves?|stockings|tights|socks|leggings|bodysuit|jumpsuit|fatigues|outfit|clothes|clothing|wears?|wearing|watch|bracelets?|necklaces?|earrings?|holding|holds?|clutch(?:es|ing)?|carr(?:y|ies|ying)|tablet|phone|headset|name ?tag|bustier|bra|camisole|corset|bodice|tank|bandeau|panties|thong|lingerie|lace|garters?|cargo|headphones|armband|jewel(?:l)?ery|chains?|bag|purse|hoops?|pendant|rings?|choker|top|tee-?shirt|sneaker|platform|straps?)\b", re.IGNORECASE)
 
 
 def _body_look(look: str) -> str:
@@ -2984,6 +3107,14 @@ async def _portrait_plan(s: dict, cfg: dict, ch: dict, mood: str, provider: str 
             "style": "tags" if _wants_tags(prov) else "sentences"}
 
 
+_UNCLOTHED_MSG = "That picture type shows the character without clothes, so it has no outfit versions: the story always uses the usual picture for it."
+
+
+def _unclothed(s: dict, cfg: dict, mood: str) -> bool:
+    """An adult picture of the body (nude, positions, finishes...): in an adult story it never has an outfit version, the usual picture is used."""
+    return bool(s.get("nsfw")) and moods.shows_body(cfg, _mood_base(mood))
+
+
 async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None, prompt: str | None = None, negative: str | None = None, outfit: str = "", place: str = "") -> dict:
     """Draw one portrait. All the character's saved pictures are sent as references, so each saved one reinforces the next.
     Drawing a mood that already exists keeps the old picture as an alternate. With `prompt` (and `negative`) the picture is drawn from exactly those words
@@ -2993,6 +3124,8 @@ async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None
     outfit = outfit.strip().lower()
     if outfit and outfit not in (ch.get("outfits") or {}):
         raise HTTPException(404, "That outfit is not there any more.")
+    if outfit and _unclothed(s, cfg, mood):
+        raise HTTPException(400, _UNCLOTHED_MSG)
     place = _place_key(place)
     if place and not any(_place_key(x["name"]) == place for x in s.get("places", [])):
         raise HTTPException(404, "That place is not there any more.")
@@ -3046,7 +3179,7 @@ def _mood_entry(cfg: dict, s: dict | None, name: str) -> dict:
              "look": (MOOD_LOOKS_ADULT.get(name) if adult_story else None) or MOOD_LOOKS.get(name) or MOOD_LOOKS_ADULT.get(name) or ""}
     story = {k: _story_mood(s, name, k) for k in ("mood_looks", "mood_framing", "mood_framing_tags")} if s else {}
     return {"name": name, "builtin": moods.is_builtin(name), "edited": bool(d), "category": moods.category_of(cfg, name), "builtin_category": moods.category_of(base_cfg, name),
-            "nsfw": moods.is_nsfw(cfg, name), "builtin_nsfw": moods.is_nsfw(base_cfg, name),
+            "nsfw": moods.is_nsfw(cfg, name), "builtin_nsfw": moods.is_nsfw(base_cfg, name), "body": moods.shows_body(cfg, name),
             "look": d.get("look") or built["look"], "framing": d.get("framing") or built["framing"], "tags": d.get("tags") or built["tags"],
             "framing_tags": d.get("framing_tags") or built["framing_tags"], "note": d.get("note", ""), "sets": _sets_of(cfg, name),
             "story": {"look": story.get("mood_looks", ""), "framing": story.get("mood_framing", ""), "framing_tags": story.get("mood_framing_tags", "")} if s else None}
@@ -4263,6 +4396,39 @@ def list_earlier_videos(url: str):
         raise HTTPException(404, "That picture is not here.")
     root, prefix = (store.PORTRAITS, "/portraits/") if clean.startswith("/portraits/") else (store.IMAGES, "/images/")
     return [{"id": e.name, "url": prefix + e.relative_to(root).as_posix() + f"?v={int(e.stat().st_mtime)}", "size": e.stat().st_size, "when": int(e.stat().st_mtime)} for e in _earlier_clips(f)]
+
+
+@app.get("/api/stories/{sid}/cast/{slug}/earlier-videos")
+def character_earlier_videos(sid: str, slug: str):
+    """Every replaced (earlier) clip of this character's pictures (usual, earlier-version, outfit and place pictures), newest first, for the Earlier videos group of the Images tab."""
+    s = _story(sid)
+    ch = _char(s, slug)
+    pics: list[tuple[str, str]] = [(u, m) for m, u in (ch.get("moods") or {}).items()]
+    pics += [(u, f"{m} (earlier picture)") for m, us in (ch.get("alts") or {}).items() for u in us]
+    pics += [(u, f"{m} · {o}") for o, d in (ch.get("outfit_pics") or {}).items() for m, u in (d or {}).items()]
+    names = {_place_key(x["name"]): x["name"] for x in s.get("places", [])}
+    pics += [(u, f"{m} · {names.get(k.split('@')[0], k.split('@')[0])}{' (' + k.split('@')[1] + ')' if '@' in k else ''}") for k, d in (ch.get("place_pics") or {}).items() for m, u in (d or {}).items()]
+    out, seen = [], set()
+    for u, label in pics:
+        f, clean = _pic_path(u)
+        if not f or clean in seen:
+            continue
+        seen.add(clean)
+        root, prefix = (store.PORTRAITS, "/portraits/") if clean.startswith("/portraits/") else (store.IMAGES, "/images/")
+        for e in _earlier_clips(f):
+            out.append({"picture": clean, "label": label, "id": e.name, "url": prefix + e.relative_to(root).as_posix() + f"?v={int(e.stat().st_mtime)}", "size": e.stat().st_size, "when": int(e.stat().st_mtime)})
+    return sorted(out, key=lambda x: x["when"], reverse=True)
+
+
+@app.delete("/api/videos/earlier")
+def delete_earlier_video(url: str, id: str):
+    """Delete one earlier clip of a picture (the shown clip and the other earlier ones stay)."""
+    f, _ = _pic_path(url)
+    e = next((c for c in _earlier_clips(f) if c.name == id), None) if f else None
+    if not e:
+        raise HTTPException(404, "There is no such earlier video for this picture.")
+    e.unlink(missing_ok=True)
+    return {"ok": True}
 
 
 @app.post("/api/videos/swap-earlier")
@@ -5660,6 +5826,18 @@ async def _tag_prompt(s: dict, cfg: dict, art: dict, scene: str, chars: list[dic
     return positive, negative
 
 
+_REFUSAL_RE = re.compile(r"^\W*(i can'?t|i cannot|i won'?t|i will not|i'm (?:not able|unable|sorry)|i am (?:not able|unable|sorry)|sorry|unfortunately|i'd rather not|i need to)\b|\b(i can'?t|i cannot|i won'?t) (?:write|generate|help|create|produce)\b", re.IGNORECASE)
+
+
+def _check_tags(text: str) -> str:
+    """The helper AI sometimes answers with a refusal or an explanation instead of tags. That text must never become the picture's prompt (it once drew a clean street scene instead of the bedroom):
+    say so, so the picture can be redone, instead of drawing something unrelated."""
+    t = (text or "").strip()
+    if t and (_REFUSAL_RE.search(t[:300]) or len(t) > 1200 or len(re.findall(r"[.!?] [A-Z]", t)) >= 3):
+        raise HTTPException(502, f"The helper AI that writes the picture's tags declined or answered with an explanation instead of tags: “{t[:160]}…”. Nothing was drawn. Try again, or pick another model for the \"image prompt\" helper in Settings.")
+    return text
+
+
 async def _tag_line(s: dict, cfg: dict, art: dict, scene: str, chars: list[dict]) -> str:
     prov, model = _role(cfg, s, "small", "image prompt")
     system = ("You write prompts for anime image models in Danbooru tag style. Reply with ONE line of comma-separated lowercase tags: "
@@ -5672,7 +5850,7 @@ async def _tag_line(s: dict, cfg: dict, art: dict, scene: str, chars: list[dict]
     who = "\n".join(f"- {c['name']}: {c.get('appearance', '')}" for c in chars) or "(none given)"
     out = await providers.complete(prov, model, system, [{"role": "user", "content": f"Scene: {scene}\nCharacters:\n{who}" + (f"\nSetting: {art['setting']}" if art.get("setting") else "")}],
                                    temperature=0.3, max_tokens=300, num_ctx=cfg["num_ctx"], **_extras(cfg))
-    tags = " ".join(out.replace("\n", " ").replace("`", "").split()).strip(" ,")
+    tags = " ".join(_check_tags(out).replace("\n", " ").replace("`", "").split()).strip(" ,")
     if not tags:
         raise HTTPException(502, "The text model returned no tags. Try again, or switch this image provider to sentence-style prompts.")
     return tags
@@ -5947,22 +6125,25 @@ async def _scene_tag_prompt(s: dict, cfg: dict, art: dict, scene: str, chars: li
         if c["name"].lower() not in seen_n:
             seen_n.add(c["name"].lower()); uniq_chars.append(c)
     chars = uniq_chars
+    adult_pic = _adult_moment(s, cfg, "scene", scene) if adult is None else adult
     for c in chars:
         mine = next((x for x in s.get("cast", []) if x["slug"] == c.get("slug")), {})
         tags = await _character_tags(s, cfg, art, {"name": c["name"], "appearance": c.get("appearance", ""), "slug": c.get("slug"), "tags": mine.get("tags", ""),
-                                                   "tags_adult": mine.get("tags_adult", ""), "species": mine.get("species"), "_adult_pic": _adult_moment(s, cfg, "scene", scene) if adult is None else adult})
+                                                   "tags_adult": mine.get("tags_adult", ""), "species": mine.get("species"), "_adult_pic": adult_pic})
         if not tags or not (c.get("appearance", "").strip() or mine.get("tags")):
             return await _tag_prompt(s, cfg, art, scene, chars)         # a character with no description: the model has to improvise their looks
         parts = [t.strip() for t in tags.split(",") if t.strip()]
+        if adult_pic and not (mine.get("tags_adult") or "").strip():      # an explicit moment: what they wear (or not) comes from the scene, not from their everyday clothing tags
+            parts = [t for t in parts if not _CLOTHES.search(t) and not re.search(r"\b(bag|purse|necklace|bracelet|backpack|earrings?|watch)\b", t, re.I)]
         heads.append(parts.pop(0) if parts and _SUBJECT_TAG.match(parts[0]) else "")
         bodies.append(", ".join(t for t in parts if not _SUBJECT_TAG.match(t)))
     prov, model = _role(cfg, s, "small", "image prompt")
     system = SCENE_TAGS_SYSTEM + ("Adult content is allowed here (adults only: everyone shown is 18 or older); use explicit tags when the scene calls for them. " if s.get("nsfw")
-                                  else "Keep it safe for work: no nudity or explicit content. ") + "If a Setting is given, props and style must suit that world."
+                                  else "Keep it safe for work: no nudity or explicit content. ") + "If a Setting is given, props and style must suit that world, unless the scene itself is somewhere else: then the scene's own place wins. "         + ("Everyday clothes are NOT added to this picture, so DO write the tags for what each character wears or does not wear in this scene (nude, topless, panties, open shirt, towel...), exactly as the scene says. " if adult_pic else "")
     who = ", ".join(f"{c['name']} ({h or 'person'})" for c, h in zip(chars, heads))
     out = await providers.complete(prov, model, system, [{"role": "user", "content": f"Scene: {scene}\nCharacters in the picture: {who}" + (f"\nSetting: {art['setting']}" if art.get("setting") else "")}],
                                    temperature=0.3, max_tokens=220, num_ctx=cfg["num_ctx"], **_extras(cfg))
-    scene_tags = " ".join(out.replace("\n", " ").replace("`", "").split()).strip(" ,")
+    scene_tags = " ".join(_check_tags(out).replace("\n", " ").replace("`", "").split()).strip(" ,")
     names = sorted({w for c in chars for w in re.findall(r"[A-Za-z][\w'’-]{2,}", c["name"]) if w.lower() not in ("the", "and")}, key=len, reverse=True)
     if names:      # models still sometimes write the names in; image models read them as noise
         scene_tags = re.sub(r"\b(" + "|".join(map(re.escape, names)) + r")\b\s*", "", scene_tags, flags=re.IGNORECASE)
@@ -5975,17 +6156,34 @@ async def _scene_tag_prompt(s: dict, cfg: dict, art: dict, scene: str, chars: li
     return positive, negative
 
 
+_NAME_TITLES = {"mrs.", "mr.", "ms.", "miss", "dr.", "sir", "lady", "lord"}
+_ROLE_WORDS = {"old", "young", "little", "big", "tall", "small", "police", "female", "male", "passerby", "office", "head", "the", "a", "an", "elder", "senior", "junior"}
+
+
+def _name_keys(name: str) -> list[str]:
+    """The words a scene may use for a cast member: the first name, but not a describing word ("Old" in "Old Man" would match "twenty-two-year-old"): then the whole name is needed."""
+    parts = name.lower().split()
+    if len(parts) > 1 and parts[0] in _NAME_TITLES:
+        return [parts[1]]
+    if len(parts) > 1 and parts[0] in _ROLE_WORDS:
+        return [" ".join(parts)]
+    return [parts[0]] if parts else []
+
+
 def _scene_chars(s: dict, text: str, names: list[str] | None) -> list[dict]:
     """Who is in the picture: the named characters (or any whose name appears in the text), plus the player's avatar."""
     want = {n.lower() for n in (names or [])}
     low = text.lower()
     out = []
     for c in s.get("cast", []):
-        firsts = [c["name"].split()[0].lower()] + [a.split()[0].lower() for a in c.get("aka") or []]
-        if c["name"].lower() in want or any(f in want or re.search(rf"\b{re.escape(f)}\b", low) for f in firsts) or any(a.lower() in want for a in c.get("aka") or []):
-            out.append({"name": c["name"], "appearance": _full_appearance(s, c, action=bool(_FIGHT_RE.search(text))), "slug": c["slug"], "ref_url": None, "ref": False, "firsts": firsts})
+        firsts = _name_keys(c["name"]) + [a.split()[0].lower() for a in c.get("aka") or []]
+        if c["name"].lower() in want or any(f in want or re.search(rf"(?<![\w-]){re.escape(f)}(?![\w-])", low) for f in firsts) or any(a.lower() in want for a in c.get("aka") or []):
+            out.append({"name": c["name"], "appearance": _full_appearance(s, c, action=bool(_FIGHT_RE.search(text))), "slug": c["slug"], "ref_url": None, "ref": False, "firsts": firsts,
+                        "aka": [a.lower() for a in c.get("aka") or []]})
     av, pn = s.get("avatar") or {}, prompting.player_name(s)
-    if pn != "the player character" and (pn.lower() in want or pn.split()[0].lower() in want or re.search(rf"\b{re.escape(pn.split()[0].lower())}\b", low)):
+    pfirst = pn.split()[0].lower() if pn != "the player character" else ""
+    player_card = bool(pfirst) and any(pn.lower() == c["name"].lower() or pn.lower() in c["aka"] or pfirst in c["aka"] or pfirst in c["firsts"] for c in out)      # the player already has a cast card (under a longer name, with the short one in "other names")
+    if pn != "the player character" and not player_card and (pn.lower() in want or pfirst in want or re.search(rf"(?<![\w-]){re.escape(pfirst)}(?![\w-])", low)):
         out.append({"name": pn, "appearance": av.get("appearance", ""), "ref_url": s.get("avatar_image") or None, "ref": bool(s.get("avatar_image"))})
     # Most prominent first (earliest mention): a face-matching workflow uses the first reference as the main character.
     def first_seen(c: dict) -> int:
@@ -6033,7 +6231,7 @@ async def illustrate(sid: str, body: IllustrateIn):
     if mode == "one_character":
         for c in chars:
             ch = by_slug.get(c.get("slug"))
-            got = _load_refs(_portrait_urls(ch, hints.get(c["name"].lower())), max_refs, prov) if ch else []
+            got = _load_refs(_scene_body_refs(s, cfg, ch, c["name"], scene, len(chars) == 1, hints.get(c["name"].lower(), ""), turn["text"]) or _portrait_urls(ch, hints.get(c["name"].lower())), max_refs, prov) if ch else []
             if got:
                 refs, c["ref"] = got, True   # the first character with pictures is the one whose face is matched
                 break
@@ -6042,7 +6240,7 @@ async def illustrate(sid: str, body: IllustrateIn):
             if len(refs) >= max_refs:
                 break
             ch = by_slug.get(c.get("slug"))
-            urls = _portrait_urls(ch, hints.get(c["name"].lower())) if ch else ([c["ref_url"]] if c.get("ref_url") else [])
+            urls = (_scene_body_refs(s, cfg, ch, c["name"], scene, len(chars) == 1, hints.get(c["name"].lower(), ""), turn["text"]) or _portrait_urls(ch, hints.get(c["name"].lower()))) if ch else ([c["ref_url"]] if c.get("ref_url") else [])
             if not urls and c.get("slug") is None and s.get("avatar_image"):
                 urls = [s["avatar_image"]]
             got = _load_refs(urls, 1, prov)
@@ -6473,6 +6671,8 @@ def _strip_missing_pictures(s: dict) -> int:
         for fld in ("outfit_pics", "place_pics"):
             if c.get(fld):
                 c[fld] = {o: {m: u for m, u in pics.items() if keep(u)} for o, pics in c[fld].items()}
+        if c.get("extras"):
+            c["extras"] = [x for x in c["extras"] if keep(x.get("url"))]
     for p in s.get("places", []):
         if p.get("url") and not keep(p["url"]):
             p["url"] = ""
@@ -7073,6 +7273,12 @@ def export_pack(sid: str, pictures: str = "all", avatar: int = 0, webp: int = 0)
                             arc = f"portraits/{c['slug']}/{_slug(fld)}/{_slug(key.replace('@', ' '))}-{_slug(mood)}{f.suffix}"
                             ent.setdefault(fld, {}).setdefault(key, {})[mood] = arc
                             files.append((arc, f))
+            for i, x in enumerate(c.get("extras") or []):
+                f = _portrait_file(x.get("url") or "")
+                if f:
+                    arc = f"portraits/{c['slug']}/extras/{i}-{_slug(x.get('label') or 'extra')[:30]}{f.suffix}"
+                    ent.setdefault("extras", []).append({"file": arc, "label": x.get("label", ""), "mood": x.get("mood", "")})
+                    files.append((arc, f))
     meta["species"] = []
     for key, sp in (s.get("species") or {}).items():
         item = {"name": sp.get("name", key), "description": sp.get("description", ""), "maker": sp.get("maker", ""),
@@ -7267,6 +7473,14 @@ def _pack_char(c: dict, sid: str, save_file) -> dict:
                     got.setdefault(str(key).strip().lower(), {})[str(mood).strip().lower()] = f"/portraits/{sid}/chars/{slug}/{fname}"
         if got:
             ch[fld] = got
+    extras = []
+    for i, x in enumerate(c.get("extras") or [] if isinstance(c.get("extras"), list) else []):
+        if isinstance(x, dict) and x.get("file"):
+            fname = f"extra-{int(time.time() * 1000)}-{i}{Path(str(x['file'])).suffix}"
+            if save_file(str(x["file"]), store.PORTRAITS / sid / "chars" / slug / fname):
+                extras.append({"url": f"/portraits/{sid}/chars/{slug}/{fname}", "label": str(x.get("label", ""))[:120], "mood": str(x.get("mood", ""))[:30], "ts": time.time()})
+    if extras:
+        ch["extras"] = extras
     return ch
 
 
@@ -7504,6 +7718,11 @@ def _avatar_folder(aid: str) -> Path:
 class AvatarSheetIn(BaseModel):
     sheet: dict[str, str] = {}
     name: str = ""
+    tag: str | None = None          # private label for the library only (e.g. "Fantasy version"); never part of the sheet, so never sent to the narrator or used in pictures. None = leave as it is
+
+
+def _clean_tag(raw: str | None) -> str:
+    return " ".join(str(raw or "").split())[:40]
 
 
 def _clean_sheet(sheet: dict) -> dict:
@@ -7518,7 +7737,7 @@ def list_avatars():
 @app.post("/api/avatars")
 def create_avatar(body: AvatarSheetIn):
     sheet = _clean_sheet(body.sheet)
-    a = {"id": uuid.uuid4().hex[:10], "name": body.name.strip() or sheet.get("name") or "New avatar", "sheet": sheet, "image": "", "created": time.time()}
+    a = {"id": uuid.uuid4().hex[:10], "name": body.name.strip() or sheet.get("name") or "New avatar", "sheet": sheet, "image": "", "tag": _clean_tag(body.tag), "created": time.time()}
     _save_avatars(_avatars() + [a])
     return a
 
@@ -7531,6 +7750,8 @@ def update_avatar(aid: str, body: AvatarSheetIn):
         raise HTTPException(404, "Avatar not found")
     a["sheet"] = _clean_sheet(body.sheet)
     a["name"] = body.name.strip() or a["sheet"].get("name") or a["name"]
+    if body.tag is not None:
+        a["tag"] = _clean_tag(body.tag)
     _save_avatars(items)
     return a
 
@@ -9684,13 +9905,16 @@ async def _draw_now(sid: str, key: str) -> None:
                 prov = _explicit_main(prov, s)      # no separate adult maker: the main one draws it, with the adult wording
             prov = _with_face_lora(_with_species_lora(prov, s, ch), ch)
             _model_ctx.set(prov.get("model", ""))
-            refs = _load_refs(_portrait_urls(ch, mood or None), int(cfg.get("image_max_refs", 3)), prov)
+            body_refs = _now_body_refs(s, cfg, ch, now.get("wearing", ""), now.get("doing", ""))       # nude / undressing / lingerie: that picture, not "normal 1"
+            refs = _load_refs(body_refs or _portrait_urls(ch, mood or None), int(cfg.get("image_max_refs", 3)), prov)
             art = _nsfw_art(await _art_with_setting(s, cfg), prov)
             if (sneg := _species_negative(s, [ch])):       # this species' own negative words
                 art = {**art, "negative": ((art.get("negative") or "").rstrip(", ") + ", " + sneg).strip(", ")}
             where = ((s.get("backdrop") or {}).get("name") or "").strip()
             look = _full_appearance(s, ch)
             wearing = now.get("wearing", "").strip()
+            if wearing:
+                look = _body_look(look) or look      # the card says what they wear right now: their usual clothes and props (a jacket over the arm...) must not come back
             if _wants_tags(prov):
                 prompt, negative = await _portrait_tag_prompt(s, cfg, art, {**ch, "appearance": f"{look}. Wearing {wearing}" if wearing else look},
                                                               mood or "normal", notes=f"{now.get('doing', '')}; wearing {wearing}".strip("; "))
@@ -9754,6 +9978,123 @@ async def get_now(sid: str, wait: bool = False):
         except Exception:
             pass
     return {"now": _story(sid).get("now") or {}}
+
+
+@app.post("/api/stories/{sid}/now/redraw")
+async def redraw_now(sid: str):
+    """Draw the "right now" picture again (same card, new picture). The old picture stays until the new one is ready; poll GET /now to see it."""
+    s = _story(sid)
+    art, n = s.get("art") or {}, s.get("now") or {}
+    if not art.get("now_card") or art.get("now_pic") != "live":
+        raise HTTPException(400, "The Right now card is not set to draw a live picture. Switch it on under 🖼 Art → Style & options → Side panel card (“Its picture”: a new picture of what they are doing).")
+    key = _now_key(n)
+    if not key:
+        raise HTTPException(400, "The Right now card has nothing to draw yet (no character doing or wearing something).")
+    t = _now_tasks.get(sid)
+    if t and not t.done():
+        return {"now": n}              # a picture is already being drawn
+    for k in ("image_error", "image_failed_key"):
+        n.pop(k, None)
+    n["drawing"] = True
+    s["now"] = n
+    store.save_story(s)
+    _now_tasks[sid] = asyncio.create_task(_draw_now(sid, key))
+    return {"now": n}
+
+
+def _next_free_name(ch: dict, name: str) -> str:
+    """The picture name for one more of a kind: "smile" or "smile 1" taken -> "smile 2", then "smile 3"... The plain name counts as number 1. A name nobody has is used as it is."""
+    base = re.sub(r"\s*\d+$", "", name).strip() or name
+    nums = []
+    for k in (ch.get("moods") or {}):
+        if re.sub(r"\s*\d+$", "", k).strip() == base:
+            m = re.search(r"(\d+)$", k)
+            nums.append(int(m.group(1)) if m else 1)
+    return f"{base} {max(nums) + 1}" if nums else base
+
+
+def _picture_name(raw: str) -> str:
+    new = " ".join((raw or "").strip().lower().split())
+    if not re.fullmatch(r"[a-z0-9][a-z0-9 _-]{0,29}", new):
+        raise HTTPException(400, "Use up to 30 letters, numbers, spaces, hyphens or underscores for a picture name.")
+    return new
+
+
+class NowSaveIn(BaseModel):
+    where: str = "mood"        # "mood" = a picture of the character (named below) | "extra" = the character's Extra pictures, to name later
+    name: str = ""             # the picture name; empty = the card's mood
+    replace: bool = False      # False: a name that is already taken gets the next number (smile 2); True: it replaces that picture (the old one is kept as an earlier version)
+
+
+@app.post("/api/stories/{sid}/now/save")
+def save_now_picture(sid: str, body: NowSaveIn):
+    """Keep the current Right now picture for the character on the card: as one of their pictures (numbered when that expression or action already has one) or in their Extra pictures."""
+    s = _story(sid)
+    n = s.get("now") or {}
+    f = _portrait_file(n.get("image") or "")
+    ch = next((c for c in s.get("cast", []) if c["name"] == n.get("name")), None)
+    if not ch:
+        raise HTTPException(404, "The Right now card is not showing a character from the cast.")
+    if not f or not f.exists():
+        raise HTTPException(404, "There is no Right now picture to keep yet.")
+    data = f.read_bytes()
+    ext = images.sniff(data)[0]
+    mood = " ".join(str(n.get("mood") or "").lower().split())[:30]
+    if body.where == "extra":
+        folder = store.PORTRAITS / sid / "chars" / ch["slug"]
+        folder.mkdir(parents=True, exist_ok=True)
+        fname = f"extra-{int(time.time() * 1000)}.{ext}"
+        (folder / fname).write_bytes(data)
+        label = " · ".join(x for x in ("Right now", mood, (n.get("doing") or "")[:60]) if x)
+        ch.setdefault("extras", []).insert(0, {"url": f"/portraits/{sid}/chars/{ch['slug']}/{fname}", "label": label, "mood": mood, "ts": time.time()})
+        store.save_story(s)
+        return {"story": s, "where": "extra", "character": ch["name"]}
+    name = _picture_name(body.name or mood or "normal")
+    if not body.replace:
+        name = _next_free_name(ch, name)
+    _store_mood(s, ch, name, data, ext)
+    store.save_story(s)
+    return {"story": s, "where": "mood", "name": name, "character": ch["name"]}
+
+
+class ExtraAssignIn(BaseModel):
+    url: str
+    name: str
+    replace: bool = False
+
+
+@app.post("/api/stories/{sid}/cast/{slug}/extras/assign")
+def assign_extra_picture(sid: str, slug: str, body: ExtraAssignIn):
+    """Turn one of the character's Extra pictures into an expression or action picture (numbered if that name is taken, unless replace is set)."""
+    s = _story(sid)
+    ch = _char(s, slug)
+    item = next((x for x in ch.get("extras") or [] if x.get("url") == body.url), None)
+    f = _portrait_file(body.url)
+    if not item or not f or not f.exists():
+        raise HTTPException(404, "That picture is not in this character's Extra pictures.")
+    name = _picture_name(body.name)
+    if not body.replace:
+        name = _next_free_name(ch, name)
+    data = f.read_bytes()
+    _store_mood(s, ch, name, data, images.sniff(data)[0])
+    ch["extras"] = [x for x in ch["extras"] if x is not item]
+    f.unlink(missing_ok=True)
+    store.save_story(s)
+    return {"story": s, "name": name}
+
+
+@app.delete("/api/stories/{sid}/cast/{slug}/extras")
+def delete_extra_picture(sid: str, slug: str, url: str):
+    s = _story(sid)
+    ch = _char(s, slug)
+    if not any(x.get("url") == url for x in ch.get("extras") or []):
+        raise HTTPException(404, "That picture is not in this character's Extra pictures.")
+    ch["extras"] = [x for x in ch["extras"] if x.get("url") != url]
+    f = _portrait_file(url)
+    if f:
+        f.unlink(missing_ok=True)
+    store.save_story(s)
+    return s
 
 
 @app.delete("/api/stories/{sid}/backdrop")
@@ -10052,6 +10393,258 @@ async def put_sidebar(sid: str, body: SidebarIn):
 
 _FENCE_RE = re.compile(r"```[A-Za-z]*\s*\n?(.*?)```", re.DOTALL)
 
+# Importing a save with adult content: the helper AI that summarizes it and writes the cards is told to carry explicit events over as the text states them.
+ADULT_HELPER_NOTE = (" ADULT FICTION: this story allows explicit adult content and every character in it is an adult (18 or older). Record sexual and violent events plainly and accurately, exactly as the text states them: "
+                     "do not censor, soften, euphemise, summarize away or leave out an event because it is explicit, and add no warnings, disclaimers or refusals. Keep the wording factual and short, not erotic prose. "
+                     "Anyone under 18 is never involved in sexual content.")
+
+
+def _adult_sys(system: str, adult: bool) -> str:
+    return system + ADULT_HELPER_NOTE if adult else system
+
+
+CARD_ROSTER_SYSTEM = ("You read the record of a story that was played elsewhere (a summary, a status panel and the most recent text) and list EVERY named character in it, minor ones included (a shopkeeper, a neighbour, a classmate, a rival who appears only a few times), so that each can get a character card. "
+                      'Reply with ONLY a JSON list, most important first: [{"name": "Full Name", "aka": ["a nickname or title the text uses for them"], "role": "a few words: who they are to the player or the plot"}] '
+                      "(at most 30). Only named people or named creatures the text really shows; never the player's own character; no groups; never invent anyone.")
+
+# A second look at the whole text for names the first list missed: a script counts the capitalized names, the AI says which are characters.
+CARD_FIND_SYSTEM = ("A script found these capitalized names in a story text, each with how often it appears and one sample. Say which of them are NAMED CHARACTERS (people or named creatures who appear, act or are talked about in the story, "
+                    "minor ones included: a shopkeeper, a neighbour, a classmate, a relative) and are not already on the list you are given. A first name and a family name that clearly belong to the same person become one full name; "
+                    "family members who share a surname are separate people. Ignore places, organizations, titles, objects, languages, months, days and ordinary words. "
+                    'Reply with ONLY a JSON list: [{"name": "Full Name", "aka": ["a short name the text uses for them"], "role": "a few words: who they are"}] (at most 25; [] if none). Never invent anyone.')
+
+CARD_SYSTEM = ("You write one character's card for an interactive story that is being continued from a save made elsewhere. Use ONLY what the material states or clearly implies; never invent. "
+               "A field the material does not support is an empty string (or an empty list). If the material mixes up who someone is (a character wrongly called by another's name or role) and it is corrected later, "
+               "or the player corrects the narrator, the correction and the latest passages win. Fields: "
+               "'appearance' = a purely visual description for a picture maker (apparent age, build, hair, eyes, face, usual clothing, distinguishing features), always safe for work, even when the story is adult; "
+               "'personality' = one short line on how they act and speak; "
+               "'bio' = 3 to 5 sentences: who they are, their role, motives, history so far and their relationship to the player's character and to others; "
+               "'address' = who calls them what and how they address others, only if the material shows it; "
+               "'aka' = other names, nicknames or titles used for them (a list); "
+               "'species' = only when they are not human (otherwise an empty string); "
+               "'events' = their KEY events in story order: first meeting, injuries, deaths or transformations, betrayals, confessions, promises, changes in a relationship (romantic and sexual milestones included), "
+               "important decisions, discoveries and things gained or lost. At most 20, one short past-tense sentence each naming who was involved; skip routine actions. "
+               "'when' = the [Part ..] or [Turn ..] tag of the passage the event came from, or an empty string. "
+               'Reply with ONLY JSON: {"appearance": "", "personality": "", "bio": "", "address": "", "aka": [], "species": "", "events": [{"when": "", "event": ""}]}.')
+
+
+_NAME_WORD = re.compile(r"[A-Za-z][A-Za-z'’-]*")
+_CAP_WORD = re.compile(r"[A-Z][a-z]+(?:['’-][A-Za-z]+)*")
+
+
+def _name_candidates(text: str, known: set, limit: int = 60) -> list[tuple[str, int, str]]:
+    """Capitalized words and two-word names that appear several times in a text and are not already known: (name, count, a sample). A word that is mostly written in lowercase too ("the", "she") is not a name."""
+    toks = [(m.group(), m.start(), m.end()) for m in _NAME_WORD.finditer(text)]
+    low: dict[str, int] = {}
+    for w, _a, _b in toks:
+        if w.islower():
+            low[w] = low.get(w, 0) + 1
+    one: dict[str, list] = {}
+    two: dict[str, list] = {}
+    for i, (w, a, _b) in enumerate(toks):
+        if not _CAP_WORD.fullmatch(w):
+            continue
+        e = one.setdefault(w, [0, a])
+        e[0] += 1
+        if i + 1 < len(toks) and _CAP_WORD.fullmatch(toks[i + 1][0]) and text[toks[i][2]:toks[i + 1][1]] == " ":
+            e2 = two.setdefault(f"{w} {toks[i + 1][0]}", [0, a])
+            e2[0] += 1
+    need = 3 if len(text) > 20000 else 2
+    names = {k: v for k, v in two.items() if v[0] >= need and k.lower() not in known and not (set(k.lower().split()) <= known)}
+    names = {k: v for k, v in names.items() if not any(low.get(w.lower(), 0) * 2 >= v[0] for w in k.split())}
+    singles = {k: v for k, v in one.items() if v[0] >= need and k.lower() not in known and low.get(k.lower(), 0) * 2 < v[0]}
+    for k in list(singles):                 # a first name alone is not listed when the full name covers most of its uses
+        if any(k in n.split() and names[n][0] * 2 >= singles[k][0] for n in names):
+            del singles[k]
+    allc = {**singles, **names}
+    out = []
+    for k, (cnt, pos) in sorted(allc.items(), key=lambda kv: -kv[1][0])[:limit]:
+        out.append((k, cnt, " ".join(text[max(0, pos - 70):pos + 110].split())))
+    return out
+
+
+def _card_passages(text: str, pat, limit: int) -> str:
+    """Paragraphs of a whole story that mention a character, each tagged with which tenth of the story it comes from (spread evenly when there are too many)."""
+    paras = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
+    n = max(len(paras), 1)
+    hits = [f"[Part {min(10, i * 10 // n + 1)} of 10] {p[:700]}" for i, p in enumerate(paras) if pat.search(p)]
+    total = sum(len(h) + 1 for h in hits)
+    if total > limit and hits:
+        keep = max(1, int(len(hits) * limit / total))
+        hits = [hits[int(j * len(hits) / keep)] for j in range(keep)]
+    return "\n".join(hits)
+
+
+async def _build_cards_from_save(sid: str, prov, model, job: dict | None = None, full_text: str = "", panel: str = "", only: list | None = None) -> dict:
+    """The AI helper builds character cards (look, personality, bio, address, other names, key events) from an imported save: it first lists the named characters from the summary, the panel and the
+    latest text, then reads every passage about each one. New characters join the cast; a card that already exists only gets its empty fields filled and the events added. With the story's adult setting on,
+    explicit events are carried over as the text states them. A second pass counts the capitalized names in the whole text and asks the AI which of them are characters the first list missed.
+    `only` = just these names (a retry for the cards that failed). Returns counts and the names that failed (the AI declined or answered badly)."""
+    cfg = store.load_config()
+    s = store.load_story(sid)
+    adult = bool(s.get("nsfw"))
+    me = (prompting.player_name(s) or "").strip().lower()
+    recent = "\n\n".join(("PLAYER: " if t["role"] == "user" else "NARRATOR: ") + _for_tracker(t["text"], 1500) for t in (s.get("turns") or [])[-4:])
+    have = ", ".join(c["name"] for c in s.get("cast") or [] if not c.get("player"))
+    scan_failed = False
+    people = []
+    if only:
+        people = [{"name": characters.clean_name(n), "aka": [], "role": ""} for n in only if characters.clean_name(n)]
+    user = (f"PLAYER'S CHARACTER (never list them): {prompting.player_name(s) or '(unknown)'}\n\n" + (f"ALREADY ON THE CAST (list them too when the text shows them): {have}\n\n" if have else "")
+            + f"SUMMARY:\n{(s.get('summary') or '')[:12000] or '(none)'}\n\n" + (f"STATUS PANEL:\n{panel[:3000]}\n\n" if panel.strip() else "")
+            + (f"THE BEGINNING OF THE TEXT:\n{full_text[:3000]}\n\n" if full_text else "") + f"MOST RECENT TEXT:\n{recent[:5000]}")
+    def add_people(roster, cap):
+        for it in roster[:cap]:
+            if not isinstance(it, dict):
+                continue
+            name = characters.clean_name(str(it.get("name") or ""))
+            if not name or name.lower() == me or any(name.lower() == p["name"].lower() for p in people):
+                continue
+            akas = [" ".join(str(a).split())[:40] for a in (it.get("aka") if isinstance(it.get("aka"), list) else []) if str(a).strip()][:6]
+            people.append({"name": name, "aka": akas, "role": " ".join(str(it.get("role") or "").split())[:160]})
+
+    if not only:
+        if job is not None:
+            job["current"] = "Listing the characters"
+        out = await providers.complete(prov, model, _adult_sys(CARD_ROSTER_SYSTEM, adult), [{"role": "user", "content": user}], temperature=0.1, max_tokens=2500,
+                                       num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+        roster = _json_in(out)
+        if not isinstance(roster, list):
+            raise RuntimeError("The AI helper did not return a list of characters" + (f" (it said: “{out.strip()[:140]}”)" if out.strip() else "") + ". Pick another AI under “Which AI helper does the work”, or build the cards later in the Cast screen.")
+        add_people(roster, 30)
+        # second look: names that appear again and again in the whole text but were not listed (minor characters the summary leaves out)
+        try:
+            if job is not None:
+                job["current"] = "Checking the whole text for characters that were missed"
+            corpus = full_text or "\n".join(x for x in (s.get("summary") or "", panel, recent) if x)
+            known = {w.lower() for n in [p["name"] for p in people] + [c["name"] for c in s.get("cast") or []] + [prompting.player_name(s) or ""] + [a for p in people for a in p["aka"]] for w in re.findall(r"[\w'’-]+", n)}
+            known |= {n.lower() for n in [p["name"] for p in people] + [c["name"] for c in s.get("cast") or []]}
+            cands = _name_candidates(corpus, known)
+            if cands:
+                listed = ", ".join(p["name"] for p in people) or "(none)"
+                msg = (f"PLAYER'S CHARACTER (never list them): {prompting.player_name(s) or '(unknown)'}\n\nALREADY LISTED: {listed}\n\nCANDIDATES (name ×count: sample):\n"
+                       + "\n".join(f"- {n} ×{c}: {smp}" for n, c, smp in cands))
+                out2 = await providers.complete(prov, model, _adult_sys(CARD_FIND_SYSTEM, adult), [{"role": "user", "content": msg[:14000]}], temperature=0.1, max_tokens=2000,
+                                                num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+                found = _json_in(out2)
+                if isinstance(found, list):
+                    add_people(found, 25)
+                else:
+                    scan_failed = True
+                    bugreport.note("import", f"name scan answered with no list: {out2.strip()[:120]}", story=sid)
+        except Exception as e:
+            scan_failed = True
+            bugreport.note("import", f"name scan: {e}", story=sid, error=e.__class__.__name__)
+        people = people[:45]
+    res = {"added": 0, "filled": 0, "events": 0, "failed": [], "total": len(people), "scan_failed": scan_failed}
+    if job is not None:
+        job["total"], job["done"] = len(people), 0
+    one = lambda v, n: " ".join(str(v or "").split())[:n]
+    for i, p in enumerate(people):
+        if job is not None:
+            job["current"] = f"Building the card for {p['name']}"
+        names = [p["name"], p["name"].split()[0]] + p["aka"]
+        pat = re.compile(r"(?<![\w-])(?:" + "|".join(re.escape(n) for n in sorted(set(names), key=len, reverse=True) if len(n) > 1) + r")(?![\w-])", re.IGNORECASE)
+        ctx = _card_passages(full_text, pat, 14000) if full_text else ""
+        if not ctx:
+            ctx = _event_context(s, p["name"], limit=9000) or _context_about(s, p["name"], limit=4000)
+        elif s.get("summary"):
+            ctx = (_event_context(s, p["name"], limit=3000) + "\n" + ctx).strip()
+        ctx = ctx + "".join(f"\n[Status panel] {ln.strip()[:300]}" for ln in panel.splitlines() if pat.search(ln))[:1500]
+        existing = next((c for c in s["cast"] if c["name"].lower() == p["name"].lower() or (len(p["name"].split()) == 1 and c["name"].lower().split()[0] == p["name"].lower())), None)
+        cur = {k: (existing or {}).get(k, "") for k in ("appearance", "personality", "bio", "address", "species")} if existing else {}
+        try:
+            out = await providers.complete(prov, model, _adult_sys(CARD_SYSTEM, adult), [{"role": "user", "content":
+                                           f"Character: {p['name']}" + (f" (also called: {', '.join(p['aka'])})" if p["aka"] else "") + (f"\nRole: {p['role']}" if p["role"] else "")
+                                           + f"\nPlayer's character: {prompting.player_name(s) or 'the player'}"
+                                           + (f"\n\nCURRENT CARD (keep what is filled in):\n{json.dumps(cur, ensure_ascii=False)}" if cur else "")
+                                           + f"\n\nMATERIAL (passages that mention them):\n{ctx or '(nothing found; use only the role above)'}"}],
+                                           temperature=0.2, max_tokens=2200, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+            j = _json_in(out)
+        except Exception as e:
+            j = None
+            bugreport.note("import", f"card for {p['name']}: {e}", story=sid, error=e.__class__.__name__)
+        if not isinstance(j, dict):
+            res["failed"].append(p["name"])
+        else:
+            ch = existing
+            if ch is None:
+                ch = _ensure_char(s, p["name"], "")
+                res["added"] += 1
+            else:
+                res["filled"] += 1
+            fields = {"appearance": one(j.get("appearance"), 700), "personality": one(j.get("personality"), 300), "bio": one(j.get("bio"), 1000), "address": one(j.get("address"), 600)}
+            for k, v in fields.items():
+                if v and not str(ch.get(k) or "").strip():
+                    ch[k] = v
+            sp = one(j.get("species"), 40)
+            if sp and not _is_human(sp) and not (ch.get("species") or "").strip():
+                ch["species"] = sp
+            aka = [one(a, 40) for a in (j.get("aka") if isinstance(j.get("aka"), list) else []) if one(a, 40) and one(a, 40).lower() != p["name"].lower()]
+            if aka and not ch.get("aka"):
+                ch["aka"] = (p["aka"] + [a for a in aka if a not in p["aka"]])[:6]
+            lst = ch.setdefault("events", [])
+            for e in (j.get("events") if isinstance(j.get("events"), list) else [])[:20]:
+                txt = one((e or {}).get("event"), 400) if isinstance(e, dict) else ""
+                if txt and not any(x["text"].lower() == txt.lower() for x in lst):
+                    lst.append(_ev(one(e.get("when"), 30), txt, None, True))
+                    res["events"] += 1
+            del lst[:-MAX_EVENTS]
+            store.save_story(s)
+        if job is not None:
+            job["done"] = i + 1
+    store.save_story(s)
+    return res
+
+
+def _cards_note(r: dict) -> str:
+    bits = [f"{r['added']} new" if r["added"] else "", f"{r['filled']} existing filled in" if r["filled"] else ""]
+    msg = f"Character cards: {', '.join(b for b in bits if b) or 'none built'}, {r['events']} key events carried over."
+    if r["failed"]:
+        msg += (f" The AI helper did not return a card for {', '.join(r['failed'])} (it may have declined or answered badly). Try again with another AI, or build those cards in the Cast screen.")
+    if r.get("scan_failed"):
+        msg += " The check of the whole text for minor characters the first list missed did not work, so a few may be missing: add them in the Cast screen."
+    return msg
+
+
+def _summary_refused(reply: str, existing: str) -> bool:
+    """The summary helper declined (or answered with nothing, or an apology, or a summary far shorter than the one it was given). Such an answer must never replace the memory."""
+    t = (reply or "").strip()
+    if not t:
+        return True
+    if _REFUSAL_RE.search(t[:300]) and (len(t) < 1500 or len(t) * 2 < len(existing)):
+        return True
+    return len(existing) > 2000 and len(t) * 3 < len(existing)
+
+
+# What an import left undone (summary parts the AI declined, cards it did not return), kept in memory so another AI can finish it: story id -> {"parts": [(number, text)], "total", "cards": [names], "text", "panel", "nsfw"}.
+_import_redo: dict[str, dict] = {}
+
+
+def _remember_redo(sid: str, **info) -> dict | None:
+    """Store what is left to redo (the newest few imports only) and describe it for the screen."""
+    cur = _import_redo.setdefault(sid, {"parts": [], "total": 0, "cards": [], "text": "", "panel": "", "nsfw": False})
+    cur.update(info)
+    while len(_import_redo) > 4:
+        _import_redo.pop(next(iter(_import_redo)))
+    if not cur["parts"] and not cur["cards"]:
+        _import_redo.pop(sid, None)
+        return None
+    return {"parts": [n for n, _t in cur["parts"]], "total": cur["total"], "cards": list(cur["cards"])}
+
+
+async def _cards_task(job: dict, sid: str, prov, model, full_text: str, panel: str) -> None:
+    try:
+        usage.set_ctx(sid, "import cards")
+        r = await _build_cards_from_save(sid, prov, model, job, full_text, panel)
+        job["result"] = {"message": _cards_note(r), "redo": _remember_redo(sid, cards=r["failed"], text=full_text, panel=panel), **r}
+        job["status"] = "done"
+    except HTTPException as e:
+        job["status"], job["error"] = "error", str(e.detail)
+    except Exception as e:
+        job["status"], job["error"] = "error", str(e)[:300] or e.__class__.__name__
+    job["current"] = ""
+
 CAST_SYSTEM = ("You read the tracker / status panel at the end of a story's last turn (it may list KEY CHARACTERS or a character roster). Reply with ONLY a JSON list of the named people it describes, "
                "[{\"name\": \"Full Name\", \"look\": \"visual description if the text gives one (age, hair, eyes, build), else empty\", \"bio\": \"one or two short sentences: who they are, their role and relationship, as the text states\"}] "
                "(at most 15; [] if there are none). Only real named characters the text describes; never the player's own character; never invent anything.")
@@ -10060,7 +10653,7 @@ CAST_SYSTEM = ("You read the tracker / status panel at the end of a story's last
 async def _discover_cast(s: dict, cfg: dict, shown: str) -> int:
     """Characters listed in an imported save's panel (e.g. KEY CHARACTERS) join the cast with their bio. Existing cast members keep their look and only get an empty bio filled. Returns how many were added."""
     prov, model = _role(cfg, s, "recaps", "side panel")
-    out = await providers.complete(prov, model, CAST_SYSTEM, [{"role": "user", "content": f"PLAYER'S CHARACTER: {prompting.player_name(s)}\n\nTEXT:\n{shown[:6000]}"}],
+    out = await providers.complete(prov, model, _adult_sys(CAST_SYSTEM, bool(s.get("nsfw"))), [{"role": "user", "content": f"PLAYER'S CHARACTER: {prompting.player_name(s)}\n\nTEXT:\n{shown[:6000]}"}],
                                    temperature=0.1, max_tokens=1800, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
     items, added = _json_in(out), 0
     if not isinstance(items, list):
@@ -10510,6 +11103,8 @@ class ImportTextIn(BaseModel):
     keep_last: int = 6                  # labelled PLAYER:/NARRATOR: text: this many final messages stay word for word
     provider: str | None = None         # the AI that writes the summary (the player's choice)
     model: str | None = None
+    build_cards: bool = False           # the AI helper builds character cards from the whole text
+    nsfw: bool = False                  # adult content: the story's adult setting on, and the helper AI carries explicit events over uncensored
 
 
 def _chunks(text: str, size: int = 14000) -> list[str]:
@@ -10550,11 +11145,11 @@ DERIVE_PROMPT_SYSTEM = (
     'Reply with ONLY JSON: {"title": "...", "subtitle": "...", "player_name": "...", "prompt": "..."}.')
 
 
-async def _derive_prompt(cfg: dict, prov, model, summary: str, opening: str, recent: str) -> dict:
+async def _derive_prompt(cfg: dict, prov, model, summary: str, opening: str, recent: str, adult: bool = False) -> dict:
     """A story prompt written from the story itself (for a save brought over from another app that has none)."""
     usage.set_ctx(None, "import prompt")
     user = f"SUMMARY OF WHAT HAPPENED:\n{summary[:14000] or '(none)'}\n\nTHE BEGINNING:\n{opening}\n\nTHE MOST RECENT TEXT:\n{recent}"
-    out = await providers.complete(prov, model, DERIVE_PROMPT_SYSTEM, [{"role": "user", "content": user}], temperature=0.3, max_tokens=4000, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+    out = await providers.complete(prov, model, _adult_sys(DERIVE_PROMPT_SYSTEM, adult), [{"role": "user", "content": user}], temperature=0.3, max_tokens=4000, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
     j = _json_in(out)
     if not isinstance(j, dict) or len(str(j.get("prompt", "")).strip()) < 200:
         raise RuntimeError("The AI could not write a story prompt from this text. Paste a prompt yourself, or pick a different AI and try again.")
@@ -10635,28 +11230,116 @@ async def import_story_text(body: ImportTextIn):
     async def work(j: dict) -> None:
         usage.set_ctx(None, "import summary")
         summary = ""
+        refused: list[tuple[int, str]] = []
         for i, part in enumerate(parts):
             j["current"] = f"Summarizing part {i + 1} of {len(parts)}"
-            summary = (await providers.complete(prov, model, prompting.summary_system(), [{"role": "user", "content": f"EXISTING SUMMARY:\n{summary or '(none yet)'}\n\nNEW EVENTS:\n{part}\n\nWrite the updated summary."}],
-                                                temperature=0.3, max_tokens=3500, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})).strip()
+            out = (await providers.complete(prov, model, _adult_sys(prompting.summary_system(), body.nsfw), [{"role": "user", "content": f"EXISTING SUMMARY:\n{summary or '(none yet)'}\n\nNEW EVENTS:\n{part}\n\nWrite the updated summary."}],
+                                            temperature=0.3, max_tokens=3500, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})).strip()
+            if _summary_refused(out, summary):          # the AI declined this part: the memory keeps what it had, and the part is remembered so another AI can do it
+                refused.append((i + 1, part))
+                bugreport.note("import", f"summary part {i + 1} of {len(parts)} declined: {out[:120]}", error="refused")
+            else:
+                summary = out
             j["done"] = i + 1
+        if parts and len(refused) == len(parts):
+            raise RuntimeError(f"The AI helper declined to summarize {'the text' if len(parts) == 1 else 'any of the ' + str(len(parts)) + ' parts'} (it said: “{out[:140]}”). Nothing was imported. "
+                               "Pick another AI under “AI helper” and try again" + ("" if body.nsfw else ", or tick “This save has adult content” if the story is adult") + ".")
         title, subtitle, avatar, base_prompt, notes = body.title, body.subtitle, dict(body.avatar), body.base_prompt, []
         if derive:
             j["current"] = "Writing a story prompt from the text"
-            d = await _derive_prompt(cfg, prov, model, summary, text[:5000], text[-6000:])
+            d = await _derive_prompt(cfg, prov, model, summary, text[:5000], text[-6000:], adult=body.nsfw)
             base_prompt, title, subtitle = d["prompt"], title.strip() or d["title"], subtitle.strip() or d["subtitle"]
             if d["player_name"] and not (avatar.get("name") or "").strip():
                 avatar["name"] = d["player_name"]
             notes.append("No story prompt was given, so the AI wrote one from your text. Read it and fix anything wrong under ✏️ Edit story, because the narrator follows it every turn."
                          + ("" if avatar.get("name") else " The text does not say who the player is: set your character under 👤 Player."))
         j["current"] = "Building the story"
-        res = import_story(ImportIn(prompt_derived=derive, title=title, subtitle=subtitle, source_story_id=body.source_story_id, into_story_id=body.into_story_id, base_prompt=base_prompt,
+        res = import_story(ImportIn(nsfw=body.nsfw, prompt_derived=derive, title=title, subtitle=subtitle, source_story_id=body.source_story_id, into_story_id=body.into_story_id, base_prompt=base_prompt,
                                     avatar=avatar, user_notes=body.user_notes, summary=summary, status_panel=panel,
                                     recent_turns="\n\n".join(("PLAYER: " if t["role"] == "user" else "NARRATOR: ") + t["text"] for t in recent)))
         j["current"] = "Reading the side panel"
         await _seed_tracker_from_import(res["story"], panel)
         rw = [w for w in res["warnings"] if not (synthetic_tail and w.startswith("Recent turns started with a narrator message"))]
-        j["result"] = {"story_id": res["story"]["id"], "warnings": notes + warnings + rw, "summary_chars": len(summary), "prompt_written": derive}
+        failed_cards: list[str] = []
+        if body.build_cards:
+            j["current"], j["done"], j["total"] = "Building character cards", 0, 1
+            try:
+                cr = await _build_cards_from_save(res["story"]["id"], prov, model, j, text, panel)
+                failed_cards = cr["failed"]
+                notes.append(_cards_note(cr))
+            except Exception as e:       # the story itself is fine: only the cards failed
+                notes.append(f"The character cards could not be built: {str(e)[:300] or e.__class__.__name__}")
+        redo = _remember_redo(res["story"]["id"], parts=refused, total=len(parts), cards=failed_cards, text=text if failed_cards else "", panel=panel, nsfw=body.nsfw)
+        if refused:
+            nums = ", ".join(str(n) for n, _t in refused)
+            notes.insert(0, f"⚠ The AI helper declined to summarize part{'s' if len(refused) > 1 else ''} {nums} of {len(parts)}, so the story's memory is missing what happened there (everything else was summarized). "
+                            "You can give " + ("those parts" if len(refused) > 1 else "that part") + " to another AI now.")
+        j["result"] = {"story_id": res["story"]["id"], "warnings": notes + warnings + rw, "summary_chars": len(summary), "prompt_written": derive, "redo": redo}
+
+    async def run() -> None:
+        try:
+            await work(job)
+            job["status"] = "done"
+        except HTTPException as e:
+            job["status"], job["error"] = "error", str(e.detail)
+        except Exception as e:
+            job["status"], job["error"] = "error", str(e)[:300] or e.__class__.__name__
+        job["current"] = ""
+
+    asyncio.create_task(run())
+    return job
+
+
+class ImportRedoIn(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+
+
+@app.post("/api/stories/{sid}/import-redo")
+async def import_redo(sid: str, body: ImportRedoIn):
+    """Give what an import could not finish (summary parts the first AI declined, cards it did not return) to another AI. The declined parts are added to the memory as earlier events."""
+    s0 = _story(sid)
+    info = _import_redo.get(sid)
+    if not info:
+        raise HTTPException(404, "Nothing is waiting to be redone for this story (the app was restarted since the import). Add the missing events under 👤 Player → Memory, or build cards in the Cast screen.")
+    cfg = store.load_config()
+    prov, model = _pick(cfg, body.provider, body.model)
+    job = _new_job("import-redo", sid, len(info["parts"]) + (1 if info["cards"] else 0))
+
+    async def work(j: dict) -> None:
+        usage.set_ctx(sid, "import redo")
+        adult = bool(info["nsfw"]) or bool(s0.get("nsfw"))
+        left, declined_out = [], ""
+        summary = _story(sid).get("summary") or ""
+        for n, part in list(info["parts"]):
+            j["current"] = f"Summarizing part {n} of {info['total']}"
+            out = (await providers.complete(prov, model, _adult_sys(prompting.summary_system(), adult), [{"role": "user", "content":
+                    f"EXISTING SUMMARY:\n{summary or '(none yet)'}\n\nNEW EVENTS (these happened EARLIER in the story, in part {n} of {info['total']}, before the events the summary already covers: "
+                    f"keep the existing summary, and put these in their right place in the timeline):\n{part}\n\nWrite the updated summary."}],
+                    temperature=0.3, max_tokens=3500, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})).strip()
+            if _summary_refused(out, summary):
+                left.append((n, part))
+                declined_out = out
+            else:
+                summary = out
+            j["done"] += 1
+        msgs = []
+        if len(left) < len(info["parts"]):
+            st = _story(sid)
+            st["summary"] = summary
+            store.save_story(st)
+            msgs.append(f"{len(info['parts']) - len(left)} summary part(s) added to the memory.")
+        cards_left = list(info["cards"])
+        if info["cards"]:
+            j["current"] = "Building the missing cards"
+            cr = await _build_cards_from_save(sid, prov, model, j, info["text"], info["panel"], only=info["cards"])
+            cards_left = cr["failed"]
+            msgs.append(_cards_note(cr))
+            j["done"] += 1
+        info["parts"], info["cards"] = left, cards_left
+        if left:
+            msgs.append(f"This AI also declined part{'s' if len(left) > 1 else ''} {', '.join(str(n) for n, _t in left)}" + (f" (it said: “{declined_out[:100]}”)" if declined_out else "") + ". You can try another AI.")
+        j["result"] = {"message": " ".join(msgs) or "Nothing to do.", "redo": _remember_redo(sid)}
 
     async def run() -> None:
         try:

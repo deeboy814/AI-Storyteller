@@ -3,6 +3,9 @@ const AV_FIELDS = [["name", "Name"], ["gender", "Gender"], ["age", "Age"], ["app
 
 async function showAvatarLibrary() { return showLibrary("Avatars"); }   // the avatar cards live in the Library window now
 
+// "Mara · Fantasy version": a library avatar's name with its private tag (for lists where you pick an avatar; the story only ever gets the sheet).
+const avLabel = (a) => (a.name || "Unnamed") + (a.tag ? ` · ${a.tag}` : "");
+
 async function useLibraryAvatar(id) {
   if (story.avatar && Object.keys(story.avatar).length && story.avatar_id !== id && !confirm("Replace this story's current avatar (sheet and picture) with the selected one? A backup of the story is saved first.")) return;
   story = await api(`/stories/${story.id}/avatar/select`, { method: "POST", body: { id } });
@@ -10,7 +13,8 @@ async function useLibraryAvatar(id) {
 }
 
 async function showAvatarEditor(id) {
-  let a = id ? (await api("/avatars")).find((x) => x.id === id) : { id: null, name: "", sheet: {}, image: "" };
+  const all = await api("/avatars"), allTags = all.map((x) => x.tag).filter(Boolean);
+  let a = id ? all.find((x) => x.id === id) : { id: null, name: "", sheet: {}, image: "", tag: "" };
   if (!a) return showAvatarLibrary();
   const stories = await api("/stories");
   modal(`<h2>${a.id ? "Edit avatar" : "New avatar"}</h2>
@@ -19,14 +23,16 @@ async function showAvatarEditor(id) {
         <div class="actions" style="justify-content:flex-start;margin-top:8px"><button id="lvGen">✨ Draw 4 options from the info below</button></div>
         <div class="field"><label>Style it for the world of</label><select id="lvStory"><option value="">No particular story (plain)</option>${stories.map((s) => `<option value="${esc(s.id)}" ${story && story.id === s.id ? "selected" : ""}>${esc(s.title)}</option>`).join("")}</select></div>
         <div id="lvNote" class="hint">Uploads apply immediately. Generating uses that story's picture maker and setting, so the avatar fits its world; pick another story later to make a different version.</div></div></div>
-    <div class="grid2" style="grid-template-columns:1fr 1fr 1fr">${AV_FIELDS.slice(0, 3).map(([k, l]) => `<div><label>${l}</label><input id="lv_${k}" value="${esc(a.sheet[k] || "")}"></div>`).join("")}</div>
+    <div class="field"><label>🏷 Private tag <small class="muted">(optional)</small></label><input id="lv_tag" maxlength="40" value="${esc(a.tag || "")}" placeholder="e.g. Base, Fantasy version" list="lvTags"><datalist id="lvTags">${[...new Set(allTags)].map((t) => `<option value="${esc(t)}">`).join("")}</datalist>
+      <div class="hint">Only for you: it shows next to this avatar when you choose one. It is never sent to the narrator, never in the story and never used for pictures. Handy for keeping versions of the same character apart.</div></div>
+    <div class="grid2 avgrid3">${AV_FIELDS.slice(0, 3).map(([k, l]) => `<div><label>${l}</label><input id="lv_${k}" value="${esc(a.sheet[k] || "")}"></div>`).join("")}</div>
     ${AV_FIELDS.slice(3).map(([k, l, r]) => `<div><label>${l}</label><textarea class="short" id="lv_${k}" rows="${r}">${esc(a.sheet[k] || "")}</textarea></div>`).join("")}
     <div class="actions sticky">${a.id ? '<button class="danger" id="lvDel">Delete avatar</button>' : ""}<span style="flex:1"></span><button id="lvBack">← Library</button><button class="primary" id="lvSave">Save</button></div>`);
   const sheet = () => Object.fromEntries(AV_FIELDS.map(([k]) => [k, $("lv_" + k).value]));
-  const ensure = async () => { if (!a.id) { a = await api("/avatars", { method: "POST", body: { sheet: sheet(), name: $("lv_name").value } }); } return a.id; };
+  const ensure = async () => { if (!a.id) { a = await api("/avatars", { method: "POST", body: { sheet: sheet(), name: $("lv_name").value, tag: $("lv_tag").value } }); } return a.id; };
   const prev = (url) => { $("lvPreview").innerHTML = `<img class="avatar" src="${esc(url)}" alt="">`; };
   $("lvBack").onclick = showAvatarLibrary;
-  $("lvSave").onclick = async () => { const body = { sheet: sheet(), name: $("lv_name").value }; if (a.id) await api("/avatars/" + a.id, { method: "PUT", body }); else await api("/avatars", { method: "POST", body }); showAvatarLibrary(); };
+  $("lvSave").onclick = async () => { const body = { sheet: sheet(), name: $("lv_name").value, tag: $("lv_tag").value }; if (a.id) await api("/avatars/" + a.id, { method: "PUT", body }); else await api("/avatars", { method: "POST", body }); showAvatarLibrary(); };
   if ($("lvDel")) $("lvDel").onclick = async () => { if (confirm(`Delete “${a.name}” from the library? Stories already using it keep their own copy.`)) { await api("/avatars/" + a.id, { method: "DELETE" }); showAvatarLibrary(); } };
   $("lvFile").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return; const aid = await ensure();
@@ -63,7 +69,7 @@ function avatarLibraryRow() {
 }
 async function avatarLibraryInit() {
   const list = await api("/avatars");
-  $("avLibSel").innerHTML = list.length ? list.map((a) => `<option value="${esc(a.id)}" ${story.avatar_id === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("") : '<option value="">(library is empty)</option>';
+  $("avLibSel").innerHTML = list.length ? list.map((a) => `<option value="${esc(a.id)}" ${story.avatar_id === a.id ? "selected" : ""}>${esc(avLabel(a))}</option>`).join("") : '<option value="">(library is empty)</option>';
   $("avLibUse").onclick = async () => { const id = $("avLibSel").value; if (!id) return; await useLibraryAvatar(id); showPlayer(); };
   $("avLibSave").onclick = async () => { try { const r = await api(`/stories/${story.id}/avatar/save-to-library`, { method: "POST" }); story = r.story; $("avLibNote").textContent = `Saved to the library as “${r.avatar.name}”.`; avatarLibraryInit(); } catch (e) { $("avLibNote").textContent = e.message; } };
   $("avLibMan").onclick = showAvatarLibrary;

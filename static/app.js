@@ -36,6 +36,28 @@ function inlineMd(text) {
       return imgs + (hm ? `<h3 class="mdh">${hm[2]}</h3>` : l ? "<p>" + l + "</p>" : "");
     }).join("");
 }
+// While a reply streams in, only the part that changed is redrawn. Rebuilding the whole reply on every chunk re-created each character picture (and its clip) dozens
+// of times, which made them flicker until the reply was finished. Every top-level piece (paragraph, picture...) is remembered as the text it was made from; the
+// pieces before the first one that differs are left alone, so a picture that is already on screen is never touched. (The Video swap in media.js adds a <video>
+// beside a picture: those stay with the picture they belong to.)
+function patchStream(el, html) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  const nodes = [...tpl.content.childNodes], strs = nodes.map((n) => (n.nodeType === 1 ? n.outerHTML : "#" + n.textContent));
+  let old = el._units;
+  if (!old) { el.innerHTML = ""; old = el._units = []; }
+  let k = 0;
+  while (k < old.length && k < strs.length && old[k].s === strs[k] && old[k].n.parentNode === el) k++;
+  if (k < old.length) {
+    const first = old[k].n;
+    if (first.parentNode === el) { while (first.nextSibling) first.nextSibling.remove(); first.remove(); }
+    else { el.innerHTML = ""; k = 0; }           // something took a piece away: start this reply over
+    old.length = k;
+  }
+  const frag = document.createDocumentFragment();
+  for (let i = k; i < nodes.length; i++) { old.push({ s: strs[i], n: nodes[i] }); frag.appendChild(nodes[i]); }
+  el.appendChild(frag);
+}
 function md(text) {
   // ```Info ... ``` blocks (status panels) become collapsible boxes
   return text.split("```").map((part, i) => {
@@ -159,6 +181,12 @@ function renderSidebar() {
     if (b.dataset.act === "redraw") illustrate(turn, im.scene);
     else if (b.dataset.act === "save") showSaveAsPortrait(im.url);
     else if (b.dataset.act === "del" && confirm("Delete this picture?")) { story = await api(`/stories/${story.id}/images?url=${encodeURIComponent(im.url)}`, { method: "DELETE" }); renderAll(); }
+  });
+  el.querySelectorAll(".nowlivebtn button").forEach((b) => b.onclick = async () => {      // the live Right now picture: draw it again, or keep it for the character
+    if (b.dataset.nowact === "save") return showSaveNowPicture();
+    b.disabled = true;
+    try { const r = await api(`/stories/${story.id}/now/redraw`, { method: "POST" }); story.now = r.now; renderSidebar(); watchNow(); }
+    catch (err) { b.disabled = false; alert(err.message); }
   });
   el.querySelectorAll(".nowflip").forEach((b) => b.onclick = () => { nowShowAvatar = !nowShowAvatar; try { localStorage.setItem("nowShowAvatar", nowShowAvatar ? "1" : "0"); } catch (e) { /* not saved */ } renderSidebar(); });
   el.querySelectorAll(".artneed[data-art]").forEach((b) => b.onclick = () => showArtDialog({ only: b.dataset.art, onClose: () => { closeModal(); renderAll(); } }));
@@ -340,7 +368,8 @@ async function send(text, override, forceBudget = false, note = "", redraw = fal
         const line = buf.slice(0, i).trim(); buf = buf.slice(i + 2);
         if (!line.startsWith("data:")) continue;
         const ev = JSON.parse(line.slice(5));
-        if (ev.t === "delta") { acc += ev.v; const ty = $("narrative").querySelector(".typing"); if (ty) ty.innerHTML = md(stripState(acc)); genStatus("writing", stripState(acc).split(/\s+/).filter(Boolean).length); }
+        // while the reply streams: the picture counters are set to what the final redraw uses, so the pictures shown now are the ones that stay (no swapping), and only changed pieces are redrawn
+        if (ev.t === "delta") { acc += ev.v; const ty = $("narrative").querySelector(".typing"); if (ty) { portraitSeed = story.turns.length; portraitCount = 0; newMoodSeen.clear(); patchStream(ty, md(stripState(acc))); } genStatus("writing", stripState(acc).split(/\s+/).filter(Boolean).length); }
         else if (ev.t === "done") story = ev.story;
         else if (ev.t === "error") failed = ev.v;
         else if (ev.t === "note") srvNote = ev.v;
@@ -486,7 +515,6 @@ function showImport(list, opts = {}) {
       <label>The story so far: paste it, or load a text file. Text labelled <code>PLAYER:</code> / <code>NARRATOR:</code> (or You / Assistant, Human / AI, Me / GM…) keeps the last few turns word for word; plain prose keeps its last few paragraphs as the scene in progress; JSON chat exports (ChatGPT, Claude, SillyTavern…) are read directly; everything before that is summarized.</label>
       <textarea class="short" id="iFull" style="min-height:160px"></textarea>
       <div class="actions" style="justify-content:flex-start"><label class="btnlike">Load a .txt / .md / .json file…<input type="file" id="iFile" accept=".txt,.md,.json,.jsonl,text/plain,text/markdown,application/json" hidden></label><span class="hint" id="iCount"></span></div>
-      <label>Which AI writes the summary (and the story prompt, when you give none)?</label><select id="iModel" style="width:100%">${modelOpts}</select>
       <p class="hint">The text is cut into parts of about 14,000 characters and summarized one part at a time, each building on the last. A cheaper model is fine; a stronger one keeps more detail. You can edit the result afterwards (👤 Player → Memory).</p>
     </div>
     <label>Latest status panel (optional; it sets the side panel's starting values, e.g. day, place, relationships. If you leave it empty, the last status panel found in the text, or in the final turn, is used)</label>
@@ -494,6 +522,10 @@ function showImport(list, opts = {}) {
     <div id="pTurns"><label>Optional: last few turns, word for word</label>
     <textarea class="short" id="iTurns" style="min-height:80px" placeholder="PLAYER: what you did&#10;NARRATOR: what the narrator wrote"></textarea>
     <p class="hint">Recent turns keep the narrator's voice and the scene in progress. Use PLAYER: and NARRATOR: labels (or separate blocks with a line of ---).</p></div>
+    <h3>AI helper</h3>
+    <label>Which AI does the work (the summary, the story prompt when you give none, and the character cards)?</label><select id="iModel" style="width:100%">${modelOpts}</select>
+    <label class="chk top"><input type="checkbox" id="iCards"><span><b>Build the character cards from this save</b><span class="hint">The AI helper reads your save and fills in a card for each named character: how they look, their personality, a short bio, other names, and their key events (first meeting, relationship changes, important moments). Characters the story already has only get their empty fields filled. This takes one AI call per character, so it can take a few minutes.</span></span></label>
+    <label class="chk top"><input type="checkbox" id="iNsfw"><span><b>This save has adult content</b><span class="hint">Turns on this story's adult content setting and tells the AI helper to carry sexual and violent events over exactly as the save states them, without censoring or leaving them out (in the summary, the character cards and their key events). Everyone in the story must be an adult. Some AI models refuse adult text: if one declines, pick another above.</span></span></label>
     <div id="iProg" class="hint"></div>
     <div class="actions sticky"><button id="mClose">Cancel</button><button class="primary" id="mGo">Import &amp; open</button></div>`);
   const setMode = (m) => {
@@ -507,27 +539,62 @@ function showImport(list, opts = {}) {
   $("iFile").onchange = async (e) => { const f = e.target.files[0]; if (f) { $("iFull").value = await f.text(); count(); } };
   $("mClose").onclick = () => { closeModal(); };
   $("mGo").onclick = async () => {
-    const base = { title: $("iTitle").value, source_story_id: $("iSource").value || null, base_prompt: $("iPrompt").value, avatar: { name: $("iName").value }, status_panel: $("iPanel").value, into_story_id: opts.into || null };
+    const base = { title: $("iTitle").value, source_story_id: $("iSource").value || null, base_prompt: $("iPrompt").value, avatar: { name: $("iName").value }, status_panel: $("iPanel").value, into_story_id: opts.into || null, build_cards: $("iCards").checked, nsfw: $("iNsfw").checked };
     const btn = $("mGo"); btn.disabled = true;
     try {
-      let r;
+      let r, redo = null;
       if (mode === "summary") {
         const [sp, sm] = ($("iModel") ? $("iModel").value : "|").split("|");
         $("iProg").textContent = !base.base_prompt.trim() && !base.source_story_id && !base.into_story_id ? "Writing a story prompt from your summary…" : "";
         r = await api("/stories/import", { method: "POST", body: { ...base, summary: $("iSummary").value, recent_turns: $("iTurns").value, provider: sp || null, model: sm || null } });
         story = r.story;
+        if (r.job) {          // the character cards are built in the background, one AI call per character
+          const j = await watchJob(r.job, (x) => { $("iProg").textContent = x.current ? `${x.current}… (${x.done}/${x.total} done)` : "Reading the save for characters…"; });
+          if (j.status !== "done") r.warnings = [...(r.warnings || []), "The character cards could not be built: " + (j.error || "unknown error") + " The story itself was imported; you can build cards in the Cast screen."];
+          else { r.warnings = [...(r.warnings || []), j.result.message]; redo = j.result.redo || null; }
+          story = await api("/stories/" + story.id);
+        }
       } else {
         const [provider, model] = $("iModel").value.split("|");
         const job = await api("/stories/import-text", { method: "POST", body: { ...base, text: $("iFull").value, provider, model } });
         const j = await watchJob(job.id, (x) => { $("iProg").textContent = x.current ? `${x.current}… (${x.done}/${x.total} done)` : ""; });
         if (j.status !== "done") throw new Error(j.error || "Import failed");
         story = await api("/stories/" + j.result.story_id);
-        r = { warnings: j.result.warnings };
+        r = { warnings: j.result.warnings }; redo = j.result.redo || null;
       }
       localStorage.setItem("story", story.id);
       closeModal(); hideHome(); renderAll(false); syncModelSelect();
-      if (r.warnings && r.warnings.length) alert(r.warnings.join("\n\n"));
+      if (redo) showImportRedo(story.id, r.warnings || [], redo);          // the AI helper declined something: offer it to another AI
+      else if (r.warnings && r.warnings.length) alert(r.warnings.join("\n\n"));
     } catch (e) { btn.disabled = false; $("iProg").textContent = ""; alert("Import failed: " + e.message); }
+  };
+}
+
+// After an import the AI helper declined some parts of the summary, or did not return some character cards: give exactly that to another AI.
+function showImportRedo(sid, warnings, redo) {
+  const opts = models.map((m) => `<option value="${esc(m.provider)}|${esc(m.model)}">${esc(m.provider_name)}: ${esc(m.model)}</option>`).join("");
+  const left = (r) => [r.parts && r.parts.length ? `the summary of part${r.parts.length > 1 ? "s" : ""} ${r.parts.join(", ")} (of ${r.total})` : "", r.cards && r.cards.length ? `the card${r.cards.length > 1 ? "s" : ""} for ${r.cards.map(esc).join(", ")}` : ""].filter(Boolean).join(" and ");
+  modal(`<h2>⚠ The AI helper declined part of the import</h2>
+    <p style="white-space:pre-wrap">${warnings.map(esc).join("\n\n")}</p>
+    <p>Still to do: <b id="rdLeft">${left(redo)}</b>. The story was imported and is open; everything else is already in it.</p>
+    <label>Give it to another AI</label><select id="rdModel" style="width:100%"><option value="">Choose an AI…</option>${opts}</select>
+    <p class="hint">Only the declined parts are sent. Adult text is sent as the save states it, so pick an AI that allows it. You can also leave this and add the missing events under 👤 Player → Memory.</p>
+    <div id="rdProg" class="hint"></div>
+    <div class="actions"><button id="rdClose">Keep it as it is</button><button class="primary" id="rdGo">Try this AI</button></div>`);
+  $("rdClose").onclick = closeModal;
+  $("rdGo").onclick = async () => {
+    const v = $("rdModel").value; if (!v) { $("rdProg").textContent = "Choose an AI first."; return; }
+    const [provider, model] = v.split("|"); $("rdGo").disabled = true; $("rdProg").textContent = "Starting…";
+    try {
+      const job = await api(`/stories/${sid}/import-redo`, { method: "POST", body: { provider, model } });
+      const j = await watchJob(job.id, (x) => { $("rdProg").textContent = x.current ? `${x.current}…` : ""; });
+      if (j.status !== "done") throw new Error(j.error || "It did not work.");
+      story = await api("/stories/" + sid); renderAll(false);
+      const more = j.result.redo;
+      $("rdProg").textContent = j.result.message;
+      if (more) { $("rdLeft").innerHTML = left(more); $("rdGo").disabled = false; $("rdGo").textContent = "Try another AI"; }
+      else { $("rdLeft").textContent = "nothing"; $("rdGo").classList.add("hidden"); $("rdClose").textContent = "Done"; }
+    } catch (e) { $("rdProg").textContent = "Could not finish: " + e.message; $("rdGo").disabled = false; }
   };
 }
 

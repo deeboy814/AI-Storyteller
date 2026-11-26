@@ -25,7 +25,7 @@ async function maybeStorySetup() {
     <h3>1. Who are you?</h3>
     <div class="suopts">
       ${hasAv ? `<label class="suopt"><input type="radio" name="suAv" value="story" ${modeDefault === "story" ? "checked" : ""}><span><b>${esc(story.avatar.name)}</b> <small class="hint">the character this story already has</small></span></label>` : ""}
-      ${lib.length ? `<label class="suopt"><input type="radio" name="suAv" value="lib"><span><b>One of my saved avatars</b> <select id="suLib" style="margin-left:6px">${lib.map((a) => `<option value="${esc(a.id)}">${esc(a.name || "Unnamed")}</option>`).join("")}</select></span></label>` : ""}
+      ${lib.length ? `<label class="suopt"><input type="radio" name="suAv" value="lib"><span><b>One of my saved avatars</b> <select id="suLib" style="margin-left:6px">${lib.map((a) => `<option value="${esc(a.id)}">${esc((a.name || "Unnamed") + (a.tag ? ` · ${a.tag}` : ""))}</option>`).join("")}</select></span></label>` : ""}
       <label class="suopt"><input type="radio" name="suAv" value="blank" ${modeDefault === "blank" ? "checked" : ""}><span><b>A blank character</b> <small class="hint">write your own; clues from the story show what fits its world</small></span></label>
       <label class="suopt"><input type="radio" name="suAv" value="skip"><span><b>Decide later</b> <small class="hint">uses the plain “you” until you fill in 👤 Player</small></span></label>
     </div>
