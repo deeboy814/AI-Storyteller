@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.4
+**An updated guide and tidied example text**
+
+- **The README is up to date.** It now covers outfits and places, the picture bin, videos, importing a save with character cards, the journal, inventory and reading aloud, with several old button names and a broken link corrected.
+- **Tidied example text.** Some example names in the notes and in on-screen hints were replaced with made-up ones. The app works the same as 1.8.3.
+
 ## 1.8.3
 **A picture bin with Undo, a fix for character cards losing outfits, drag and drop into outfits, and better portraits and imports**
 
