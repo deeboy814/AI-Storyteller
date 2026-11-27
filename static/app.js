@@ -10,7 +10,10 @@ async function api(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   if (!r.ok) { let t = (await r.text()) || r.statusText; try { t = JSON.parse(t).detail || t; } catch (e) { /* plain text */ } try { (window.__bugErr = window.__bugErr || []).push({ kind: "api", t: Date.now(), message: `${opts.method || "GET"} ${path.split("?")[0]} -> ${r.status}: ${String(t).slice(0, 160)}` }); } catch (e) { /* ignore */ } throw new Error(t); }
-  return r.json();
+  const data = await r.json();
+  const binned = r.headers.get("x-picture-bin");     // something was removed and is in the picture bin: offer Undo
+  if (binned && window.noteBinned) setTimeout(() => noteBinned(binned), 0);
+  return data;
 }
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // Images: only local ones (/static/..., /portraits/...) are shown. Remote image links

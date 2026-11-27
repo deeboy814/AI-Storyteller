@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.3
+**A picture bin with Undo, a fix for character cards losing outfits, drag and drop into outfits, and better portraits and imports**
+
+- **Important fix: saving a character could erase their outfits.** In 1.8.2 and possibly earlier, saving, adding or removing a character could erase every character's outfits, the app's links to their outfit, place and extra pictures, the saved prompt of each picture and the chosen cover. This is fixed. The fix stops further loss but does not bring back anything already lost. The picture files were not deleted by this bug.
+- **New: a picture bin and Undo.** Character pictures and videos you remove, and outfit or place pictures you replace, are now kept for 30 days instead of being deleted. After removing something, press **Undo** on the bar at the bottom. Later, open **🗑 Picture bin** (a character's Images tab, or the 🖼 Art menu) and press Restore. Restoring brings back the video and the saved prompt too, and even an outfit or character you removed. The Storage screen shows the bin's size and can empty it. Scene pictures, covers, avatars, place backgrounds, species pictures, intro panels and library pictures are not covered. The bin is not part of full backups.
+- **Fixed: removing an animated picture removed the picture too.** Pressing × on a picture that has a video now asks: remove only the video (the picture stays), remove both, or cancel.
+- **Drag pictures into outfits.** In a character's Images tab, drag a picture onto an outfit to move it there (its video goes with it). Hold Ctrl while dropping to copy the picture instead. You can also drop picture files from your computer onto an outfit. This needs a mouse; touch dragging is not supported yet.
+- **Fixed: outfit pictures seemed to vanish.** Removing a usual picture hid the outfit and place pictures with the same name. They now stay visible, and the narrator is told about them.
+- **See the prompt behind outfit and place pictures.** They now have the 📝 button too: read the prompt, edit it and draw again. Drawing again replaces that picture (the app asks first, and the old one goes to the picture bin).
+- **Fixed: "Redraw them all" after a new Normal 1 deleted outfit, place and extra pictures.** It now replaces only the usual pictures and their earlier versions, which go to the picture bin.
+- **Fixed: later portraits changed clothes.** With picture makers that work from tags without reference pictures, every pose after the first could be given a different outfit. All everyday portraits of a character now use one set of tags.
+- **Importing a save creates outfits.** When building character cards, a character who wears several sets of clothing in your save gets one as their usual look and the others as separate outfits.
+- **Same face with Anima models (optional, off by default).** If the Anima Ref Adapter add-on and its file are installed in ComfyUI (not included; non-commercial licence), portraits drawn with an Anima model can copy the face from the character's "normal 1" picture.
+
 ## 1.8.2
 **Import saves with character cards, keep the Right now picture, private avatar tags, and picture and phone fixes**
 

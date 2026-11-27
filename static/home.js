@@ -305,6 +305,7 @@ async function showStorage() {
       ${rep.stories.map((s) => `<tr><td>${esc(s.title)}</td><td>${fmtBytes(s.pictures)}</td><td>${fmtBytes(s.backups)}</td><td>${fmtBytes(s.story)}</td></tr>`).join("")}</table>
     <h3>Clean up</h3>
     <div class="aiBox"><b>Unchosen picture options</b> ${fmtBytes(rep.options)} <button data-clean="options" ${rep.options ? "" : "disabled"}>Delete</button><div class="hint">Options you drew but did not pick. They are also removed automatically after a day.</div></div>
+    <div class="aiBox"><b>Picture bins</b> ${fmtBytes(rep.bin || 0)} <button class="danger" data-clean="bin" ${rep.bin ? "" : "disabled"}>Empty all</button><div class="hint">Pictures and videos you removed or replaced, in every story. Each is deleted by itself after 30 days.</div></div>
     <div class="aiBox"><b>Small-picture cache</b> ${fmtBytes(rep.thumbs)} <button data-clean="thumbs" ${rep.thumbs ? "" : "disabled"}>Clear</button><div class="hint">Shrunk copies that make screens load fast; they are made again when needed.</div></div>
     <div class="aiBox"><b>Pictures kept from deleted stories</b> ${fmtBytes(keptTotal)} <button class="danger" data-clean="kept" ${keptTotal ? "" : "disabled"}>Delete</button><div class="hint">Kept when you deleted a story without its pictures. A restored story finds them again; once deleted they are gone.</div></div>
     <div class="actions"><button id="mClose">Close</button></div>`);
@@ -319,6 +320,7 @@ async function showStorage() {
   });
   card.querySelectorAll("[data-clean]").forEach((b) => b.onclick = async () => {
     if (b.dataset.clean === "kept" && !confirm("Delete the pictures kept from deleted stories? This cannot be undone.")) return;
+    if (b.dataset.clean === "bin" && !confirm("Delete everything in every story's picture bin for good? This cannot be undone.")) return;
     try { await api("/storage/clean", { method: "POST", body: { what: b.dataset.clean } }); showStorage(); } catch (e) { alert(e.message); }
   });
 }

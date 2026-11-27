@@ -141,23 +141,30 @@ async function showMoodTypes(startName, back) {
 }
 
 // The Prompt window of one picture: the exact words it was drawn from (or, for older pictures, what would be sent now), editable, with "Draw again from this".
-async function showPicturePrompt(slug, mood, url, back) {
-  modal(`<h2>📝 Prompt: ${esc(mood)}</h2><div id="ppBody"><p class="hint">Loading…</p></div>`);
+// `variant` = {outfit, place} for an outfit's or a place's version of a picture: drawing again then replaces that picture (these keep no earlier versions).
+async function showPicturePrompt(slug, mood, url, back, variant = {}) {
+  const outfit = variant.outfit || "", place = variant.place || "", kept = !outfit && !place;
+  const placeName = place ? ((story.places || []).find((p) => p.name.toLowerCase().split(/\s+/).join(" ").trim() === place) || {}).name || place : "";
+  const where = [place ? `at “${placeName}”` : "", outfit ? `in the outfit “${outfit}”` : ""].filter(Boolean).join(" ");
+  const label = [place ? `at: ${placeName}` : "", outfit ? `outfit: ${outfit}` : ""].filter(Boolean).join(", ");
+  modal(`<h2>📝 Prompt: ${esc(mood)}${label ? ` <small class="muted">(${esc(label)})</small>` : ""}</h2><div id="ppBody"><p class="hint">Loading…</p></div>`);
   const ch = story.cast.find((c) => c.slug === slug);
   let r;
   try { r = await api(`/stories/${story.id}/cast/${slug}/picture-prompt?url=${encodeURIComponent(url)}`); } catch (e) { $("ppBody").innerHTML = `<p class="hint">${esc(e.message)}</p><div class="actions"><button id="mClose">Close</button></div>`; $("mClose").onclick = () => back ? back() : closeModal(); return; }
   $("ppBody").innerHTML = `
     <div class="mtpic"><img src="${thumbUrl(url, 260)}" alt=""><div class="hint">${r.saved ? `The exact prompt this picture was drawn from${r.edited ? " (you edited it before)" : ""}.` : "This picture was drawn before the app kept its prompt. This is what would be sent for it now."}<br>Maker: ${esc(r.maker || "?")} · ${r.style === "tags" ? "tag-style prompt" : "sentence prompt"}${r.refs != null ? " · " + r.refs + " reference picture(s)" : ""}</div></div>
+    ${!kept && r.saved && ((r.outfit || "") !== outfit || (r.place || "") !== place) ? `<p class="hint"><b>This prompt was written before the picture was put ${esc(where)}.</b> Check the ${place ? "background and clothing words" : "clothing words"} and change them if needed before drawing again.</p>` : ""}
     <label>Prompt</label><textarea class="short mono" id="ppPrompt" rows="12">${esc(r.prompt)}</textarea>
     <label>Negative prompt</label><textarea class="short mono" id="ppNeg" rows="2">${esc(r.negative || "")}</textarea>
-    <div class="hint">Change any words, then draw again: a new picture is made from exactly this text (the character's saved pictures are still sent as references, if the maker takes them). The current picture is kept as an earlier version. Some makers ignore the negative prompt.</div>
+    <div class="hint">Change any words, then draw again: a new picture is made from exactly this text (the character's saved pictures are still sent as references, if the maker takes them). ${kept ? "The current picture is kept as an earlier version." : `<b>The new picture replaces this ${place ? "place" : "outfit"} picture. The old one, with any video, is not kept.</b> To keep it, first copy it (⧉).`} Some makers ignore the negative prompt.</div>
     <div class="actions"><span class="hint" id="ppMsg"></span><span style="flex:1"></span><button id="ppReset">Undo my edits</button><button id="mClose">Close</button><button class="primary" id="ppGo">Draw again from this</button></div>`;
   const orig = r.prompt, origNeg = r.negative || "";
   $("mClose").onclick = () => back ? back() : closeModal();
   $("ppReset").onclick = () => { $("ppPrompt").value = orig; $("ppNeg").value = origNeg; };
   $("ppGo").onclick = async () => {
+    if (!kept && !confirm(`Draw again and replace the “${mood}” picture ${where}? The old picture, with any video, cannot be brought back.`)) return;
     const b = $("ppGo"); b.disabled = true; b.textContent = "Drawing…"; $("ppMsg").textContent = "";
-    try { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: r.mood || mood, prompt: $("ppPrompt").value, negative: $("ppNeg").value } }); renderAll(); if (back) back(); else closeModal(); }
+    try { story = await api(`/stories/${story.id}/cast/${slug}/generate`, { method: "POST", body: { mood: kept ? r.mood || mood : mood, ...(outfit ? { outfit } : {}), ...(place ? { place } : {}), prompt: $("ppPrompt").value, negative: $("ppNeg").value } }); renderAll(); if (back) back(); else closeModal(); }
     catch (e) { $("ppMsg").textContent = e.message; b.disabled = false; b.textContent = "Draw again from this"; }
   };
 }

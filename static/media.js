@@ -80,7 +80,7 @@
       + (has ? `<button type="button" class="vidshow" data-show="0" title="Show the still picture instead. The video stays saved.">🖼 Show the picture</button>` : "")
       + (off ? `<button type="button" class="vidshow" data-show="1" title="Show the video again in place of the picture">▶ Show the video</button>` : "")
       + (earlier ? `<button type="button" class="vidswap2" title="See the videos that were replaced and use one again">↺ Earlier videos</button>` : "")
-      + (has || off || earlier ? `<button type="button" class="vidremove" title="Deletes the video (and the earlier one). The picture stays.">Remove video</button>` : "") + `<span class="hint vidnote"></span></div>`;
+      + (has || off || earlier ? `<button type="button" class="vidremove" title="Removes the video (and earlier ones). The picture stays.">Remove video</button>` : "") + `<span class="hint vidnote"></span></div>`;
   };
 
   document.addEventListener("change", async (e) => {
@@ -113,7 +113,7 @@
     if (!rm && !an) return;
     const bar = (rm || an).closest(".vidbar"), note = bar.querySelector(".vidnote");
     if (rm) {
-      try { await fetch(`/api/videos?url=${encodeURIComponent(bar.dataset.url)}`, { method: "DELETE" }); await refreshVideos(); bar.outerHTML = videoBar(bar.dataset.url);  } catch (err) { note.textContent = err.message; }
+      try { const r = await fetch(`/api/videos?url=${encodeURIComponent(bar.dataset.url)}`, { method: "DELETE" }); await refreshVideos(); bar.outerHTML = videoBar(bar.dataset.url); if (window.noteBinned) noteBinned(r.headers.get("x-picture-bin")); } catch (err) { note.textContent = err.message; }
       return;
     }
     const ask = await animateDialog();
@@ -144,6 +144,33 @@
     ov.querySelector("#erCancel").onclick = () => done(null);
     ov.querySelectorAll(".eruse").forEach((bt) => bt.onclick = () => done(bt.dataset.id));
   });
+
+  // The × on a picture that has a video: ask what to remove, so removing an animation never takes the picture with it by accident.
+  // Resolves true when the picture itself should now be removed, false when nothing more is to be done (cancelled, or only the video was removed).
+  // `plain` is an extra question for a picture without a video (empty = remove at once, as before); `after` redraws the page when only the video went.
+  window.removePicture = async (url, after, plain = "") => {
+    const u = (url || "").split("?")[0];
+    await refreshVideos();
+    const has = !!window.VIDEOS[u] || !!(window.VIDEO_EXTRA.hidden || {})[u] || (window.VIDEO_EXTRA.earlier || []).includes(u);
+    if (!u || !has) return !plain || confirm(plain);
+    const pick = await new Promise((resolve) => {
+      const ov = document.createElement("div");
+      ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px";
+      ov.innerHTML = `<div class="card" style="max-width:460px;width:100%"><h3 style="margin-top:0">This picture has a video</h3>
+        <p><b>Remove video only</b> keeps the picture and removes its video, including any earlier ones. Whatever you remove from a story goes to its 🗑 Picture bin for 30 days.</p>
+        <div class="actions" style="flex-wrap:wrap"><button type="button" data-p="">Cancel</button><button type="button" data-p="all">Remove picture and video</button><button type="button" data-p="video" class="primary">Remove video only</button></div></div>`;
+      document.body.appendChild(ov);
+      ov.querySelectorAll("button").forEach((b) => b.onclick = () => { ov.remove(); resolve(b.dataset.p); });
+      ov.querySelector('[data-p="video"]').focus();
+    });
+    if (pick !== "video") return pick === "all";
+    const r = await fetch(`/api/videos?url=${encodeURIComponent(u)}`, { method: "DELETE" });
+    if (!r.ok) throw new Error("Could not remove the video.");
+    await refreshVideos();
+    if (after) after();
+    if (window.noteBinned) noteBinned(r.headers.get("x-picture-bin"));
+    return false;
+  };
 
   // The Animate question: what should move, and (in a story with adult content on) whether this is an adult clip, which uses the adult video model and LoRAs.
   window.animateDialog = () => new Promise((resolve) => {

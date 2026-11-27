@@ -20,7 +20,7 @@ function showArtHub(tab = "Overview") {
     <div class="tabs"><button class="tab hubtab" data-tab="Overview">Overview</button><button class="tab hubtab" data-tab="Style">Style &amp; options</button><button class="tab hubtab" data-tab="Backgrounds">Backgrounds</button><button class="tab hubtab" data-tab="Makers">Picture makers</button></div>
     <div id="hubOverview" class="hubgrid">
       ${card("🎭", "Characters", `${cast.length} character${cast.length === 1 ? "" : "s"} · ${withArt} with pictures${need ? ` · <b>${need} need art</b>` : ""}`,
-        `<button id="hCast">Cast &amp; pictures…</button><button id="aNew">Draw art for new characters…</button><button id="hGal">Gallery</button><button id="hSpecies">Species &amp; makers…</button>`)}
+        `<button id="hCast">Cast &amp; pictures…</button><button id="aNew">Draw art for new characters…</button><button id="hGal">Gallery</button><button id="hSpecies">Species &amp; makers…</button><button id="hBin" title="Pictures and videos you removed or replaced, kept for 30 days">🗑 Picture bin</button>`)}
       ${(() => { const sb = story.statsheets || {}; if (!sb.on) return "";       // character sheets: shown only in stories that have them on
         const has = (c) => { const h = (sb.items || {})[c.slug]; return !!(h && ((h.stats || []).length || (h.notes || "").trim())); }, n = cast.filter(has).length, shown = cast.slice(0, 12);
         return card("📋", "Character sheets", `${n} of ${cast.length} character${cast.length === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} a sheet · the narrator updates them: ${onoff(sb.auto !== false)}`,
@@ -72,6 +72,7 @@ function showArtHub(tab = "Overview") {
   document.querySelectorAll(".hSheet").forEach((b) => b.onclick = via(() => showCharacter(b.dataset.slug, "Sheet")));
   if ($("hSheetMore")) $("hSheetMore").onclick = via(() => showCast("Characters"));
   $("hGal").onclick = via(() => showCast("Gallery"));
+  $("hBin").onclick = () => showPictureBin(back);
   $("hSpecies").onclick = via(() => showSpecies({ back }));
   $("hIntro").onclick = via(() => showCast("Intro"));
   $("aNew").onclick = via(() => showArtDialog({ onClose: () => { renderAll(); back(); } }));

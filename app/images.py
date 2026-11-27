@@ -12,6 +12,7 @@ To add a provider type, write one function and register it in GENERATORS.
 import asyncio
 import base64
 import copy
+import hashlib
 import io
 import json
 import logging
@@ -297,6 +298,51 @@ def tweak_workflow(wf: dict, tw: dict) -> dict:
     return wf
 
 
+FACE_REF_FILE = "anima_ref_adapter_v2_r64.safetensors"       # the Anima reference adapter (ComfyUI-Anima-Ref-Adapter add-on): keeps a character's face from one picture
+FACE_REF_NODE = "AnimaRefAdapter"
+FACE_REF_GUIDANCE = 2.0      # the add-on suggests 4.5; 2.0 left more room for expressions and clothing changes in tests with Vivid Gloom
+HEAD_CROP = 0.40             # how far down a head-only reference reaches (share of the picture's height)
+
+
+async def face_ref_status(base: str) -> tuple[bool, bool]:
+    """(ComfyUI answers, it has both the add-on and the adapter file). The file is looked for in ComfyUI's own LoRA list: the add-on's list also names files it would download, which the app must not set off."""
+    try:
+        async with httpx.AsyncClient(timeout=6) as c:
+            node = (await c.get(f"{base}/object_info/{FACE_REF_NODE}")).json()
+            loras = (await c.get(f"{base}/object_info/LoraLoaderModelOnly")).json()["LoraLoaderModelOnly"]["input"]["required"]["lora_name"][0]
+    except Exception:
+        return False, False
+    return True, FACE_REF_NODE in node and FACE_REF_FILE in loras
+
+
+def head_crop(data: bytes, bottom: float = HEAD_CROP) -> bytes:
+    """The top of a portrait (head, hair, a little neck), so a reference keeps the face without the clothes. `bottom` = how far down it reaches; a deeper crop (for a close-up) is also wider."""
+    from PIL import Image
+    bottom = max(0.2, min(0.9, float(bottom)))
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    w, h = im.size
+    side = 0.2 if bottom <= 0.5 else 0.1
+    out = io.BytesIO()
+    im.crop((int(w * side), 0, int(w * (1 - side)), max(2, int(h * bottom)))).save(out, "PNG")
+    return out.getvalue()
+
+
+def add_face_ref(wf: dict, image: str) -> bool:
+    """Put the reference adapter between each sampler and its model (after any LoRAs). False when the workflow has no sampler or VAE to wire it to."""
+    samplers = [n for n in wf.values() if isinstance(n, dict) and str(n.get("class_type", "")).startswith("KSampler") and isinstance((n.get("inputs") or {}).get("model"), list)]
+    vae = next(([k, 0] for k, n in wf.items() if isinstance(n, dict) and n.get("class_type") == "VAELoader"), None)
+    if not vae:
+        vae = next((n["inputs"]["vae"] for n in wf.values() if isinstance(n, dict) and n.get("class_type") == "VAEDecode" and isinstance(n.get("inputs", {}).get("vae"), list)), None)
+    if not samplers or not vae:
+        return False
+    wf["faceref_image"] = {"class_type": "LoadImage", "inputs": {"image": image}}
+    for i, n in enumerate(samplers):
+        wf[f"faceref{i}"] = {"class_type": FACE_REF_NODE, "inputs": {"model": n["inputs"]["model"], "vae": vae, "image": ["faceref_image", 0], "lora_name": FACE_REF_FILE,
+                                                                    "ref_guidance": FACE_REF_GUIDANCE, "correction": "apg"}}
+        n["inputs"]["model"] = [f"faceref{i}", 0]
+    return True
+
+
 def face_region(data: bytes, tight: "bool | str" = False) -> bytes:
     """Crop a reference picture to where the face is: the app draws portraits upper-body, centred and facing the viewer, so the middle half
     of the width and the top 62% holds the head and shoulders. The face model only sees a small square of the whole picture, so a tight
@@ -411,6 +457,14 @@ async def _comfyui(p, prompt, negative, shape, refs, seed):
                 if names:
                     values[f"ref{i + 1}"] = names[min(i, len(names) - 1)]
             wf = fill_workflow(wf, values)
+            ref = p.get("_face_ref")      # {"data": picture bytes, "used": False}: keep this face. Skipped (an ordinary picture) when the add-on or its file is missing
+            if ref and (await face_ref_status(base))[1]:
+                name = "storyteller_face_" + hashlib.sha1(ref["data"]).hexdigest()[:12] + ".png"
+                wired = copy.deepcopy(wf)
+                if add_face_ref(wired, name):
+                    up = await c.post(base + "/upload/image", files={"image": (name, ref["data"], "image/png")}, data={"overwrite": "true"})
+                    _fail(up, "ComfyUI upload")
+                    wf, ref["used"] = wired, True
             sub = await c.post(base + "/prompt", json={"prompt": wf, "client_id": uuid.uuid4().hex})
             if sub.status_code >= 400 and "lora_name" in sub.text and "not in list" in sub.text.lower():
                 raise ImageError("A LoRA chosen for this checkpoint is not in ComfyUI's loras folder (or its name changed). Remove it or pick another under 🖼 Art → Picture makers → Picture settings (Settings for this model).")

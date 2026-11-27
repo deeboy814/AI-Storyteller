@@ -28,7 +28,7 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import appstatus, backup, localfix, beats, bugreport, characters, clock, images, inventory, lore, moods, statsheet, rules, importer, localrt, portrait_import, prompting, providers, store, tracker, usage
+from . import appstatus, backup, localfix, beats, bugreport, characters, clock, images, inventory, lore, moods, statsheet, rules, importer, localrt, picturebin, portrait_import, prompting, providers, store, tracker, usage
 
 ROOT = Path(__file__).resolve().parent.parent
 # ---------------- keep-warm: refresh Claude's prompt cache while you're away ----------------
@@ -120,6 +120,7 @@ async def _keep_warm_loop() -> None:
 @asynccontextmanager
 async def lifespan(_app):
     await asyncio.to_thread(store.clean_scratch)      # unchosen "Draw 4 options" pictures older than a day
+    await asyncio.to_thread(picturebin.purge)         # pictures that have been in the picture bin for 30 days
     task = asyncio.create_task(_keep_warm_loop())
     rt = asyncio.create_task(localrt.loop())
     bk = asyncio.create_task(_backup_loop())
@@ -160,6 +161,20 @@ def code_status():
 async def _provider_error(_request: Request, exc: providers.ProviderError):
     """An AI service refused or could not be reached: say so plainly instead of a bare "Internal Server Error"."""
     return JSONResponse({"detail": str(exc)}, status_code=502)
+
+
+@app.middleware("http")
+async def _tell_binned(request: Request, call_next):
+    """If this request moved pictures or videos to the picture bin because the player removed them, say which (the page then offers Undo)."""
+    got: list[str] = []
+    token = picturebin.removed_now.set(got)
+    try:
+        response = await call_next(request)
+    finally:
+        picturebin.removed_now.reset(token)
+    if got and response.status_code < 400:
+        response.headers["X-Picture-Bin"] = ",".join(got[:300])
+    return response
 
 
 # ---------------- optional access PIN for other devices on your network (see run-lan.sh) ----------------
@@ -1759,6 +1774,17 @@ def _is_anima(name: str) -> bool:
     return bool(re.search(r"anima(?!gine)|vivid.?gloom", name or "", re.IGNORECASE))
 
 
+def _face_ref_plan(prov: dict, ch: dict, mood: str, bare: bool, head: bool) -> dict | None:
+    """Whether this portrait copies the face from "normal 1" with the Anima reference adapter (the "Keep the same face" switch). Only clothed portraits drawn by an Anima model;
+    never "normal 1" itself, adult pictures or an adult picture maker. head = only the head is given, because the clothes must differ from "normal 1" (an outfit, combat clothing)."""
+    first = (ch.get("moods") or {}).get("normal 1")
+    if not (prov.get("anima_ref") and prov.get("type") == "comfyui" and _is_anima(prov.get("model", ""))) or bare or prov.get("nsfw_maker") or prov.get("_explicit_main"):
+        return None
+    if mood == "normal 1" or not first or not _portrait_file(first):
+        return None
+    return {"url": first, "crop": "head" if head else "full"}
+
+
 def _flux_provider(cfg: dict, s: dict | None = None, model: str | None = None) -> dict:
     """FLUX.2 klein through ComfyUI, with room for two reference pictures (it keeps a character steady and can copy a whole species' look)."""
     comfy = next((p for p in cfg.get("image_providers", []) if p.get("type") == "comfyui"), None)
@@ -1995,7 +2021,9 @@ def _store_mood(s: dict, ch: dict, mood: str, data: bytes, ext: str) -> str:
     mood = mood.strip().lower()
     folder = store.PORTRAITS / s["id"] / "chars" / ch["slug"]
     folder.mkdir(parents=True, exist_ok=True)
-    name = f"{_slug(mood)}-{int(time.time() * 1000)}.{ext}"
+    stamp = int(time.time() * 1000)
+    while (folder / (name := f"{_slug(mood)}-{stamp}.{ext}")).exists():      # two saves in the same millisecond must not share a file
+        stamp += 1
     (folder / name).write_bytes(data)
     moods = ch.setdefault("moods", {})
     if moods.get(mood):
@@ -2034,9 +2062,8 @@ def _store_variant_pic(s: dict, ch: dict, field: str, key: str, mood: str, data:
     name = f"{_slug(key.replace('@', ' '))}-{_slug(mood)}-{int(time.time() * 1000)}.{ext}"
     (folder / name).write_bytes(data)
     pics = ch.setdefault(field, {}).setdefault(key, {})
-    old = _portrait_file(pics.get(mood, "")) if pics.get(mood) else None
-    if old:
-        old.unlink(missing_ok=True)
+    if pics.get(mood):      # the picture being replaced goes to the picture bin, with its video
+        picturebin.put(s["id"], ch, pics[mood], {"field": field, "key": key, "mood": mood}, "replaced")
     pics[mood] = f"/portraits/{s['id']}/chars/{ch['slug']}/{name}"
     return pics[mood]
 
@@ -2273,6 +2300,10 @@ def _merge_cast(s: dict, source_slug: str, into_slug: str) -> None:
         if not (dst.get(k) or "").strip() and (src.get(k) or "").strip():
             dst[k] = src[k]
     s["cast"] = [c for c in s["cast"] if c["slug"] != src["slug"]]
+    for u, slot in picturebin.slots(src).items():
+        f = _portrait_file(u)
+        if f and f.parent == folder_src.resolve() and (slot["field"] not in ("moods", "alts") or picturebin.clips_of(f)):
+            picturebin.put(s["id"], src, u, slot)
     shutil.rmtree(folder_src, ignore_errors=True)
     alias = s.setdefault("char_alias", {})   # side-panel rows filed under the old name move to the real character's row
     for n in [src["name"]] + list(src.get("aka") or []):
@@ -2327,7 +2358,8 @@ def update_cast(sid: str, body: CastIn):
             continue
         seen.add(slug)
         prev = old.get(slug, {})
-        new.append({"name": name, "slug": slug, "appearance": m.appearance.strip(),
+        new.append({**prev,      # whatever the card editor does not send is kept: outfits and their pictures, place pictures, extra pictures, picture prompts, the cover...
+                    "name": name, "slug": slug, "appearance": m.appearance.strip(),
                     "bio": prev.get("bio", "") if m.bio is None else m.bio.strip(),
                     "events": prev.get("events", []), "moods": prev.get("moods", {}), "alts": prev.get("alts", {}),
                     "group": prev.get("group", ""), "player": prev.get("player", False), "ext_refs": prev.get("ext_refs", []), "tags": prev.get("tags", ""), "tags_adult": prev.get("tags_adult", ""),
@@ -2345,6 +2377,9 @@ def update_cast(sid: str, body: CastIn):
         if not _is_human(c.get("species")):
             s.setdefault("species", {}).setdefault(c["species"].strip().lower(), {"name": c["species"].strip(), "description": "", "maker": "", "reference_url": "", "from": ""})
     for slug in old.keys() - seen:
+        for u, slot in picturebin.slots(old[slug]).items():
+            if u.startswith(f"/portraits/{sid}/chars/{slug}/"):
+                picturebin.put(sid, old[slug], u, slot)
         shutil.rmtree(store.PORTRAITS / sid / "chars" / slug, ignore_errors=True)
         gone = old[slug]["name"]       # a character the player removed must not come back by itself from the next reply
         if gone.lower() not in {n.lower() for n in s.get("art_dismissed", [])}:
@@ -2442,9 +2477,8 @@ def delete_mood(sid: str, slug: str, mood: str):
     ch = _char(s, slug)
     mood = mood.strip().lower()
     cur = (ch.get("moods") or {}).get(mood)
-    f = _portrait_file(cur) if cur else None
-    if f:
-        f.unlink(missing_ok=True)
+    if cur:
+        picturebin.put(sid, ch, cur, picturebin.slots(ch).get(cur))
     alts = (ch.get("alts") or {}).get(mood, [])
     if alts:
         ch["moods"][mood] = alts.pop(0)
@@ -2474,16 +2508,13 @@ def set_outfits(sid: str, slug: str, body: OutfitsIn):
             if not re.fullmatch(r"[a-z0-9][a-z0-9 _-]{0,29}", k):
                 raise HTTPException(400, "Use up to 30 letters, numbers, spaces, hyphens or underscores for an outfit name.")
             new[k] = v.strip()[:400]
+    where, card = picturebin.slots(ch), picturebin._card(ch, dict(ch.get("outfits") or {}))
     for gone in set(ch.get("outfits") or {}) - set(new):
         for u in ((ch.get("outfit_pics") or {}).pop(gone, None) or {}).values():
-            f = _portrait_file(u)
-            if f:
-                f.unlink(missing_ok=True)
+            picturebin.put(sid, ch, u, where.get(u), card=card)
     for k in [k for k in (ch.get("place_pics") or {}) if "@" in k and k.split("@", 1)[1] not in new]:
         for u in (ch["place_pics"].pop(k) or {}).values():
-            f = _portrait_file(u)
-            if f:
-                f.unlink(missing_ok=True)
+            picturebin.put(sid, ch, u, where.get(u), card=card)
     ch["outfits"] = new
     if ch.get("outfit") not in new:
         ch.pop("outfit", None)
@@ -2537,10 +2568,10 @@ def delete_outfit_pic(sid: str, slug: str, outfit: str, mood: str):
     s = _story(sid)
     ch = _char(s, slug)
     pics = (ch.get("outfit_pics") or {}).get(outfit.strip().lower()) or {}
+    where = picturebin.slots(ch)
     u = pics.pop(mood.strip().lower(), None)
-    f = _portrait_file(u) if u else None
-    if f:
-        f.unlink(missing_ok=True)
+    if u:
+        picturebin.put(sid, ch, u, where.get(u))
     store.save_story(s)
     return s
 
@@ -2572,10 +2603,10 @@ def delete_place_pic(sid: str, slug: str, key: str, mood: str):
     s = _story(sid)
     ch = _char(s, slug)
     pics = (ch.get("place_pics") or {}).get(key.strip().lower()) or {}
+    where = picturebin.slots(ch)
     u = pics.pop(mood.strip().lower(), None)
-    f = _portrait_file(u) if u else None
-    if f:
-        f.unlink(missing_ok=True)
+    if u:
+        picturebin.put(sid, ch, u, where.get(u))
     if not pics:
         (ch.get("place_pics") or {}).pop(key.strip().lower(), None)
     store.save_story(s)
@@ -2839,12 +2870,11 @@ def delete_alternate(sid: str, slug: str, url: str):
     ch = _char(s, slug)
     for mood, urls in list((ch.get("alts") or {}).items()):
         if url in urls:
+            where = picturebin.slots(ch)
             urls.remove(url)
             if not urls:
                 ch["alts"].pop(mood)
-            f = _portrait_file(url)
-            if f:
-                f.unlink(missing_ok=True)
+            picturebin.put(sid, ch, url, where.get(url))
     store.save_story(s)
     return s
 
@@ -2855,21 +2885,8 @@ def delete_all_pictures(sid: str, slug: str):
     Pictures borrowed from other stories (references) are kept, and so is the character themselves."""
     s = _story(sid)
     ch = _char(s, slug)
-    urls = list((ch.get("moods") or {}).values()) + [u for lst in (ch.get("alts") or {}).values() for u in lst]
-    for u in urls:
-        f = _portrait_file(u)
-        if f:
-            f.unlink(missing_ok=True)
-    for fld in ("outfit_pics", "place_pics"):
-        for pics in (ch.get(fld) or {}).values():
-            for u in pics.values():
-                f = _portrait_file(u)
-                if f:
-                    f.unlink(missing_ok=True)
-    for x in ch.get("extras") or []:
-        f = _portrait_file(x.get("url") or "")
-        if f:
-            f.unlink(missing_ok=True)
+    for u, slot in picturebin.slots(ch).items():
+        picturebin.put(sid, ch, u, slot)
     ch["moods"], ch["alts"], ch["outfit_pics"], ch["place_pics"], ch["extras"] = {}, {}, {}, {}, []
     shutil.rmtree(store.PORTRAITS / sid / "chars" / slug / "_candidates", ignore_errors=True)
     store.save_story(s)
@@ -2884,17 +2901,15 @@ class DeleteSetIn(BaseModel):
 
 @app.post("/api/stories/{sid}/cast/{slug}/delete-set")
 def delete_picture_set(sid: str, slug: str, body: DeleteSetIn):
-    """Delete a whole set of this character's pictures at once (files too; it cannot be undone). category: the listed usual pictures with their earlier versions;
+    """Delete a whole set of this character's pictures at once (they go to the picture bin). category: the listed usual pictures with their earlier versions;
     earlier: every replaced (earlier) version; outfit / place: one outfit's or one place's pictures (the outfit or place itself stays); outfits / places: all of them."""
     s = _story(sid)
     ch = _char(s, slug)
 
+    where, card = picturebin.slots(ch), picturebin._card(ch)
+
     def drop(u) -> int:
-        f = _portrait_file(u) if u else None
-        if f:
-            f.unlink(missing_ok=True)
-            return 1
-        return 0
+        return 1 if u and picturebin.put(sid, ch, u, where.get(u), card=card) else 0
 
     n, key = 0, " ".join(body.key.strip().lower().split())
     if body.kind == "category":
@@ -2977,6 +2992,76 @@ def copy_picture(sid: str, slug: str, body: CopyPictureIn):
     return {"mood": new, "outfit": out, "story": s}
 
 
+class MoveToOutfitIn(BaseModel):
+    url: str
+    outfit: str
+    name: str = ""      # the empty place it was dropped on; "" = keep the picture's own name
+
+
+@app.post("/api/stories/{sid}/cast/{slug}/move-to-outfit")
+def move_to_outfit(sid: str, slug: str, body: MoveToOutfitIn):
+    """Drag and drop: move one of this character's pictures into an outfit. The file itself stays where it is (only the list it is in changes), so its video
+    and saved prompt go with it and nothing is deleted. A name the outfit already has is numbered, never replaced."""
+    s = _story(sid)
+    ch = _char(s, slug)
+    out = body.outfit.strip().lower()
+    if out not in (ch.get("outfits") or {}):
+        raise HTTPException(404, "That outfit is not there any more.")
+    moods_, alts = ch.get("moods") or {}, ch.get("alts") or {}
+    src = None      # (where it is now, key, picture name)
+    for m, u in moods_.items():
+        if u == body.url:
+            src = ("moods", m, m)
+    for m, us in alts.items():
+        if body.url in us:
+            src = src or ("alts", m, m)
+    for fld in ("outfit_pics", "place_pics"):
+        for k, d in (ch.get(fld) or {}).items():
+            for m, u in (d or {}).items():
+                if u == body.url:
+                    src = src or (fld, k, m)
+    for x in ch.get("extras") or []:
+        if x.get("url") == body.url:
+            src = src or ("extras", "", x.get("mood") or "")
+    if not src:
+        raise HTTPException(404, "That picture is not one of this character's pictures.")
+    where, key, mood = src
+    if where == "moods" and mood == "normal 1":
+        raise HTTPException(400, "\u201cnormal 1\u201d is the face every other picture is drawn from, so it stays where it is. Hold Ctrl while you drop it to put a copy in the outfit.")
+    new = " ".join((body.name or mood).strip().lower().split())
+    if not re.fullmatch(r"[a-z0-9][a-z0-9 _-]{0,29}", new):
+        raise HTTPException(400, "Give this picture an expression or action name first, or drop it on an empty place in the outfit.")
+    if _unclothed(s, store.load_config(), new) or (mood and _unclothed(s, store.load_config(), mood)):
+        raise HTTPException(400, _UNCLOTHED_MSG)
+    target = (ch.get("outfit_pics") or {}).get(out) or {}
+    if where == "outfit_pics" and key == out and (new == mood or target.get(new)):
+        return {"mood": mood, "outfit": out, "story": s}      # dropped where it already is
+    if new in target:
+        new = _next_free_name({"moods": target}, new)
+    if where == "moods":
+        if alts.get(key):                    # an earlier version takes its place, as when a picture is removed
+            ch["moods"][key] = alts[key].pop(0)
+            if not alts[key]:
+                alts.pop(key)
+        else:
+            ch["moods"].pop(key)
+        if ch.get("cover") and ch["cover"] not in ch["moods"]:
+            ch.pop("cover", None)
+    elif where == "alts":
+        alts[key].remove(body.url)
+        if not alts[key]:
+            alts.pop(key)
+    elif where == "extras":
+        ch["extras"] = [x for x in ch["extras"] if x.get("url") != body.url]
+    else:
+        ch[where][key].pop(mood)
+        if where == "place_pics" and not ch[where][key]:
+            ch[where].pop(key)
+    ch.setdefault("outfit_pics", {}).setdefault(out, {})[new] = body.url
+    store.save_story(s)
+    return {"mood": new, "outfit": out, "story": s}
+
+
 _CLOTHES = re.compile(r"\b(blazer|blouse|skirt|shoes?|boots?|sandals|sneakers|heels|uniforms?|jackets?|coats?|hoodie|t-?shirt|shirts?|tee|dress(?:es|ed)?|gown|jeans|trousers|\w*pants|slippers?|sweatshirts?|joggers|shorts|slacks|suits?|neck-?ties?|ties?|scarf|hats?|caps?|beanie|sweater|cardigan|vest|apron|robes?|kimono|lanyard|badge|clipboard|backpack|satchel|belt|gloves?|stockings|tights|socks|leggings|bodysuit|jumpsuit|fatigues|outfit|clothes|clothing|wears?|wearing|watch|bracelets?|necklaces?|earrings?|holding|holds?|clutch(?:es|ing)?|carr(?:y|ies|ying)|tablet|phone|headset|name ?tag|bustier|bra|camisole|corset|bodice|tank|bandeau|panties|thong|lingerie|lace|garters?|cargo|headphones|armband|jewel(?:l)?ery|chains?|bag|purse|hoops?|pendant|rings?|choker|top|tee-?shirt|sneaker|platform|straps?)\b", re.IGNORECASE)
 
 
@@ -3052,6 +3137,7 @@ async def _portrait_plan(s: dict, cfg: dict, ch: dict, mood: str, provider: str 
     if (sneg := _species_negative(s, [ch])):       # words this species' pictures must not have (set on its Species card)
         art = {**art, "negative": ((art.get("negative") or "").rstrip(", ") + ", " + sneg).strip(", ")}
     plain_bg = prov.get("ref_mode") == "none"       # Chroma / Qwen-Image: no reference pictures, and they paint any place named in the prompt behind the face, so the portrait leaves the world's setting out
+    tag_setting = art.get("setting", "")      # the character's own picture tags are always written with the setting, so every portrait shares one set of them
     if plain_bg:
         art = {**art, "setting": ""}
     look = _full_appearance(s, ch, action=_is_action(mood) and not explicit_pic)     # an action picture (not an adult one): the species' combat clothing
@@ -3059,7 +3145,8 @@ async def _portrait_plan(s: dict, cfg: dict, ch: dict, mood: str, provider: str 
     outfit_text = ((ch.get("outfits") or {}).get(outfit) or outfit or "").strip() if outfit else ""
     if outfit_text and not sex_pic:      # an outfit version: their own clothing words are replaced by the outfit's (also for adult pictures that are not of the body: aroused, seductive...)
         look = ((_body_look(look) or look).rstrip(" .") + f". Wearing: {outfit_text.rstrip('.')}.").strip()
-    if plain_bg and not _is_action(mood):
+    close = plain_bg and not _is_action(mood)
+    if close and not _wants_tags(prov):      # tag-style makers keep the whole description (one set of tags for every picture) and drop the lower-body tags afterwards
         look = _upper_look(look) or look
     adult_sdxl = bool(prov.get("nsfw_maker")) and prov.get("type") == "comfyui" and not _is_flux_model(prov.get("model", ""))
     if sex_pic and not adult_sdxl:
@@ -3091,7 +3178,8 @@ async def _portrait_plan(s: dict, cfg: dict, ch: dict, mood: str, provider: str 
         prompt = prompt.replace("simple soft background", "plain soft studio backdrop, soft even light").replace("Simple soft background.", "Plain soft studio backdrop, soft even light.")
         negative = (negative + ", " if negative else "") + PLAIN_BG_NEGATIVE
     if _wants_tags(prov):
-        prompt, negative = await _portrait_tag_prompt(s, cfg, art, {**ch, "appearance": look}, mood, notes=(f"background: {place_text}" if place_text else ""), sex_pic=sex_pic)
+        tag_ch = {**ch, "appearance": look, **({"tags": ""} if outfit_text and not sex_pic else {})}      # an outfit version: the player's own tags name the usual clothes
+        prompt, negative = await _portrait_tag_prompt(s, cfg, art, tag_ch, mood, notes=(f"background: {place_text}" if place_text else ""), sex_pic=sex_pic, tag_setting=tag_setting, close=close)
     if prov.get("nsfw_maker"):
         if adult_sdxl and not _wants_tags(prov):
             _, negative = _add_nsfw_words("", negative, prov, "")           # the explicit words go into the short prompt below; this only clears words that forbid nudity from the negative
@@ -3102,7 +3190,8 @@ async def _portrait_plan(s: dict, cfg: dict, ch: dict, mood: str, provider: str 
     elif prov.get("_explicit_main"):
         prompt, negative = _add_nsfw_words(prompt, negative, prov, _nsfw_words(cfg, prov, s), art)
     shape = ((prov.get("model_tweaks") or {}).get(prov.get("model", "")) or {}).get("shape") if prov.get("nsfw_maker") else None
-    return {"prov": prov, "refs": refs, "prompt": prompt, "negative": negative, "mood": mood, "explicit": explicit_pic,
+    face_ref = _face_ref_plan(prov, ch, mood, bool(sex_pic or explicit_pic or _is_explicit(mood, cfg)), bool(outfit_text) or _is_action(mood))
+    return {"prov": prov, "refs": refs, "prompt": prompt, "negative": negative, "mood": mood, "explicit": explicit_pic, "face_ref": face_ref,
             "shape": shape if shape in images.SHAPES else s["art"].get("portrait_shape", "landscape"), "seed": zlib.crc32(slug.encode()) if plain_bg else None,     # a steady seed per character keeps the face alike across moods when there are no reference pictures
             "style": "tags" if _wants_tags(prov) else "sentences"}
 
@@ -3134,6 +3223,13 @@ async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None
     edited = prompt is not None
     final_prompt = prompt if edited else plan["prompt"]
     final_neg = (negative if negative is not None else plan["negative"]) if edited else plan["negative"]
+    face_ref = None
+    if plan["face_ref"]:
+        picture = _portrait_file(plan["face_ref"]["url"]).read_bytes()
+        if plan["face_ref"]["crop"] == "head":
+            picture = images.head_crop(picture, ch.get("face_crop") or images.HEAD_CROP)
+        face_ref = {"data": picture, "used": False}
+        prov = {**prov, "_face_ref": face_ref}
     try:
         data, ext = await images.generate(prov, final_prompt, final_neg, plan["shape"], plan["refs"], seed=plan["seed"])
     except images.ImageError as e:
@@ -3142,7 +3238,8 @@ async def _draw_mood(sid: str, slug: str, mood: str, provider: str | None = None
     ch = _char(s, slug)
     url = _store_variant_pic(s, ch, "place_pics", place + (f"@{outfit}" if outfit else ""), mood, data, ext) if place else _store_outfit_pic(s, ch, outfit, mood, data, ext) if outfit else _store_mood(s, ch, mood, data, ext)
     meta = ch.setdefault("pic_meta", {})
-    meta[url] = {"prompt": final_prompt, "negative": final_neg, "maker": prov.get("model", ""), "style": plan["style"], "mood": mood, "ts": time.time(), "edited": edited, "refs": len(plan["refs"]), **({"outfit": outfit} if outfit else {}), **({"place": place} if place else {})}
+    meta[url] = {"prompt": final_prompt, "negative": final_neg, "maker": prov.get("model", ""), "style": plan["style"], "mood": mood, "ts": time.time(), "edited": edited, "refs": len(plan["refs"]), **({"outfit": outfit} if outfit else {}), **({"place": place} if place else {}),
+                 **({"face_ref": plan["face_ref"]["crop"]} if face_ref and face_ref["used"] else {})}
     for old_url in list(meta)[:-400]:
         meta.pop(old_url, None)
     store.save_story(s)
@@ -3355,9 +3452,20 @@ async def picture_prompt(sid: str, slug: str, url: str):
     if meta:
         return {**meta, "saved": True}
     mood = next((m for m, u in (ch.get("moods") or {}).items() if u == url), None) or next((m for m, lst in (ch.get("alts") or {}).items() if url in lst), None)
+    outfit = place = ""
+    if not mood:
+        outfit, mood = next(((o, m) for o, d in (ch.get("outfit_pics") or {}).items() for m, u in (d or {}).items() if u == url and o in (ch.get("outfits") or {})), ("", None))
+    if not mood:      # a picture at a place: the key is the place's name, or "place@outfit"
+        here = {_place_key(x["name"]) for x in s.get("places", [])}
+        for k, d in (ch.get("place_pics") or {}).items():
+            p, _, o = k.partition("@")
+            m = next((m for m, u in (d or {}).items() if u == url), None)
+            if m and p in here and (not o or o in (ch.get("outfits") or {})):
+                place, outfit, mood = p, o, m
+                break
     if not mood:
         raise HTTPException(404, "That picture is not on this character.")
-    plan = await _portrait_plan(s, store.load_config(), ch, mood, None)
+    plan = await _portrait_plan(s, store.load_config(), ch, mood, None, outfit, place)
     return {"prompt": plan["prompt"], "negative": plan["negative"], "maker": plan["prov"].get("model", ""), "style": plan["style"], "mood": mood, "saved": False, "edited": False}
 
 
@@ -4018,7 +4126,7 @@ def _clean_tags(v: str) -> str:
 def _tags_info(s: dict, slug: str) -> dict:
     ch = _char(s, slug)
     own = (ch.get("tags") or "").strip()
-    cached = (s.get("tag_cache") or {}).get(_tag_key(s, s.get("art") or {}, ch), "") if not own else ""
+    cached = (s.get("tag_cache") or {}).get(_tag_key(s, s.get("art") or {}, {**ch, "appearance": _full_appearance(s, ch)}), "") if not own else ""
     return {"tags": own or cached, "custom": bool(own), "saved": bool(own or cached), "adult": (ch.get("tags_adult") or "").strip()}
 
 
@@ -4050,10 +4158,11 @@ async def rebuild_tags(sid: str, slug: str):
         raise HTTPException(400, "Describe how this character looks first.")
     ch["tags"] = ""
     art = await _art_with_setting(s, cfg)
-    (s.get("tag_cache") or {}).pop(_tag_key(s, art, ch), None)
+    full = {**ch, "appearance": _full_appearance(s, ch)}
+    (s.get("tag_cache") or {}).pop(_tag_key(s, art, full), None)
     store.save_story(s)
     usage.set_ctx(sid, "image prompt")
-    await _character_tags(_story(sid), cfg, art, _char(s, slug))
+    await _character_tags(_story(sid), cfg, art, full)
     return _tags_info(_story(sid), slug)
 
 
@@ -4344,10 +4453,25 @@ async def upload_video(request: Request, url: str):
     return _attach_video(url, data)
 
 
+def _bin_owner(clean: str) -> tuple[str, dict] | None:
+    """(story id, labels) when this picture belongs to a story, so its video can go to that story's picture bin. Covers, avatars and library pictures have no bin."""
+    m = re.match(r"/(?:portraits|images)/([0-9a-z]+)/(?:chars/([^/]+)/)?", clean)
+    if not m or not (store.STORIES / f"{m.group(1)}.json").exists():
+        return None
+    sid, slug = m.group(1), m.group(2) or ""
+    ch = next((c for c in _story(sid).get("cast", []) if c.get("slug") == slug), None)
+    label = (picturebin.slots(ch).get(clean) or {}).get("mood", "") if ch else ""
+    return sid, {"label": label, "slug": slug if ch else "", "char": ch["name"] if ch else ""}
+
+
 @app.delete("/api/videos")
 def delete_video(url: str):
     """Remove a picture's clip (the shown one, a hidden one and the kept earlier one). The picture itself is never touched."""
     f, clean = _pic_path(url)
+    story_pic = _bin_owner(clean)
+    if f and story_pic:
+        picturebin.put_video(story_pic[0], clean, **story_pic[1])
+        return _video_index(False)
     idx = _video_index(False)
     hid = _hidden_videos()
     for vurl in (idx.pop(clean, None), hid.pop(clean, None)):
@@ -4427,7 +4551,11 @@ def delete_earlier_video(url: str, id: str):
     e = next((c for c in _earlier_clips(f) if c.name == id), None) if f else None
     if not e:
         raise HTTPException(404, "There is no such earlier video for this picture.")
-    e.unlink(missing_ok=True)
+    story_pic = _bin_owner(_pic_path(url)[1])
+    if story_pic:
+        picturebin.put_video(story_pic[0], url, only=e.name, **story_pic[1])
+    else:
+        e.unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -5391,11 +5519,9 @@ async def redraw_all_pictures(sid: str, slug: str):
     todo = [m for m in moods if m != "normal 1"]
     if not todo:
         raise HTTPException(400, "This character has no other pictures to redraw.")
-    folder = store.PORTRAITS / sid / "chars" / slug
-    keep_file = _portrait_file(keep)
-    for f in list(folder.iterdir()) if folder.exists() else []:
-        if f.is_file() and f != keep_file:
-            f.unlink(missing_ok=True)
+    for u, slot in picturebin.slots(ch).items():
+        if u != keep and slot["field"] in ("moods", "alts"):
+            picturebin.put(sid, ch, u, slot)
     ch["moods"] = {"normal 1": keep}
     ch["alts"] = {}
     store.save_story(s)
@@ -6023,6 +6149,8 @@ moods.EXPRESSION.update(EXPRESSION_MOODS)
 moods.BUILTIN_NAMES.update({_mood_base(k) for d in (MOOD_LOOKS, MOOD_LOOKS_ADULT, MOOD_FRAMING, MOOD_FRAMING_TAGS, MOOD_TAGS, MOOD_TAGS_ADULT) for k in d}
                            | {_mood_base(m) for v in characters.DEFAULT_SETS.values() for m in v} | set(EXPRESSION_MOODS))
 _SUBJECT_TAG = re.compile(r"^(\d+(girl|boy|girls|boys|other|others)|solo|no humans)$")
+# clothing and leg tags a head-and-shoulders portrait leaves out (they pull the model into a standing full-body picture)
+_LOWER_TAGS = re.compile(r"\b(jeans|trousers|\w*pants|shorts|slacks|\w*skirts?|leggings|tights|stockings|thighhighs|\w*socks|shoes|footwear|boots|sandals|sneakers|heels|loafers|slippers|legs|thighs|knees|bare feet|belt|full[- ]body)\b", re.IGNORECASE)
 _EXPRESSION_TAG = re.compile(r"expression|smil|frown|pout|blush|looking|mouth|upper body|portrait|pose|standing|sitting|arms |hands|framing|close-up|wide shot", re.IGNORECASE)
 
 
@@ -6059,7 +6187,8 @@ async def _character_tags(s: dict, cfg: dict, art: dict, ch: dict) -> str:
     return tags
 
 
-async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: str, notes: str = "", sex_pic: bool = False) -> tuple[str, str]:
+async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: str, notes: str = "", sex_pic: bool = False,
+                               tag_setting: str | None = None, close: bool = False) -> tuple[str, str]:
     """(positive, negative) for a tag-style portrait without a per-picture text-model call: the character's saved tags + the tags for the mood. Moods that
     are not built in, or that you reworded in Settings, and drawings with extra notes still go through the text model."""
     base = re.sub(r"\s*\d+$", "", mood.strip().lower())
@@ -6069,6 +6198,7 @@ async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: st
     adult_tags = bool(adult and (sex_pic or _is_explicit(mood, cfg)) and (ch.get("tags_adult") or "").strip())      # this picture is an adult one and the character has their own adult tag set
     if adult_tags:
         ch = {**ch, "_adult_pic": True}
+    tag_art = art if tag_setting is None else {**art, "setting": tag_setting}
     frame = _framing(mood, tags=True, s=s) or "upper body, looking at viewer"
     def framed(pn: tuple[str, str]) -> tuple[str, str]:
         """Action pictures written by the helper AI: its portrait-framing tags go, the action framing is always there."""
@@ -6079,8 +6209,13 @@ async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: st
     if notes or (mood != "default" and not own_tags and (base in mine or (base not in MOOD_TAGS and not (adult and base in MOOD_TAGS_ADULT)) or _story_mood(s, mood, "mood_looks")
                                                           or str(moods.def_of(cfg, mood).get("look") or "").strip())):
         look = f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult, s)}") + (f", {notes}" if notes else "") + (f", {ch['tags_adult']}" if adult_tags else "")
-        return framed(await _tag_prompt(s, cfg, art, look, [ch]))
-    tags = await _character_tags(s, cfg, art, ch)
+        who = ch
+        if not (sex_pic or adult_tags or _is_explicit(mood, cfg) or _is_action(mood)):      # an everyday picture the helper words itself: it is told the clothing the other pictures use
+            usual = (ch.get("tags") or "").strip() or (s.get("tag_cache") or {}).get(_tag_key(s, tag_art, ch), "")
+            if usual:
+                who = {**ch, "appearance": f"{ch.get('appearance', '')} Their usual picture tags (keep exactly this clothing unless the picture itself calls for something else): {usual}".strip()}
+        return framed(await _tag_prompt(s, cfg, art, look, [who]))
+    tags = await _character_tags(s, cfg, tag_art, ch)
     if not tags:
         return framed(await _tag_prompt(s, cfg, art, f"character portrait, {frame}" + ("" if mood == "default" else f", {_mood_look(mood, adult, s)}"), [ch]))
     parts = [t.strip() for t in tags.split(",") if t.strip()]
@@ -6088,6 +6223,8 @@ async def _portrait_tag_prompt(s: dict, cfg: dict, art: dict, ch: dict, mood: st
         parts = [t for t in parts if not _CLOTHES.search(t) and not re.search(r"\b(bag|purse|necklace|bracelet|backpack|earrings?|watch)\b", t, re.I)]
     if not sex_pic and not adult_tags and not _is_explicit(mood, cfg):      # an ordinary picture: nudity tags saved on the card (for explicit pictures) must not undress it
         parts = [t for t in parts if not re.search(r"\b(nude|naked|nudity|topless|bottomless|no (?:shirt|bra|panties|shorts|pants|clothes)|nipples|pussy|breasts?)\b", t, re.IGNORECASE)]
+    if close:
+        parts = [t for t in parts if not _LOWER_TAGS.search(t)]
     head = [parts.pop(0)] if parts and _SUBJECT_TAG.match(parts[0]) else []
     parts = [t for t in parts if not _SUBJECT_TAG.match(t)]
     mood_tags = own_tags or (adult and MOOD_TAGS_ADULT.get(base)) or MOOD_TAGS["normal" if mood == "default" else base]
@@ -6433,6 +6570,45 @@ async def video_options():
     return {"up": up, "models": sorted(video), "all_models": sorted(models), "loras": sorted(loras), "video_loras": sorted(vl)}
 
 
+@app.get("/api/images/face-ref")
+async def face_ref_info():
+    """For the "Keep the same face" switch: is ComfyUI answering, and does it have the add-on and its file? (ComfyUI is not started just to look.)"""
+    cfg = store.load_config()
+    comfy = next((p for p in cfg.get("image_providers", []) if p.get("type") == "comfyui"), None)
+    up, installed = await images.face_ref_status(((comfy or {}).get("base_url") or "http://127.0.0.1:8188").rstrip("/"))
+    return {"up": up, "installed": installed, "on": bool((comfy or {}).get("anima_ref"))}
+
+
+def _first_picture(s: dict, slug: str) -> bytes:
+    f = _portrait_file((_char(s, slug).get("moods") or {}).get("normal 1", ""))
+    if not f:
+        raise HTTPException(404, "This character has no “normal 1” picture yet.")
+    return f.read_bytes()
+
+
+@app.get("/api/stories/{sid}/cast/{slug}/face-crop")
+def face_crop_preview(sid: str, slug: str, bottom: float = images.HEAD_CROP):
+    """The head-only reference as it would be cut from "normal 1", for the slider's preview."""
+    return Response(images.head_crop(_first_picture(_story(sid), slug), bottom), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+class FaceCropIn(BaseModel):
+    bottom: float
+
+
+@app.put("/api/stories/{sid}/cast/{slug}/face-crop")
+def face_crop_set(sid: str, slug: str, body: FaceCropIn):
+    s = _story(sid)
+    ch = _char(s, slug)
+    v = round(max(0.2, min(0.9, body.bottom)), 2)
+    if abs(v - images.HEAD_CROP) < 0.005:
+        ch.pop("face_crop", None)
+    else:
+        ch["face_crop"] = v
+    store.save_story(s)
+    return s
+
+
 @app.get("/api/images/starter-workflow")
 def starter_workflow(kind: str = "plain"):
     """kind=plain: text-to-image. kind=face: IPAdapter face-matching (needs the IPAdapter nodes and models in ComfyUI). kind=flux: FLUX.2 klein 4B text-to-image."""
@@ -6599,6 +6775,8 @@ def delete_story(sid: str, art: int = 1):
     """art=1 (default) also deletes the story's pictures; art=0 keeps them on disk."""
     _story(sid)
     store.delete_story(sid, art=bool(art))
+    if art:
+        picturebin.forget_story(sid)
     return {"ok": True}
 
 
@@ -6713,6 +6891,7 @@ def restore_deleted_story(sid: str):
 def forget_deleted_story(sid: str):
     """Permanently remove a deleted story's backups and any pictures kept for it."""
     d = _deleted_dir(sid)
+    picturebin.forget_story(sid)
     shutil.rmtree(d, ignore_errors=True)
     shutil.rmtree(store.PORTRAITS / sid, ignore_errors=True)
     shutil.rmtree(store.IMAGES / sid, ignore_errors=True)
@@ -6737,11 +6916,11 @@ def storage_report():
     kept += [{"id": d.name, "bytes": _dir_size(d)} for d in store.IMAGES.iterdir() if d.is_dir() and d.name not in live and not (store.PORTRAITS / d.name).exists()]
     return {"stories": sorted(stories, key=lambda x: -(x["pictures"] + x["story"])), "kept_pictures": kept,
             "options": _dir_size(store.PORTRAITS, True), "thumbs": _dir_size(store.DATA / "thumbs"),
-            "avatars": _dir_size(store.PORTRAITS / "_avatars")}
+            "avatars": _dir_size(store.PORTRAITS / "_avatars"), "bin": _dir_size(picturebin.root())}
 
 
 class CleanIn(BaseModel):
-    what: str      # options | thumbs | kept
+    what: str      # options | thumbs | kept | bin
 
 
 @app.post("/api/storage/clean")
@@ -6751,6 +6930,8 @@ def storage_clean(body: CleanIn):
         store.clean_scratch(0)
     elif body.what == "thumbs":
         shutil.rmtree(store.DATA / "thumbs", ignore_errors=True)
+    elif body.what == "bin":
+        picturebin.purge(0)
     elif body.what == "kept":
         for k in storage_report()["kept_pictures"]:
             shutil.rmtree(store.PORTRAITS / k["id"], ignore_errors=True)
@@ -10089,12 +10270,76 @@ def delete_extra_picture(sid: str, slug: str, url: str):
     ch = _char(s, slug)
     if not any(x.get("url") == url for x in ch.get("extras") or []):
         raise HTTPException(404, "That picture is not in this character's Extra pictures.")
+    where = picturebin.slots(ch)
     ch["extras"] = [x for x in ch["extras"] if x.get("url") != url]
-    f = _portrait_file(url)
-    if f:
-        f.unlink(missing_ok=True)
+    picturebin.put(sid, ch, url, where.get(url))
     store.save_story(s)
     return s
+
+
+class BinIn(BaseModel):
+    ids: list[str] = []
+    all: bool = False      # delete: empty this story's bin
+
+
+def _bin_list(sid: str) -> list[dict]:
+    out, now = [], time.time()
+    for m in picturebin.items(sid):
+        slot = m.get("slot") or {}
+        field, key, mood = slot.get("field"), slot.get("key", ""), slot.get("mood", "")
+        label = (f"video of {mood}" if mood else "video") if m["kind"] == "video" else \
+            f"{mood} (earlier picture)" if field == "alts" else f"{mood} · {key.replace('@', ' · ')}" if field in ("outfit_pics", "place_pics") else \
+            f"extra: {(slot.get('item') or {}).get('label') or mood or 'picture'}" if field == "extras" else mood
+        f = picturebin.picture_file(sid, m["id"])
+        out.append({"id": m["id"], "kind": m["kind"], "reason": m.get("reason", "removed"), "slug": m.get("slug", ""), "char": m.get("char", ""), "label": label,
+                    "deleted": m["deleted"], "days_left": max(0, int(picturebin.KEEP_DAYS - (now - m["deleted"]) / 86400 + 0.999)),
+                    "has_video": bool(m.get("clips")), "thumb": f"/api/stories/{sid}/picture-bin/{m['id']}/file" if f else ""})
+    return out
+
+
+@app.get("/api/stories/{sid}/picture-bin")
+def list_picture_bin(sid: str):
+    _story(sid)
+    picturebin.purge()
+    return {"items": _bin_list(sid), "keep_days": picturebin.KEEP_DAYS}
+
+
+@app.get("/api/stories/{sid}/picture-bin/{iid}/file")
+def picture_bin_file(sid: str, iid: str):
+    f = picturebin.picture_file(sid, iid)
+    if not f:
+        raise HTTPException(404, "That is not in the picture bin any more.")
+    return FileResponse(f, headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/stories/{sid}/picture-bin/restore")
+def restore_from_picture_bin(sid: str, body: BinIn):
+    """Put items back where they were. The story is saved after each one, so a problem with one never loses the others."""
+    _story(sid)
+    metas = {m["id"]: m for m in picturebin.items(sid)}
+    done, failed, slugs = 0, [], []
+    for iid in sorted((i for i in dict.fromkeys(body.ids) if i in metas), key=lambda i: picturebin.restore_order(metas[i])):
+        s = _story(sid)
+        try:
+            slug = picturebin.restore(s, iid, {_place_key(x["name"]) for x in s.get("places", [])}, _place_key)
+        except ValueError as e:
+            failed.append(str(e))
+            continue
+        store.save_story(s)
+        done += 1
+        if slug and slug not in slugs:
+            slugs.append(slug)
+    if not done:
+        raise HTTPException(404, failed[0] if failed else "That is not in the picture bin any more.")
+    return {"restored": done, "failed": failed, "slugs": slugs, "story": _story(sid)}
+
+
+@app.post("/api/stories/{sid}/picture-bin/delete")
+def delete_from_picture_bin(sid: str, body: BinIn):
+    """Delete items from the bin for good."""
+    _story(sid)
+    n = picturebin.delete(sid, [m["id"] for m in picturebin.items(sid)] if body.all else body.ids)
+    return {"deleted": n, "items": _bin_list(sid)}
 
 
 @app.delete("/api/stories/{sid}/backdrop")
@@ -10416,7 +10661,11 @@ CARD_FIND_SYSTEM = ("A script found these capitalized names in a story text, eac
 CARD_SYSTEM = ("You write one character's card for an interactive story that is being continued from a save made elsewhere. Use ONLY what the material states or clearly implies; never invent. "
                "A field the material does not support is an empty string (or an empty list). If the material mixes up who someone is (a character wrongly called by another's name or role) and it is corrected later, "
                "or the player corrects the narrator, the correction and the latest passages win. Fields: "
-               "'appearance' = a purely visual description for a picture maker (apparent age, build, hair, eyes, face, usual clothing, distinguishing features), always safe for work, even when the story is adult; "
+               "'appearance' = a purely visual description for a picture maker (apparent age, build, hair, eyes, face, usual clothing, distinguishing features), always safe for work, even when the story is adult. "
+               "It names exactly ONE set of clothing: the one they wear most (or, if none is the most usual, the first the material shows), with the colours the material gives. Never list a second outfit or an either-or here; "
+               "'outfits' = every OTHER set of clothing the material shows them wearing (work clothes, home clothes, sleepwear, an evening dress, a uniform...), each a complete set that is worn together (separate occasions are separate outfits): "
+               '[{"name": "1 to 3 words, e.g. work suit, pajamas, green dress", "description": "only the clothes and accessories, with the colours the material gives"}]. '
+               "Everyday-safe clothes only: no nudity, underwear or lingerie. [] when the material shows only one set. At most 6; "
                "'personality' = one short line on how they act and speak; "
                "'bio' = 3 to 5 sentences: who they are, their role, motives, history so far and their relationship to the player's character and to others; "
                "'address' = who calls them what and how they address others, only if the material shows it; "
@@ -10425,7 +10674,28 @@ CARD_SYSTEM = ("You write one character's card for an interactive story that is 
                "'events' = their KEY events in story order: first meeting, injuries, deaths or transformations, betrayals, confessions, promises, changes in a relationship (romantic and sexual milestones included), "
                "important decisions, discoveries and things gained or lost. At most 20, one short past-tense sentence each naming who was involved; skip routine actions. "
                "'when' = the [Part ..] or [Turn ..] tag of the passage the event came from, or an empty string. "
-               'Reply with ONLY JSON: {"appearance": "", "personality": "", "bio": "", "address": "", "aka": [], "species": "", "events": [{"when": "", "event": ""}]}.')
+               'Reply with ONLY JSON: {"appearance": "", "outfits": [{"name": "", "description": ""}], "personality": "", "bio": "", "address": "", "aka": [], "species": "", "events": [{"when": "", "event": ""}]}.')
+
+
+_NOT_AN_OUTFIT = re.compile(r"\b(nude|naked|nudity|topless|bottomless|undress\w*|underwear|lingerie|panties|thong|bra|negligee|nothing)\b", re.IGNORECASE)
+MAX_CARD_OUTFITS = 6
+
+
+def _card_outfits(items) -> dict[str, str]:
+    """The other sets of clothing an imported card lists -> {outfit name: what it is}, with names the outfit editor accepts. Underwear and nudity are never outfits."""
+    out: dict[str, str] = {}
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        name = " ".join(re.sub(r"[^a-z0-9 _-]+", " ", str(it.get("name") or "").lower()).split())[:30].strip(" _-")
+        desc = " ".join(str(it.get("description") or "").split())[:400]
+        if not name or not desc or name in ("usual", "usual look", "default", "normal") or _NOT_AN_OUTFIT.search(f"{name} {desc}"):
+            continue
+        if name not in out and desc.lower() not in (d.lower() for d in out.values()):
+            out[name] = desc
+        if len(out) >= MAX_CARD_OUTFITS:
+            break
+    return out
 
 
 _NAME_WORD = re.compile(r"[A-Za-z][A-Za-z'’-]*")
@@ -10536,7 +10806,7 @@ async def _build_cards_from_save(sid: str, prov, model, job: dict | None = None,
             scan_failed = True
             bugreport.note("import", f"name scan: {e}", story=sid, error=e.__class__.__name__)
         people = people[:45]
-    res = {"added": 0, "filled": 0, "events": 0, "failed": [], "total": len(people), "scan_failed": scan_failed}
+    res = {"added": 0, "filled": 0, "events": 0, "outfits": 0, "failed": [], "total": len(people), "scan_failed": scan_failed}
     if job is not None:
         job["total"], job["done"] = len(people), 0
     one = lambda v, n: " ".join(str(v or "").split())[:n]
@@ -10551,6 +10821,7 @@ async def _build_cards_from_save(sid: str, prov, model, job: dict | None = None,
         elif s.get("summary"):
             ctx = (_event_context(s, p["name"], limit=3000) + "\n" + ctx).strip()
         ctx = ctx + "".join(f"\n[Status panel] {ln.strip()[:300]}" for ln in panel.splitlines() if pat.search(ln))[:1500]
+        ctx = ctx + "".join(f"\n[Story prompt] {ln.strip()[:600]}" for ln in (s.get("base_prompt") or "").splitlines() if pat.search(ln))[:2500]
         existing = next((c for c in s["cast"] if c["name"].lower() == p["name"].lower() or (len(p["name"].split()) == 1 and c["name"].lower().split()[0] == p["name"].lower())), None)
         cur = {k: (existing or {}).get(k, "") for k in ("appearance", "personality", "bio", "address", "species")} if existing else {}
         try:
@@ -10559,7 +10830,7 @@ async def _build_cards_from_save(sid: str, prov, model, job: dict | None = None,
                                            + f"\nPlayer's character: {prompting.player_name(s) or 'the player'}"
                                            + (f"\n\nCURRENT CARD (keep what is filled in):\n{json.dumps(cur, ensure_ascii=False)}" if cur else "")
                                            + f"\n\nMATERIAL (passages that mention them):\n{ctx or '(nothing found; use only the role above)'}"}],
-                                           temperature=0.2, max_tokens=2200, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
+                                           temperature=0.2, max_tokens=2800, num_ctx=cfg["num_ctx"], **{**_extras(cfg), "thinking": False})
             j = _json_in(out)
         except Exception as e:
             j = None
@@ -10577,6 +10848,14 @@ async def _build_cards_from_save(sid: str, prov, model, job: dict | None = None,
             for k, v in fields.items():
                 if v and not str(ch.get(k) or "").strip():
                     ch[k] = v
+            found_outfits = _card_outfits(j.get("outfits"))
+            ai_look = ch.pop("look_from_panel", False)
+            if found_outfits and not ch.get("outfits"):      # the other sets of clothing become outfits; outfits already on the card are left as they are
+                ch["outfits"] = found_outfits
+                if ai_look and fields["appearance"]:       # the short look read from the status panel may name several sets: the card's one-outfit description replaces it
+                    ch["appearance"] = fields["appearance"]
+                s.setdefault("art", {})["outfits"] = True
+                res["outfits"] += len(found_outfits)
             sp = one(j.get("species"), 40)
             if sp and not _is_human(sp) and not (ch.get("species") or "").strip():
                 ch["species"] = sp
@@ -10600,6 +10879,8 @@ async def _build_cards_from_save(sid: str, prov, model, job: dict | None = None,
 def _cards_note(r: dict) -> str:
     bits = [f"{r['added']} new" if r["added"] else "", f"{r['filled']} existing filled in" if r["filled"] else ""]
     msg = f"Character cards: {', '.join(b for b in bits if b) or 'none built'}, {r['events']} key events carried over."
+    if r.get("outfits"):
+        msg += f" {r['outfits']} other outfit{'s were' if r['outfits'] != 1 else ' was'} added for characters with more than one set of clothing (see each character's Images tab; outfits are now on for this story)."
     if r["failed"]:
         msg += (f" The AI helper did not return a card for {', '.join(r['failed'])} (it may have declined or answered badly). Try again with another AI, or build those cards in the Cast screen.")
     if r.get("scan_failed"):
@@ -10666,11 +10947,13 @@ async def _discover_cast(s: dict, cfg: dict, shown: str) -> int:
         existing = next((c for c in s["cast"] if c["name"].lower() == name.lower() or c["name"].lower().split()[0] == name.lower().split()[0] and len(name.split()) == 1), None)
         if existing is None:
             ch = _ensure_char(s, name, str(it.get("look") or "")[:400])
+            if ch["appearance"]:
+                ch["look_from_panel"] = True
             added += 1
         else:
             ch = existing
             if not (ch.get("appearance") or "").strip() and str(it.get("look") or "").strip():
-                ch["appearance"] = str(it["look"]).strip()[:400]
+                ch["appearance"], ch["look_from_panel"] = str(it["look"]).strip()[:400], True
         if not (ch.get("bio") or "").strip() and str(it.get("bio") or "").strip():
             ch["bio"] = str(it["bio"]).strip()[:600]
     return added

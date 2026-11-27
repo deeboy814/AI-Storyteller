@@ -135,6 +135,11 @@ def _variant_rows(story: dict) -> list[str]:
         bits = []
         if outfits_on and c.get("outfits"):
             bits.append("outfits: " + "; ".join(f"{o} ({d})" + (" [wearing now]" if c.get("outfit") == o else "") if d else o + (" [wearing now]" if c.get("outfit") == o else "") for o, d in c["outfits"].items()))
+        if outfits_on:
+            only = [f"@{o}: " + ", ".join(sorted(m for m in d if m not in c["moods"])) for o, d in (c.get("outfit_pics") or {}).items()
+                    if o in (c.get("outfits") or {}) and any(m not in c["moods"] for m in d)]
+            if only:
+                bits.append("moods pictured only in an outfit: " + "; ".join(only))
         pl = sorted({pnames.get(k.split("@")[0], k.split("@")[0]) for k, v in (c.get("place_pics") or {}).items() if v})
         if pl:
             bits.append("pictures at: " + ", ".join(pl))

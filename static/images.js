@@ -136,7 +136,7 @@ function sceneHtml(t, i) {
 async function offerRedrawAll(ch, onProgress) {
   const others = Object.keys(ch.moods || {}).filter((m) => m !== "normal 1");
   if (!others.length) return false;
-  if (!confirm(`${ch.name} has ${others.length} other picture${others.length > 1 ? "s" : ""} (${others.slice(0, 6).join(", ")}${others.length > 6 ? "…" : ""}).\n\nRedraw them all to match the new Normal 1?\n\nOK deletes every other picture of ${ch.name} first (including earlier versions), then redraws them. Cancel keeps them as they are.`)) return false;
+  if (!confirm(`${ch.name} has ${others.length} other picture${others.length > 1 ? "s" : ""} (${others.slice(0, 6).join(", ")}${others.length > 6 ? "…" : ""}).\n\nRedraw them all to match the new Normal 1?\n\nOK moves their other usual pictures and earlier versions to the picture bin, then redraws them (outfit, place and extra pictures stay). Cancel keeps them as they are.`)) return false;
   const r = await api(`/stories/${story.id}/cast/${ch.slug}/redraw-all`, { method: "POST" });
   story = await api(`/stories/${story.id}`); renderAll();
   const job = await watchJob(r.job, (j) => { artBusyText = `Redrawing ${ch.name}'s pictures: ${j.done} of ${j.total}`; if (onProgress) onProgress(`${j.current} (${j.done} of ${j.total} done)`); refreshArtSuggestions(); });
@@ -630,18 +630,21 @@ function showCharacter(slug, tab = "Bio") {
   const outfitPanel = () => {
     const outs = Object.entries(c.outfits || {}), moodsHere = Object.keys(c.moods || {}).filter((m) => !isUnclothed(m)), hiddenN = Object.keys(c.moods || {}).length - moodsHere.length;
     const fig = (o, m) => { const u = ((c.outfit_pics || {})[o] || {})[m];
-      return u ? `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 220)}" alt=""><figcaption><span class="mname">${esc(m)}</span><button class="x ofdraw" data-o="${esc(o)}" data-m="${esc(m)}" title="Draw this one again in this outfit">↻</button><button class="x mcopy" data-mood="${esc(m)}" data-url="${esc(u)}" data-o="${esc(o)}" title="Also use this picture for another expression or action, or in another outfit">⧉</button><button class="x ofdel" data-o="${esc(o)}" data-m="${esc(m)}" title="Remove this outfit version">×</button></figcaption></figure>`
+      return u ? `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 220)}" alt=""><figcaption><span class="mname">${esc(m)}</span><button class="x ofdraw" data-o="${esc(o)}" data-m="${esc(m)}" title="Draw this one again in this outfit">↻</button><button class="x ofprompt" data-o="${esc(o)}" data-m="${esc(m)}" data-url="${esc(u)}" title="Show and edit the exact prompt this picture was drawn from, and draw again from your change">📝</button><button class="x mcopy" data-mood="${esc(m)}" data-url="${esc(u)}" data-o="${esc(o)}" title="Also use this picture for another expression or action, or in another outfit">⧉</button><button class="x ofdel" data-o="${esc(o)}" data-m="${esc(m)}" title="Remove this outfit version">×</button></figcaption></figure>`
         : `<figure class="mood empty"><div class="noart">${esc(m)}</div><figcaption><button class="ofdraw" data-o="${esc(o)}" data-m="${esc(m)}" title="Draw ${esc(m)} in this outfit">＋ Draw</button> <label class="btnlike" title="Use your own picture"><input type="file" class="ofup" data-o="${esc(o)}" data-m="${esc(m)}" accept="image/png,image/jpeg,image/webp,image/gif" hidden>📁</label></figcaption></figure>`; };
-    const ofTotal = outs.reduce((t, [o]) => t + moodsHere.filter((m) => ((c.outfit_pics || {})[o] || {})[m]).length, 0);
+    const own = (o) => Object.keys((c.outfit_pics || {})[o] || {});
+    const namesIn = (o) => [...moodsHere, ...own(o).filter((m) => !moodsHere.includes(m))];      // an outfit keeps showing its pictures after the usual one of that name is removed
+    const ofTotal = outs.reduce((t, [o]) => t + own(o).length, 0);
     return `<div class="sub" style="margin-top:10px"><b>👗 Outfits</b> ${outs.length ? countBadge(ofTotal, 0) : ""} <span class="hint">Each picture above can have a version in each outfit. The usual pictures stay as they are.${hiddenN ? " Pictures that show the body without clothes (nude, positions, finishes…) are not listed: they always use the usual picture." : ""}</span>
       <div class="actions" style="justify-content:flex-start;margin:6px 0"><label class="hint" style="margin:0 4px 0 0">Wearing now:</label><select id="ofWear"><option value="">Usual look</option>${outs.map(([o]) => `<option value="${esc(o)}" ${c.outfit === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select><button class="ofclrall" ${ofTotal ? "" : "disabled"} title="Delete the pictures of every outfit (the outfits themselves stay)">🗑 Delete all outfit pictures</button></div>
-      ${outs.map(([o, d]) => `<details class="sub" data-sec="${esc("of:" + o)}"${secOpen("of:" + o, c.outfit === o)}><summary><b>${esc(o)}</b> ${countBadge(moodsHere.filter((m) => ((c.outfit_pics || {})[o] || {})[m]).length, moodsHere.length)} <small class="muted">${esc(oneLine(d, 60))}</small></summary>
+      ${outs.map(([o, d]) => `<details class="sub" data-sec="${esc("of:" + o)}"${secOpen("of:" + o, c.outfit === o)}><summary><b>${esc(o)}</b> ${countBadge(own(o).length, namesIn(o).length)} <small class="muted">${esc(oneLine(d, 60))}</small></summary>
         <label>What it looks like <small class="hint">(the artist is told this instead of their usual clothes)</small></label><input class="ofdesc" data-o="${esc(o)}" value="${esc(d)}">
         <div class="actions" style="justify-content:flex-start;margin:4px 0"><button class="ofall" data-o="${esc(o)}" ${moodsHere.length ? "" : "disabled"} title="Draw a version of every picture above that does not have one in this outfit yet">Draw all missing</button><button class="ofclr" data-o="${esc(o)}" ${Object.keys((c.outfit_pics || {})[o] || {}).length ? "" : "disabled"} title="Delete every picture of this outfit (the outfit itself stays)">🗑 Delete its pictures</button><button class="ofrm" data-o="${esc(o)}">Remove outfit</button></div>
-        <div class="moods">${moodsHere.map((m) => fig(o, m)).join("") || '<span class="hint">Draw some usual pictures first.</span>'}</div></details>`).join("")}
+        <div class="moods">${namesIn(o).map((m) => fig(o, m)).join("") || '<span class="hint">Draw some usual pictures first, or drag pictures here.</span>'}</div></details>`).join("")}
+      ${outs.length ? '<div class="hint">Drag a picture onto an outfit to move it there (hold Ctrl while dropping to copy it instead). Picture files from your computer can be dropped on an outfit too.</div>' : ""}
       <div class="actions" style="justify-content:flex-start;margin-top:6px"><input id="ofName" placeholder="Outfit name, e.g. swimsuit" size="18"><input id="ofNewDesc" placeholder="What it looks like" style="flex:1;min-width:160px"><button id="ofAdd">Add outfit</button></div>
       ${Object.keys(SUGGESTED_OUTFITS).filter((k) => !(c.outfits || {})[k]).length ? `<div class="actions" style="justify-content:flex-start;margin-top:4px"><span class="hint">Ideas:</span>${Object.keys(SUGGESTED_OUTFITS).filter((k) => !(c.outfits || {})[k]).map((k) => `<button class="ofidea" data-o="${esc(k)}" title="${esc(SUGGESTED_OUTFITS[k])}">＋ ${esc(k)}</button>`).join("")}</div>` : ""}
-      <div class="aStatus hint" id="ofStatus"></div></div>`;
+      <div class="aStatus hint" id="ofStatus">${esc(outfitNote)}</div></div>`;
   };
   // Pictures of this character at the story's places: each place gets its own version of each picture, drawn with the place behind them. The narrator picks with @place.
   let plOutfit = "";
@@ -651,15 +654,15 @@ function showCharacter(slug, tab = "Bio") {
     const outs = Object.keys(c.outfits || {}), useOut = story.art && story.art.outfits && outs.includes(plOutfit) ? plOutfit : "";
     const moodsHere = useOut ? allMoods.filter((m) => !isUnclothed(m)) : allMoods;      // in an outfit, unclothed pictures have no version
     const fig = (k, m) => { const u = ((c.place_pics || {})[k] || {})[m];
-      return u ? `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 220)}" alt=""><figcaption><span class="mname">${esc(m)}</span><button class="x pldraw" data-k="${esc(k)}" data-m="${esc(m)}" title="Draw this one again">↻</button><button class="x mcopy" data-mood="${esc(m)}" data-url="${esc(u)}" title="Also use this picture for another expression or action, or in an outfit">⧉</button><button class="x pldel" data-k="${esc(k)}" data-m="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`
+      return u ? `<figure class="mood"><img loading="lazy" src="${thumbUrl(u, 220)}" alt=""><figcaption><span class="mname">${esc(m)}</span><button class="x pldraw" data-k="${esc(k)}" data-m="${esc(m)}" title="Draw this one again">↻</button><button class="x plprompt" data-k="${esc(k)}" data-m="${esc(m)}" data-url="${esc(u)}" title="Show and edit the exact prompt this picture was drawn from, and draw again from your change">📝</button><button class="x mcopy" data-mood="${esc(m)}" data-url="${esc(u)}" title="Also use this picture for another expression or action, or in an outfit">⧉</button><button class="x pldel" data-k="${esc(k)}" data-m="${esc(m)}" title="Remove this picture">×</button></figcaption></figure>`
         : `<figure class="mood empty"><div class="noart">${esc(m)}</div><figcaption><button class="pldraw" data-k="${esc(k)}" data-m="${esc(m)}" title="Draw ${esc(m)} at this place">＋ Draw</button> <label class="btnlike" title="Use your own picture"><input type="file" class="plup" data-k="${esc(k)}" data-m="${esc(m)}" accept="image/png,image/jpeg,image/webp,image/gif" hidden>📁</label></figcaption></figure>`; };
     const plTotal = Object.values(c.place_pics || {}).reduce((t, pics) => t + Object.keys(pics || {}).length, 0);
     return `<div class="sub" style="margin-top:10px"><b>📍 Pictures at places</b> ${countBadge(plTotal, 0)} <button class="plclrall" ${plTotal ? "" : "disabled"} title="Delete the pictures of every place, including each outfit's versions (the places themselves stay)">🗑 Delete all place pictures</button> <span class="hint">${esc(c.name)} drawn at a place from the story, with the place behind them. The narrator can pick one with @place in the picture tag. The usual pictures stay as they are.</span>
       ${story.art && story.art.outfits && outs.length ? `<div class="actions" style="justify-content:flex-start;margin:6px 0"><label class="hint" style="margin:0 4px 0 0">In outfit:</label><select id="plOutfit"><option value="">Usual look</option>${outs.map((o) => `<option value="${esc(o)}" ${useOut === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></div>` : ""}
       ${places.map((p) => { const k = pk(p.name) + (useOut ? "@" + useOut : ""), n = Object.keys((c.place_pics || {})[k] || {}).length;
-        return `<details class="sub" data-sec="${esc("pl:" + k)}"${secOpen("pl:" + k, !!n)}><summary><b>${esc(p.name)}</b> ${countBadge(n, moodsHere.length)} <small class="muted">${esc(oneLine(p.description, 60))}</small></summary>
+        return `<details class="sub" data-sec="${esc("pl:" + k)}"${secOpen("pl:" + k, !!n)}><summary><b>${esc(p.name)}</b> ${countBadge(n, new Set([...moodsHere, ...Object.keys((c.place_pics || {})[k] || {})]).size)} <small class="muted">${esc(oneLine(p.description, 60))}</small></summary>
           <div class="actions" style="justify-content:flex-start;margin:4px 0"><button class="plall" data-k="${esc(k)}" ${moodsHere.length ? "" : "disabled"} title="Draw a version of every picture above that does not have one here yet">Draw all missing</button><button class="plclr" data-k="${esc(k)}" data-name="${esc(p.name)}" ${n ? "" : "disabled"} title="Delete every picture of ${esc(c.name)} at this place${useOut ? " in this outfit" : ""} (the place itself stays)">🗑 Delete its pictures${useOut ? " (in " + esc(useOut) + ")" : ""}</button></div>
-          <div class="moods">${moodsHere.map((m) => fig(k, m)).join("") || '<span class="hint">Draw some usual pictures first.</span>'}</div></details>`; }).join("")}
+          <div class="moods">${[...moodsHere, ...Object.keys((c.place_pics || {})[k] || {}).filter((m) => !moodsHere.includes(m))].map((m) => fig(k, m)).join("") || '<span class="hint">Draw some usual pictures first.</span>'}</div></details>`; }).join("")}
       <div class="aStatus hint" id="plStatus"></div></div>`;
   };
   const eventRow = (e) => `<div class="evrow" data-id="${esc(e.id)}"><span class="evwhen">${esc(e.when || "·")}</span><span class="evtext">${esc(e.text)}${e.from ? ` <small class="muted">(as ${esc(e.from)})</small>` : ""}</span>${e.digest ? '<span class="evauto" title="Several older events condensed by the helper AI">history</span>' : e.auto ? '<span class="evauto" title="Logged automatically">auto</span>' : ""}<button class="x evedit" title="Edit">✎</button><button class="x evdel" title="Delete">×</button></div>`;
@@ -693,6 +696,8 @@ function showCharacter(slug, tab = "Bio") {
         <label>How they look <small class="hint">(what the artist is told: age, hair, eyes, build, clothing, distinctive features)</small></label><textarea class="short" id="chApp" rows="3">${esc(c.appearance)}</textarea>
         <label>Face in words <small class="hint">(optional. Picture makers that cannot take reference pictures, like UnCanny, only know a face from words: this is put first in every picture prompt, so the face stays the same. Hair colour belongs here too)</small></label><textarea class="short" id="chFace" rows="3" placeholder="e.g. oval face, soft jawline, dark brown almond eyes, straight thin brows, small nose, full lips, fair skin, shoulder-length dark brown bob with straight bangs">${esc(c.face || "")}</textarea>
         ${isNew ? "" : '<div class="actions" style="justify-content:flex-start;margin:2px 0 6px"><button id="chFaceWrite" type="button" title="A helper model that can see pictures describes their face from their normal picture. Nothing is saved until you press Save.">👁 Describe the face from their picture</button><span class="hint" id="chFaceNote"></span></div>'}
+        ${!isNew && ((config.image_providers || []).find((x) => x.type === "comfyui") || {}).anima_ref && (c.moods || {})["normal 1"] ? `<label>Same face: head cut for outfits <small class="hint">(outfit pictures copy only this part of “normal 1”. It should show the whole head and hair and as little clothing as possible. Saved when you let go of the slider.)</small></label>
+        <div class="actions" style="justify-content:flex-start;align-items:flex-start;gap:10px;margin:2px 0 6px"><img id="chFaceCropImg" alt="Head cut used for outfit pictures" style="width:110px;border-radius:8px" src="/api/stories/${story.id}/cast/${encodeURIComponent(c.slug)}/face-crop?bottom=${c.face_crop || 0.4}&v=${encodeURIComponent(c.moods["normal 1"])}"><input id="chFaceCrop" type="range" min="0.2" max="0.9" step="0.02" value="${c.face_crop || 0.4}" aria-label="How far down the head cut reaches" style="max-width:260px"></div>` : ""}
         <label>Face LoRA <small class="hint">(optional. A LoRA trained on this character's face, from ComfyUI's loras folder. It is added whenever ComfyUI draws them: pictures, scenes and the Now card. It only works with the kind of model it was trained for)</small></label>
         <div class="actions" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin:2px 0 6px"><select id="chFaceLora" style="max-width:320px"><option value="">(none)</option></select><input id="chFaceLoraSt" type="number" step="0.05" min="-2" max="2" value="${esc(String(c.face_lora_strength ?? 1))}" style="width:80px" title="Strength: 0.7 to 1.0 is usual"><input id="chFaceTrig" value="${esc(c.face_trigger || "")}" placeholder="trigger words (filled in from the LoRA)" style="max-width:220px"></div>
         <div class="actions" style="justify-content:flex-start;margin:4px 0 0"><button id="chAppSuggest" ${isNew ? "disabled" : ""}>Suggest from the story</button></div></div></div>
@@ -719,8 +724,8 @@ function showCharacter(slug, tab = "Bio") {
         <select id="imSet"><option value="basic">Basic set</option><option value="extended">Extended set</option>${categorySetOptions("All: ")}<option value="match">Images my other characters have</option></select><button id="imSetGo">Draw the set</button><button id="imLabel" title="A helper model that can see pictures names the expression on each generically named picture (normal 2, normal 3…), so the narrator's mood tags can pick them">🏷 Name expressions</button></div>
       <div class="castact" style="margin:6px 0"><label for="imMood" class="hint" style="margin:0 4px 0 0">Picture name:</label><input id="imMood" value="normal 1" size="12" title="What this picture is called (its mood): used when drawing and when you upload your own"><button id="imDraw">Draw this one with AI</button><label class="btnlike" title="Use your own picture under this name">📁 Upload my own…<input type="file" id="imFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden></label></div>
       <div class="aStatus hint" id="imStatus"></div>
-      <div class="actions imcatBar" style="justify-content:flex-start;margin:0 0 4px"><button type="button" id="imMinAll" class="x">Minimize all</button><button type="button" id="imMaxAll" class="x">Expand all</button></div>
-      <div id="imGrid">${moodChips()}</div>
+      <div class="actions imcatBar" style="justify-content:flex-start;margin:0 0 4px"><button type="button" id="imMinAll" class="x">Minimize all</button><button type="button" id="imMaxAll" class="x">Expand all</button><span style="flex:1"></span>${isNew ? "" : '<button type="button" id="imBin" class="x" title="Pictures and videos you removed or replaced are kept here for 30 days">🗑 Picture bin</button>'}</div>
+      <div id="imGrid" data-slug="${esc(slug)}">${moodChips()}</div>
       <div id="imEarlierVids"></div>
       ${isNew ? "" : '<div id="imExtras">' + extrasPanel() + "</div>"}
       ${story.art && story.art.outfits && !isNew ? '<div id="imOutfits">' + outfitPanel() + "</div>" : ""}
@@ -806,6 +811,14 @@ function showCharacter(slug, tab = "Bio") {
     try { const r = await api(`/stories/${story.id}/cast/${slug}/named`, { method: "POST", body: { name } }); story = r.story; renderAll(); showCast("Characters"); }
     catch (err) { $("chNamedNote").textContent = err.message; }
   };
+  if ($("chFaceCrop")) {
+    const base = `/stories/${story.id}/cast/${encodeURIComponent(slug)}/face-crop`;
+    $("chFaceCrop").oninput = () => { $("chFaceCropImg").src = `/api${base}?bottom=${$("chFaceCrop").value}`; };
+    $("chFaceCrop").onchange = async () => {
+      try { story = await api(base, { method: "PUT", body: { bottom: Number($("chFaceCrop").value) } }); status("chStatus", "Head cut saved."); }
+      catch (err) { status("chStatus", err.message); }
+    };
+  }
   if ($("chFaceLora")) bindLoraSelect($("chFaceLora"), c.face_lora || "", () => ($("chMaker") ? $("chMaker").value : c.maker) || c.maker || "", $("chMaker"), $("chFaceTrig"));
   if ($("chMaker")) { makerSelect($("chMaker"), [["", "Same as the story"]], c.maker || ""); makerChoices().then((ch) => { if ($("chMaker")) makerSelect($("chMaker"), ch, c.maker || ""); }); }
   $("chSave").onclick = async () => {
@@ -912,10 +925,11 @@ function showCharacter(slug, tab = "Bio") {
       refreshArtSuggestions();
       refresh("Images");
     };
+    if ($("imBin")) $("imBin").onclick = () => showPictureBin(() => showCharacter(slug, "Images"));
     if ($("imAnimAll")) $("imAnimAll").onclick = (e) => animateAll(slug, e.target, $("imAnimNote"));
     if ($("imDelAll")) $("imDelAll").onclick = (e) => busy(e.target, "Deleting…", async () => {
       const n = Object.keys(c.moods || {}).length + Object.values(c.alts || {}).reduce((t, a) => t + a.length, 0);
-      if (!confirm(`Delete all ${n} pictures of ${c.name} in this story, including earlier versions? This cannot be undone.`)) return;
+      if (!confirm(`Delete all ${n} pictures of ${c.name} in this story, including earlier versions? They go to the picture bin for 30 days.`)) return;
       story = await api(`/stories/${story.id}/cast/${slug}/pictures`, { method: "DELETE" }); renderAll();
     });
     const redrawGrid = () => { $("imGrid").innerHTML = moodChips(); };
@@ -936,7 +950,7 @@ function showCharacter(slug, tab = "Bio") {
       const b = e.target.closest("button"); if (!b) return;
       try {
         if (b.classList.contains("evuse")) { await api(`/videos/swap-earlier?url=${encodeURIComponent(b.dataset.pic)}&id=${encodeURIComponent(b.dataset.id)}`, { method: "POST" }); if (window.refreshVideos) await refreshVideos(); await loadEarlierVids(); }
-        else if (b.classList.contains("evdel")) { if (!confirm("Delete this earlier video? This cannot be undone.")) return; await api(`/videos/earlier?url=${encodeURIComponent(b.dataset.pic)}&id=${encodeURIComponent(b.dataset.id)}`, { method: "DELETE" }); await loadEarlierVids(); }
+        else if (b.classList.contains("evdel")) { if (!confirm("Delete this earlier video? It goes to the picture bin for 30 days.")) return; await api(`/videos/earlier?url=${encodeURIComponent(b.dataset.pic)}&id=${encodeURIComponent(b.dataset.id)}`, { method: "DELETE" }); await loadEarlierVids(); }
       } catch (err) { alert(err.message); }
     });
     // the outfit and place sections stay as the player left them (open or minimized); Minimize all / Expand all cover them too
@@ -960,11 +974,13 @@ function showCharacter(slug, tab = "Bio") {
           const row = b.closest("figure"), name = row.querySelector(".exname").value.trim(); if (!name) return status("exStatus", "Type the expression or action name first.");
           b.disabled = true; const r = await api(`/stories/${story.id}/cast/${slug}/extras/assign`, { method: "POST", body: { url: b.dataset.u, name, replace: row.querySelector(".exrep").checked } });
           story = r.story; refresh("Images"); status("imStatus", `Saved as “${r.name}”.`);
-        } else if (b.classList.contains("exdel") && confirm("Delete this picture?")) {
+        } else if (b.classList.contains("exdel")) {
+          if (!(await removePicture(b.dataset.u, () => refresh("Images"), "Delete this picture?"))) return;
           story = await api(`/stories/${story.id}/cast/${slug}/extras?url=${encodeURIComponent(b.dataset.u)}`, { method: "DELETE" }); refresh("Images");
         }
       } catch (err) { status("exStatus", err.message); }
     });
+    bindOutfitDrop(slug, () => refresh("Images"));
     if ($("imOutfits")) {
       const box = $("imOutfits"), put = (outfits) => api(`/stories/${story.id}/cast/${slug}/outfits`, { method: "PUT", body: { outfits } });
       const fresh = () => (story.cast || []).find((x) => x.slug === slug) || c, cur = () => ({ ...(fresh().outfits || {}) });
@@ -989,15 +1005,17 @@ function showCharacter(slug, tab = "Bio") {
             const n = $("ofName").value.trim(); if (!n) return status("ofStatus", "Give the outfit a name.");
             const o = cur(); o[n.toLowerCase()] = $("ofNewDesc").value.trim(); story = await put(o); refresh("Images");
           } else if (b.classList.contains("ofrm")) {
-            if (!confirm(`Remove the outfit “${b.dataset.o}” and all its pictures?`)) return;
+            if (!confirm(`Remove the outfit “${b.dataset.o}” and all its pictures? The pictures go to the picture bin for 30 days.`)) return;
             const o = cur(); delete o[b.dataset.o]; story = await put(o); renderAll(); showCharacter(slug, "Images");
           } else if (b.classList.contains("ofclr") || b.classList.contains("ofclrall")) {
             const all = b.classList.contains("ofclrall"), o = b.dataset.o, fc = fresh();
             const n = all ? Object.values(fc.outfit_pics || {}).reduce((t, pics) => t + Object.keys(pics || {}).length, 0) : Object.keys((fc.outfit_pics || {})[o] || {}).length;
-            if (!confirm(all ? `Delete all ${n} outfit pictures of ${c.name} (every outfit)? The outfits themselves stay. This cannot be undone.` : `Delete the ${n} picture${n === 1 ? "" : "s"} of ${c.name} in the outfit “${o}”? The outfit itself stays. This cannot be undone.`)) return;
+            if (!confirm(all ? `Delete all ${n} outfit pictures of ${c.name} (every outfit)? The outfits themselves stay. They go to the picture bin for 30 days.` : `Delete the ${n} picture${n === 1 ? "" : "s"} of ${c.name} in the outfit “${o}”? The outfit itself stays. They go to the picture bin for 30 days.`)) return;
             story = await api(`/stories/${story.id}/cast/${slug}/delete-set`, { method: "POST", body: all ? { kind: "outfits" } : { kind: "outfit", key: o } }); refresh("Images");
           } else if (b.classList.contains("mcopy")) { copyPic(b);
+          } else if (b.classList.contains("ofprompt")) { showPicturePrompt(slug, b.dataset.m, b.dataset.url, () => showCharacter(slug, "Images"), { outfit: b.dataset.o });
           } else if (b.classList.contains("ofdel")) {
+            if (!(await removePicture(((fresh().outfit_pics || {})[b.dataset.o] || {})[b.dataset.m], () => refresh("Images")))) return;
             story = await api(`/stories/${story.id}/cast/${slug}/outfit-pic/${encodeURIComponent(b.dataset.o)}/${encodeURIComponent(b.dataset.m)}`, { method: "DELETE" }); refresh("Images");
           } else if (b.classList.contains("ofdraw")) {
             b.disabled = true; b.textContent = "…"; await drawOne(b.dataset.o, b.dataset.m); refresh("Images");
@@ -1031,10 +1049,11 @@ function showCharacter(slug, tab = "Bio") {
           else if (b.classList.contains("plclr") || b.classList.contains("plclrall")) {
             const all = b.classList.contains("plclrall"), k = b.dataset.k, fc = fresh();
             const n = all ? Object.values(fc.place_pics || {}).reduce((t, pics) => t + Object.keys(pics || {}).length, 0) : Object.keys((fc.place_pics || {})[k] || {}).length;
-            if (!confirm(all ? `Delete all ${n} place pictures of ${c.name} (every place, every outfit's version)? The places themselves stay. This cannot be undone.` : `Delete the ${n} picture${n === 1 ? "" : "s"} of ${c.name} at “${b.dataset.name}”${k.includes("@") ? ` (in the outfit “${k.split("@")[1]}”)` : ""}? The place itself stays. This cannot be undone.`)) return;
+            if (!confirm(all ? `Delete all ${n} place pictures of ${c.name} (every place, every outfit's version)? The places themselves stay. They go to the picture bin for 30 days.` : `Delete the ${n} picture${n === 1 ? "" : "s"} of ${c.name} at “${b.dataset.name}”${k.includes("@") ? ` (in the outfit “${k.split("@")[1]}”)` : ""}? The place itself stays. They go to the picture bin for 30 days.`)) return;
             story = await api(`/stories/${story.id}/cast/${slug}/delete-set`, { method: "POST", body: all ? { kind: "places" } : { kind: "place", key: k } }); refresh("Images");
           }
-          else if (b.classList.contains("pldel")) { story = await api(`/stories/${story.id}/cast/${slug}/place-pic/${encodeURIComponent(b.dataset.k)}/${encodeURIComponent(b.dataset.m)}`, { method: "DELETE" }); refresh("Images"); }
+          else if (b.classList.contains("plprompt")) { const [place, outfit = ""] = b.dataset.k.split("@"); showPicturePrompt(slug, b.dataset.m, b.dataset.url, () => showCharacter(slug, "Images"), { place, outfit }); }
+          else if (b.classList.contains("pldel")) { if (!(await removePicture(((fresh().place_pics || {})[b.dataset.k] || {})[b.dataset.m], () => refresh("Images")))) return; story = await api(`/stories/${story.id}/cast/${slug}/place-pic/${encodeURIComponent(b.dataset.k)}/${encodeURIComponent(b.dataset.m)}`, { method: "DELETE" }); refresh("Images"); }
           else if (b.classList.contains("pldraw")) { b.disabled = true; b.textContent = "…"; await drawOne(b.dataset.k, b.dataset.m); refresh("Images"); }
           else if (b.classList.contains("plall")) {
             const k = b.dataset.k, fc = fresh(), todo = Object.keys(fc.moods || {}).filter((m) => !(k.includes("@") && isUnclothed(m)) && !((fc.place_pics || {})[k] || {})[m]);
@@ -1052,20 +1071,85 @@ function showCharacter(slug, tab = "Bio") {
       else if (b.classList.contains("mprompt")) showPicturePrompt(slug, b.dataset.mood, b.dataset.url, () => showCharacter(slug, "Images"));
       else if (b.classList.contains("mren")) { const to = prompt(`Name for this picture (now “${b.dataset.mood}”).\nThe narrator picks pictures by name, e.g. smile, angry 2, normal 1:`, b.dataset.mood); if (to && to.trim() && to.trim().toLowerCase() !== b.dataset.mood) busy(b, "…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/rename`, { method: "POST", body: { to: to.trim() } }); }); }
       else if (b.classList.contains("mcopy")) copyPic(b);
-      else if (b.classList.contains("mdel")) { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}`, { method: "DELETE" }); refresh("Images"); }
+      else if (b.classList.contains("mdel")) { if (!(await removePicture(((story.cast.find((x) => x.slug === slug) || c).moods || {})[b.dataset.mood], () => refresh("Images")))) return; story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}`, { method: "DELETE" }); refresh("Images"); }
       else if (b.classList.contains("altuse")) { story = await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/use?url=${encodeURIComponent(b.dataset.url)}`, { method: "POST" }); refresh("Images"); }
       else if (b.classList.contains("altkeep")) busy(b, "…", async () => { story = (await api(`/stories/${story.id}/cast/${slug}/mood/${encodeURIComponent(b.dataset.mood)}/keep?url=${encodeURIComponent(b.dataset.url)}`, { method: "POST" })).story; });
-      else if (b.classList.contains("altdel")) { story = await api(`/stories/${story.id}/cast/${slug}/alt?url=${encodeURIComponent(b.dataset.url)}`, { method: "DELETE" }); refresh("Images"); }
+      else if (b.classList.contains("altdel")) { if (!(await removePicture(b.dataset.url, () => refresh("Images")))) return; story = await api(`/stories/${story.id}/cast/${slug}/alt?url=${encodeURIComponent(b.dataset.url)}`, { method: "DELETE" }); refresh("Images"); }
       else if (b.classList.contains("imcatDel")) {
         const earlier = b.dataset.cat === "__earlier", names = (b.dataset.moods || "").split("|").filter(Boolean), title = b.dataset.title;
         const nEarlier = Object.values(c.alts || {}).reduce((t, a) => t + a.length, 0), nAlts = names.reduce((t, m) => t + ((c.alts || {})[m] || []).length, 0);
-        const msg = earlier ? `Delete all ${nEarlier} earlier (replaced) versions of ${c.name}'s pictures? The current pictures stay. This cannot be undone.`
-          : `Delete all ${names.length} picture${names.length === 1 ? "" : "s"} in “${title}” of ${c.name}${nAlts ? `, with their ${nAlts} earlier version${nAlts === 1 ? "" : "s"}` : ""}?${names.some((m) => /^normal\b|^default$/.test(m)) ? " This includes the picture on their card." : ""} Their outfit and place versions are kept (delete those in their own sections). This cannot be undone.`;
+        const msg = earlier ? `Delete all ${nEarlier} earlier (replaced) versions of ${c.name}'s pictures? The current pictures stay. They go to the picture bin for 30 days.`
+          : `Delete all ${names.length} picture${names.length === 1 ? "" : "s"} in “${title}” of ${c.name}${nAlts ? `, with their ${nAlts} earlier version${nAlts === 1 ? "" : "s"}` : ""}?${names.some((m) => /^normal\b|^default$/.test(m)) ? " This includes the picture on their card." : ""} Their outfit and place versions are kept (delete those in their own sections). They go to the picture bin for 30 days.`;
         if (!confirm(msg)) return;
         busy(b, "Deleting…", async () => { story = await api(`/stories/${story.id}/cast/${slug}/delete-set`, { method: "POST", body: earlier ? { kind: "earlier" } : { kind: "category", moods: names } }); });
       }
     });
   }
+}
+
+// Drag and drop into outfits (Images tab): drag any of the character's pictures onto an outfit to move it there (Ctrl = copy), or drop picture files from the computer.
+const PIC_DRAG = "application/x-st-picture";
+let outfitNote = "";      // what the last drop did; kept here because the tab is drawn again afterwards
+function bindOutfitDrop(slug, redraw) {
+  const urlOf = (fig) => { const b = fig && fig.querySelector(".mcopy[data-url], .altdel[data-url]"); if (b) return b.dataset.url; const x = fig && fig.querySelector(".exdel"); return x ? x.dataset.u : ""; };
+  ["imGrid", "imExtras", "imOutfits", "imPlaces"].forEach((id) => {
+    const el = $(id); if (!el) return;
+    // a video tile is not draggable by itself, so the tile is made draggable as the pointer reaches it
+    el.addEventListener("pointerover", (e) => { const f = e.target.closest("figure.mood"); if (f && urlOf(f)) f.draggable = true; });
+    el.addEventListener("dragstart", (e) => { const u = urlOf(e.target.closest && e.target.closest("figure.mood")); if (u) { e.dataTransfer.setData(PIC_DRAG, u); e.dataTransfer.effectAllowed = "copyMove"; } });
+  });
+  const box = $("imOutfits"); if (!box) return;
+  const say = (m) => { const s = $("ofStatus"); if (s) { s.textContent = m; s.scrollIntoView({ block: "nearest" }); } };
+  const zone = (e) => { const d = e.target.closest && e.target.closest('details[data-sec^="of:"]'); return d && box.contains(d) ? d : null; };
+  const wanted = (e) => [...e.dataTransfer.types].some((t) => t === PIC_DRAG || t === "Files");
+  const unmark = (keep) => box.querySelectorAll(".dropover").forEach((d) => { if (d !== keep) d.classList.remove("dropover"); });
+  box.addEventListener("dragover", (e) => { const d = zone(e); unmark(d); if (!d || !wanted(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = e.ctrlKey || e.metaKey || !e.dataTransfer.types.includes(PIC_DRAG) ? "copy" : "move"; d.classList.add("dropover"); });
+  box.addEventListener("dragleave", (e) => { if (!box.contains(e.relatedTarget)) unmark(); });
+  box.addEventListener("drop", async (e) => {
+    const d = zone(e); unmark(); if (!d || !wanted(e)) return;
+    e.preventDefault();
+    const outfit = d.dataset.sec.slice(3), url = e.dataTransfer.getData(PIC_DRAG), copy = e.ctrlKey || e.metaKey, files = [...e.dataTransfer.files];
+    const empty = e.target.closest("figure.mood.empty"), slot = empty ? empty.querySelector(".ofdraw").dataset.m : "";
+    const ch = () => (story.cast || []).find((x) => x.slug === slug) || {};
+    const taken = (m) => !!((ch().outfit_pics || {})[outfit] || {})[m];
+    const free = (m) => { if (!taken(m)) return m; const base = m.replace(/\s*\d+$/, "") || m; let n = 2; while (taken(`${base} ${n}`)) n++; return `${base} ${n}`; };      // never replace a picture the outfit has
+    const clean = (t) => t.toLowerCase().replace(/[^a-z0-9 _-]+/g, " ").replace(/\s+/g, " ").replace(/^[^a-z0-9]+/, "").slice(0, 26).trim();
+    let done = "";
+    try {
+      if (url) {
+        if (copy) {
+          const own = Object.entries(ch().moods || {}).find(([, u]) => u === url);
+          const from = slot || (own && own[0]) || prompt("Name for the copy in this outfit, e.g. smile, shy:", "");
+          if (!from) return;
+          const r = await api(`/stories/${story.id}/cast/${slug}/copy-picture`, { method: "POST", body: { url, to: free(from.trim().toLowerCase()), outfit } });
+          story = r.story; done = `Copied to “${outfit}” as “${r.mood}”.`;
+        } else {
+          const r = await api(`/stories/${story.id}/cast/${slug}/move-to-outfit`, { method: "POST", body: { url, outfit, name: slot } });
+          story = r.story; done = `Moved to “${outfit}” as “${r.mood}”.`;
+        }
+      } else {
+        const pics = files.filter((f) => /^image\/(png|jpeg|webp|gif)$/.test(f.type));
+        if (!pics.length) throw new Error("Use PNG, JPEG, WebP or GIF picture files.");
+        let n = 0;
+        for (const f of pics) {
+          let name = slot && pics.length === 1 ? slot : clean(f.name.replace(/\.[^.]*$/, ""));
+          if (pics.length === 1 && !slot) name = clean(prompt(`Name for this picture in “${outfit}”, e.g. smile, shy:`, name) || "");
+          if (!name) continue;
+          const r = await fetch(`/api/stories/${story.id}/cast/${slug}/outfit-pic/${encodeURIComponent(outfit)}/${encodeURIComponent(free(name))}`, { method: "POST", headers: { "content-type": f.type }, body: f });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+          story = await r.json(); n++;
+        }
+        if (!n) return;
+        done = `Added ${n} picture${n === 1 ? "" : "s"} to “${outfit}”.`;
+      }
+      const o = secState(); o["of:" + outfit] = true; saveSecState(o);
+      outfitNote = done; setTimeout(() => { outfitNote = ""; }, 8000);
+      // draw the tab again, with the page staying where the player dropped the picture
+      const at = []; for (let el = box.parentElement; el; el = el.parentElement) if (el.scrollTop) at.push([el.id, el.className, el.scrollTop]);
+      const back = () => at.forEach(([i, cls, top]) => { const el = i ? $(i) : cls ? document.getElementsByClassName(cls.split(" ")[0])[0] : document.scrollingElement; if (el) el.scrollTop = top; });
+      redraw(); back(); setTimeout(back, 400);
+    } catch (err) { say(err.message); }
+  });
 }
 
 // ---------- image provider settings (inside Settings) ----------
@@ -1075,7 +1159,9 @@ function videoSettingsHtml(cfg) {
   const p = comfyProv(cfg);
   if (!p) return "";
   const adultOk = typeof story === "undefined" || !story || story.nsfw;
-  return `<h3>Video generation (🎬 Animate)</h3><div id="vidSecEvery">
+  return `<h3>Same face (Anima models)</h3><div id="faceRefSec">
+    <label class="chk top"><input type="checkbox" data-f="anima_ref" ${p.anima_ref ? "checked" : ""}><span><b>Keep the same face as “normal 1”</b><span class="hint">Local portraits drawn with an Anima model (Anima, Vivid Gloom) copy the face from the character's “normal 1” picture. The usual look uses the whole picture, so its clothes carry over too; outfits use only the head (adjust the cut on the character's Bio tab). Adult pictures, scene pictures and “normal 1” itself are drawn as before. Each picture takes about twice as long. The adapter file is for non-commercial use only. App-wide.</span><span class="hint" id="faceRefNote"></span></span></label></div>
+    <h3>Video generation (🎬 Animate)</h3><div id="vidSecEvery">
     <div class="hint">Turns one picture into a short looping clip with ComfyUI. App-wide. The model and LoRAs here are for everyday pictures; adult ones can have their own under <b>Adult (NSFW) videos</b>.</div>
       <label class="chk"><input type="checkbox" data-f="video_auto" ${p.video_auto ? "checked" : ""}> Animate every new picture automatically</label>
       <div class="hint">Each picture drawn from now on (characters, scene pictures, places, covers, your avatar, the “right now” picture) gets a video in the background, in every story. A video takes a few minutes, so new pictures are always drawn first and the videos follow. Backgrounds stay still. To animate pictures you already have, use 🎬 Animate all (🖼 Art → 🎞 Videos, or a character's Images tab).</div>
@@ -1133,6 +1219,17 @@ function bindVideoSettings(cfg) {
     const loraHtml = (vl.length ? `<optgroup label="Video LoRAs">${vl.map(lo).join("")}</optgroup>` : "") + `<optgroup label="Other LoRAs">${ol.map(lo).join("")}</optgroup>`;
     if ((o.loras || []).length) { pick.innerHTML = loraHtml; const vnp = ad && ad.querySelector(".vnlorapick"); if (vnp) vnp.innerHTML = loraHtml; }
   })();
+  (async () => {
+    const sec = document.getElementById("faceRefSec");
+    if (!sec) return;
+    const fold = sec.closest("details.sub") || sec;      // the whole section stays hidden unless ComfyUI has the add-on (or the switch is on, so it can be turned off)
+    if (!sec.querySelector('[data-f="anima_ref"]').checked) fold.style.display = "none";
+    let r;
+    try { r = await api("/images/face-ref"); } catch (e) { return; }
+    if (r.installed) fold.style.display = "";
+    const note = sec.querySelector("#faceRefNote");
+    if (note && !r.installed && fold.style.display !== "none") note.textContent = r.up ? " ComfyUI does not have the add-on or its file right now, so pictures are drawn as before." : " ComfyUI isn't running, so the add-on can't be checked right now.";
+  })();
   const vla = q(".vloraadd");
   if (vla) vla.onclick = () => addLoraTo(q('[data-f="video_loras"]'), q(".vlorapick").value, q(".vlorast").value);
   const vnla = ad && ad.querySelector(".vnloraadd");
@@ -1147,7 +1244,7 @@ function bindVideoSettings(cfg) {
 function collectVideoSettings(cfg) {
   const p = comfyProv(cfg);
   if (!p) return;
-  document.querySelectorAll("#vidSecEvery [data-f], #vidSecAdult [data-f]").forEach((inp) => { p[inp.dataset.f] = inp.type === "checkbox" ? inp.checked : inp.value; });
+  document.querySelectorAll("#faceRefSec [data-f], #vidSecEvery [data-f], #vidSecAdult [data-f]").forEach((inp) => { p[inp.dataset.f] = inp.type === "checkbox" ? inp.checked : inp.value; });
 }
 
 function imgProvCard(p, i) {
